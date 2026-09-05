@@ -266,7 +266,7 @@ body[data-view="menu"].shown { opacity: 1; }
  * (and Control Centre and Ask, see .cc-card and .ask-input/.ask-log)
  * feeling unresponsive under Wayfire specifically, where
  * neth-compositor-blur is always set (see bridge.c). */
-html.neth-gpu:not(.neth-compositor-blur) #menu {
+html.neth-gpu:not(.neth-compositor-blur):not(.reduced-transparency) #menu {
   -webkit-backdrop-filter: blur(30px) saturate(180%) brightness(1.06);
   backdrop-filter: blur(30px) saturate(180%) brightness(1.06);
 }
@@ -358,7 +358,7 @@ body[data-view="menu"].shown #menu { transform: none; }
 
 /* The wallpaper is a surface we draw, so it can be a gradient that the glass
    above it has something to refract, without shipping a photo. */
-body[data-view="desktop"] {
+body[data-view="wallpaper"] {
   padding: 0;
   background:
     radial-gradient(1200px 800px at 12% 8%,  #cfe0ff 0%, transparent 60%),
@@ -367,7 +367,7 @@ body[data-view="desktop"] {
     linear-gradient(160deg, #eef2f8 0%, #e6ebf4 55%, #dfe6f0 100%);
 }
 @media (prefers-color-scheme: dark) {
-  body[data-view="desktop"]:not([data-wallpaper]) {
+  body[data-view="wallpaper"]:not([data-wallpaper]) {
     background:
       radial-gradient(1200px 800px at 12% 8%,  #1b2a4a 0%, transparent 60%),
       radial-gradient(900px 700px at 88% 22%, #2a1f45 0%, transparent 55%),
@@ -389,26 +389,26 @@ body[data-view="desktop"] {
  * Set by the shell from the stored setting; the default above still applies
  * when no wallpaper has been chosen.
  */
-body[data-view="desktop"][data-wallpaper="dawn"] {
+body[data-view="wallpaper"][data-wallpaper="dawn"] {
   background:
     radial-gradient(1200px 800px at 12% 8%,  #cfe0ff 0%, transparent 60%),
     radial-gradient(900px 700px at 88% 22%, #e9d9ff 0%, transparent 55%),
     radial-gradient(1000px 900px at 60% 96%, #d6f0e6 0%, transparent 60%),
     linear-gradient(160deg, #eef2f8 0%, #e6ebf4 55%, #dfe6f0 100%);
 }
-body[data-view="desktop"][data-wallpaper="slate"] {
+body[data-view="wallpaper"][data-wallpaper="slate"] {
   background:
     radial-gradient(1100px 780px at 18% 12%, #d4dae6 0%, transparent 58%),
     radial-gradient(950px 700px at 84% 30%, #c8d2e2 0%, transparent 55%),
     linear-gradient(155deg, #eceff5 0%, #e0e5ee 60%, #d5dbe6 100%);
 }
-body[data-view="desktop"][data-wallpaper="meadow"] {
+body[data-view="wallpaper"][data-wallpaper="meadow"] {
   background:
     radial-gradient(1150px 820px at 10% 88%, #d8efd9 0%, transparent 60%),
     radial-gradient(900px 700px at 82% 12%, #e6f2d4 0%, transparent 55%),
     linear-gradient(165deg, #f0f5ec 0%, #e4eee0 55%, #dbe8d8 100%);
 }
-body[data-view="desktop"][data-wallpaper="dusk"] {
+body[data-view="wallpaper"][data-wallpaper="dusk"] {
   background:
     radial-gradient(1200px 820px at 16% 14%, #e6d6e8 0%, transparent 58%),
     radial-gradient(900px 700px at 86% 78%, #d8d2ee 0%, transparent 55%),
@@ -416,26 +416,26 @@ body[data-view="desktop"][data-wallpaper="dusk"] {
 }
 
 @media (prefers-color-scheme: dark) {
-  body[data-view="desktop"][data-wallpaper="dawn"] {
+  :root:not([data-theme="light"]) body[data-view="wallpaper"][data-wallpaper="dawn"] {
     background:
       radial-gradient(1200px 800px at 12% 8%,  #1b2a4a 0%, transparent 60%),
       radial-gradient(900px 700px at 88% 22%, #2a1f45 0%, transparent 55%),
       radial-gradient(1000px 900px at 60% 96%, #102b26 0%, transparent 60%),
       linear-gradient(160deg, #0e1218 0%, #121722 55%, #0d1016 100%);
   }
-  body[data-view="desktop"][data-wallpaper="slate"] {
+  :root:not([data-theme="light"]) body[data-view="wallpaper"][data-wallpaper="slate"] {
     background:
       radial-gradient(1100px 780px at 18% 12%, #232a36 0%, transparent 58%),
       radial-gradient(950px 700px at 84% 30%, #1c222e 0%, transparent 55%),
       linear-gradient(155deg, #14181f 0%, #11151c 60%, #0e1116 100%);
   }
-  body[data-view="desktop"][data-wallpaper="meadow"] {
+  :root:not([data-theme="light"]) body[data-view="wallpaper"][data-wallpaper="meadow"] {
     background:
       radial-gradient(1150px 820px at 10% 88%, #16301f 0%, transparent 60%),
       radial-gradient(900px 700px at 82% 12%, #1e3320 0%, transparent 55%),
       linear-gradient(165deg, #0f1512 0%, #101811 55%, #0d1310 100%);
   }
-  body[data-view="desktop"][data-wallpaper="dusk"] {
+  :root:not([data-theme="light"]) body[data-view="wallpaper"][data-wallpaper="dusk"] {
     background:
       radial-gradient(1200px 820px at 16% 14%, #2b2140 0%, transparent 58%),
       radial-gradient(900px 700px at 86% 78%, #241f3c 0%, transparent 55%),
@@ -583,8 +583,8 @@ body[data-view="desktop"][data-wallpaper="dusk"] {
  * different reason: closing a window left the old title painted under the new
  * one, so "Settings" and "foot" appeared on top of each other as "footings".
  * Verified by screenshotting a close on the running machine. */
-html.neth-gpu:not(.neth-compositor-blur) #panel,
-html.neth-gpu:not(.neth-compositor-blur) #dock {
+html.neth-gpu:not(.neth-compositor-blur):not(.reduced-transparency) #panel,
+html.neth-gpu:not(.neth-compositor-blur):not(.reduced-transparency) #dock {
   -webkit-backdrop-filter: blur(16px) saturate(170%);
   backdrop-filter: blur(16px) saturate(170%);
 }
@@ -724,7 +724,7 @@ body[data-view="menu"]:not(.shown) #menu { display: none; }
  * own comment on backdrop-filter, and confirmed live as the specific cause
  * of Control Centre feeling unresponsive while every other panel/menu
  * surface -- already gated this way -- did not. */
-html.neth-gpu:not(.neth-compositor-blur) .cc-card {
+html.neth-gpu:not(.neth-compositor-blur):not(.reduced-transparency) .cc-card {
   -webkit-backdrop-filter: blur(30px) saturate(180%);
   backdrop-filter: blur(30px) saturate(180%);
 }
@@ -820,7 +820,7 @@ body[data-view="menu"].switching #switcher { display: block; }
 
 #switcher-sky {
   position: absolute; inset: 0;
-  background: rgba(28, 32, 38, 0.28);
+  background: rgba(28, 32, 38, 0.08);
   opacity: 0;
   transition: opacity var(--slow);
 }
@@ -955,8 +955,8 @@ body[data-view="menu"].switching #switcher-world { opacity: 1; transform: none; 
  * comment for why doubling a compositor's own blur is not just wasted, it
  * is actively worse, and confirmed live as one of the causes of this shell
  * feeling unresponsive under Wayfire. */
-html.neth-gpu:not(.neth-compositor-blur) .ask-input,
-html.neth-gpu:not(.neth-compositor-blur) .ask-log {
+html.neth-gpu:not(.neth-compositor-blur):not(.reduced-transparency) .ask-input,
+html.neth-gpu:not(.neth-compositor-blur):not(.reduced-transparency) .ask-log {
   -webkit-backdrop-filter: blur(30px) saturate(180%);
   backdrop-filter: blur(30px) saturate(180%);
 }
@@ -1185,10 +1185,60 @@ body[data-view="dock"].metal .dock-item.running::after {
 .sw-name { font-size: 14px; }
 .sw-icon { font-family: var(--sans); }
 body[data-view="desktop"] .widget { opacity: 1; }
-:root[data-theme="dark"] body[data-view="desktop"][data-wallpaper="slate"] {
+:root[data-theme="dark"] body[data-view="wallpaper"][data-wallpaper="slate"] {
   background: radial-gradient(ellipse at 25% 0%, #303a46, transparent 65%),
               linear-gradient(145deg, #171c23, #0c1015);
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* Wallpaper is a separate background layer: widgets have a real backdrop. */
+body[data-view="desktop"] { background: transparent; }
+#switcher-world {
+  position: relative; left: auto; top: auto; width: max-content;
+  max-width: calc(100vw - 96px); height: auto; margin: auto;
+  display: flex; gap: 16px; padding: 24px; overflow-x: auto;
+  perspective: none; transform: none; align-items: stretch;
+}
+.sw-unit {
+  position: relative; top: auto; left: auto; width: 184px; height: auto;
+  flex: 0 0 184px; margin: 0; transform: none; opacity: 1;
+}
+.sw-card { width: 100%; min-height: 168px; height: auto; padding: 24px 16px; box-sizing: border-box; }
+.sw-unit.sel .sw-card { outline: 2px solid var(--accent); outline-offset: 4px; }
+.sw-unit:hover .sw-card { background: var(--glass-strong); }
+.sw-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-app { margin-top: 8px; color: var(--ink-soft); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+body[data-view="menu"].switching #switcher { display: grid; place-items: center; }
+.sw-unit.sel .sw-card { box-shadow: inset 0 1px 0 var(--rim), var(--shadow); }
+
+:root[data-theme="dark"] body[data-view="wallpaper"][data-wallpaper="dawn"] {
+    background:
+      radial-gradient(1200px 800px at 12% 8%,  #1b2a4a 0%, transparent 60%),
+      radial-gradient(900px 700px at 88% 22%, #2a1f45 0%, transparent 55%),
+      radial-gradient(1000px 900px at 60% 96%, #102b26 0%, transparent 60%),
+      linear-gradient(160deg, #0e1218 0%, #121722 55%, #0d1016 100%);
+}
+
+:root[data-theme="dark"] body[data-view="wallpaper"][data-wallpaper="slate"] {
+    background:
+      radial-gradient(1100px 780px at 18% 12%, #232a36 0%, transparent 58%),
+      radial-gradient(950px 700px at 84% 30%, #1c222e 0%, transparent 55%),
+      linear-gradient(155deg, #14181f 0%, #11151c 60%, #0e1116 100%);
+}
+
+:root[data-theme="dark"] body[data-view="wallpaper"][data-wallpaper="meadow"] {
+    background:
+      radial-gradient(1150px 820px at 10% 88%, #16301f 0%, transparent 60%),
+      radial-gradient(900px 700px at 82% 12%, #1e3320 0%, transparent 55%),
+      linear-gradient(165deg, #0f1512 0%, #101811 55%, #0d1310 100%);
+}
+
+:root[data-theme="dark"] body[data-view="wallpaper"][data-wallpaper="dusk"] {
+    background:
+      radial-gradient(1200px 820px at 16% 14%, #2b2140 0%, transparent 58%),
+      radial-gradient(900px 700px at 86% 78%, #241f3c 0%, transparent 55%),
+      linear-gradient(160deg, #14111c 0%, #121019 55%, #0e0c14 100%);
 }

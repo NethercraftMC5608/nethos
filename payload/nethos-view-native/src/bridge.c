@@ -172,13 +172,12 @@ void nethos_bridge_install(struct nethos_surface *s) {
         "  surface: %s,\n"
         "};\n"
         "if (%s) { document.documentElement.classList.add('neth-gpu'); }\n"
-        "var _t = %s; if (_t) { document.documentElement.classList.add('neth-' + _t); }\n"
-        /* Wayfire-only scope: this always runs under Wayfire, which always
-         * blurs behind a transparent layer surface itself -- unlike the
-         * Python version, which also has to run under sway/Hyprland and
-         * checks the environment for which one is live. */
-        "document.documentElement.classList.add('neth-compositor-blur');\n",
-        name_js, getenv("NETHOS_GPU") ? "true" : "false", theme_js);
+        "var _t = %s; if (_t) { document.documentElement.classList.add('neth-' + _t); document.documentElement.dataset.theme = _t; }\n"
+        "if (%s) document.documentElement.classList.add('neth-compositor-blur');\n"
+        "if (%s) document.documentElement.classList.add('neth-window');\n",
+        name_js, g_strcmp0(getenv("NETHOS_GPU"), "1") == 0 ? "true" : "false", theme_js,
+        g_strcmp0(getenv("NETHOS_COMPOSITOR_GLASS"), "1") == 0 ? "true" : "false",
+        s->spec.role == ROLE_WINDOW ? "true" : "false");
 
     WebKitUserScript *script = webkit_user_script_new(
         shim, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,

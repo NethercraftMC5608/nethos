@@ -1,7 +1,7 @@
 /*!
  * nethos.css — the NETHOS design system.
  *
- * A calm, light, glass interface aimed at people arriving from macOS. The
+ * Shared smoked and clear glass materials for the NETHOS desktop. The
  * rules it follows:
  *
  *   soft over sharp      generous radii, nothing with a hard 90° corner
@@ -15,8 +15,8 @@
  * the compositor does that for us. It is the *edge*: a bright hairline where
  * light catches the rim, a dark inner line giving the pane thickness, and a
  * soft specular sheen down the top third. Those three layers are what `.glass`
- * is, and they cost nothing to draw. Refraction via SVG displacement is
- * layered on top only where the engine supports it.
+ * provides. Actual backdrop refraction is supplied by nethos-glass in Wayfire;
+ * client content is never displaced to imitate it.
  */
 
 /* The one system face, everywhere: body, headers, bold, all of it. Nunito
@@ -251,25 +251,14 @@ body { padding: 22px 24px; }
    The CSS blur below is only for compositors that cannot -- and even then only
    with hardware behind it. Never both: doubling the blur is the per-frame CPU
    cost we removed, paid twice for a worse result. */
-/* Deliberately NOT disabling CSS blur under a blurring compositor any more.
-   That assumed the compositor's blur was working, and when it was not -- a VM
-   with no usable GPU, where blur is a GPU effect -- the result was no blur at
-   all from either side. Doubling it on a 38px strip and a small pill costs
-   little; having none costs the entire look. Correctness over theory. */
-
-/* Under sway, which cannot blur, the stylesheet has to -- and the cost is
-   entirely area. The panel is a 54px strip and the dock is a small pill, so
-   blurring those is cheap even on llvmpipe. The launcher is full screen, and
-   blurring it is what made the shell unusable, so it keeps translucency and
-   the glass edge instead.
-   Radius is smaller than the 24px used before: past about 16px the visual
-   difference is slight and the cost is not. */
-html.neth-gpu:not(.neth-compositor-blur) .glass-blur.blur-cheap {
+/* Only a capable non-blurring host uses the CSS fallback. On Wayfire the
+   actual scene is sampled by the compositor, once, outside WebKit. */
+html.neth-gpu:not(.neth-compositor-blur):not(.reduced-transparency) .glass-blur.blur-cheap {
   -webkit-backdrop-filter: blur(16px) saturate(170%);
   backdrop-filter: blur(16px) saturate(170%);
 }
 
-html.neth-gpu:not(.neth-compositor-blur) .glass-blur {
+html.neth-gpu:not(.neth-compositor-blur):not(.reduced-transparency) .glass-blur {
   -webkit-backdrop-filter: blur(24px) saturate(180%);
   backdrop-filter: blur(24px) saturate(180%);
 }
@@ -985,4 +974,21 @@ html.no-motion .spin { animation-duration: 2s; }
     --cc-fill: rgba(22,27,34,.96); --menu-fill: var(--cc-fill);
     --ink: #f1f4f8; --ink-soft: #bdc6d1; --ink-faint: #9aa7b5;
   }
+}
+
+/* Managed application surfaces share the material of their window frame. */
+html.neth-window { background: var(--glass); color: var(--ink); }
+html.reduced-transparency {
+  --glass: #f4f7fa; --glass-strong: #f4f7fa; --glass-dim: #e7ecf2;
+  --cc-fill: #f4f7fa; --menu-fill: #f4f7fa;
+}
+html[data-theme="dark"].reduced-transparency {
+  --glass: #161b22; --glass-strong: #161b22; --glass-dim: #202731;
+  --cc-fill: #161b22; --menu-fill: #161b22;
+}
+html.no-motion *, html.no-motion *::before, html.no-motion *::after {
+  animation: none !important; transition: none !important; scroll-behavior: auto !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
 }

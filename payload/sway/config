@@ -10,14 +10,14 @@ set $term foot
 
 ### appearance -------------------------------------------------------------
 
-font pango:Nunito 10
+font pango:Space Grotesk 10
 
 # colours match shell/style.css so borders and panel read as one system
 #                       border   bg       text     indicator child_border
-client.focused          #3ddbd9  #131822  #d7dee9  #3ddbd9   #3ddbd9
-client.focused_inactive #232b3b  #131822  #7c8798  #232b3b   #232b3b
-client.unfocused        #232b3b  #0b0e14  #7c8798  #232b3b   #232b3b
-client.urgent           #f7a072  #131822  #f7a072  #f7a072   #f7a072
+client.focused          #3b6ea5  #161b22  #f1f4f8  #3b6ea5   #3b6ea5
+client.focused_inactive #232b3b  #161b22  #9aa7b5  #232b3b   #232b3b
+client.unfocused        #232b3b  #0b0e14  #9aa7b5  #232b3b   #232b3b
+client.urgent           #f7a072  #161b22  #f7a072  #f7a072   #f7a072
 
 default_border pixel 2
 gaps inner 6

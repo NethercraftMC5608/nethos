@@ -87,29 +87,46 @@
     });
   }
 
-  function connect() {
-    if (stream || typeof EventSource === "undefined") return;
-    stream = new EventSource(API + "/api/events");
-    stream.onmessage = (ev) => {
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch { return; }
-
-      if (msg.type === "reload") {
-        // Any change to the shell, the SDK or an app bumps the generation.
-        // Apps that opt out of autoReload still get the event and can decide.
-        if (currentGeneration !== null && msg.generation !== currentGeneration
-            && config.autoReload) {
-          global.location.reload();
-          return;
-        }
-        currentGeneration = msg.generation;
+  function receive(msg) {
+    if (!msg || typeof msg !== "object") return;
+    if (msg.type === "reload") {
+      if (currentGeneration !== null && msg.generation !== currentGeneration && config.autoReload) {
+        global.location.reload();
+        return;
       }
-      emit(msg.type, msg.data);
-      emit("*", msg);
-    };
-    // EventSource reconnects on its own; a dropped stream means nethosd is
-    // restarting, which is exactly when we want to come back and re-sync.
-    stream.onerror = () => { emit("disconnected", {}); };
+    }
+    if (msg.generation != null) currentGeneration = msg.generation;
+    if (msg.type === "settings") applyAppearance(msg.data);
+    emit(msg.type, msg.data);
+    emit("*", msg);
+  }
+
+  function connect() {
+    if (stream) return;
+    if (global.nethosHost || global.top !== global.self) {
+      stream = true; // Host owns the single SSE connection for all surfaces.
+      const previous = global.nethosEvent;
+      global.nethosEvent = msg => { if (previous) previous(msg); receive(msg); };
+      return;
+    }
+    if (typeof EventSource === "undefined") return;
+    stream = new EventSource(API + "/api/events");
+    stream.onmessage = ev => { try { receive(JSON.parse(ev.data)); } catch {} };
+    stream.onerror = () => emit("disconnected", {});
+  }
+
+  function applyAppearance(settings) {
+    if (!settings) return;
+    const root = document.documentElement;
+    const theme = settings.effective_theme || settings.theme || "dark";
+    const dark = theme !== "light" && (theme !== "auto" ||
+      global.matchMedia("(prefers-color-scheme: dark)").matches);
+    root.dataset.theme = dark ? "dark" : "light";
+    root.classList.remove("neth-dark", "neth-light");
+    root.classList.toggle("no-motion", settings.animations === false);
+    root.classList.toggle("reduced-transparency", settings.reduced_transparency === true);
+    if (settings.accent) root.style.setProperty("--accent", settings.accent);
+    if (settings.font_scale) root.style.fontSize = settings.font_scale + "%";
   }
 
   const config = { autoReload: true };
@@ -118,6 +135,7 @@
 
   const nethos = {
     version: "2.0.0",
+    applyAppearance,
     appId: APP_ID,
     Error: NethosError,
 
@@ -284,6 +302,8 @@
     },
   };
 
+  connect();
+  get("/api/settings").then(r => applyAppearance(r.settings)).catch(() => {});
   global.nethos = nethos;
   global.NETHOS = nethos;   // alias, both read naturally at a call site
 })(window);

@@ -110,6 +110,16 @@ fi
 # --------------------------------------------------------------------------
 log "Installing the shell, SDK and apps"
 # --------------------------------------------------------------------------
+# Wayfire source config and optional matching-CPU compositor module.
+install -d "$PREFIX/wayfire/metadata"
+install -m 0644 "$PAYLOAD/wayfire/wayfire.ini" "$PREFIX/wayfire/wayfire.ini"
+install -m 0644 "$PAYLOAD/wayfire/glass/nethos-glass.xml" "$PREFIX/wayfire/metadata/"
+GLASS_BUILD="$PAYLOAD/wayfire/built/$(uname -m)"
+if [ -f "$GLASS_BUILD/libnethos-glass.so" ]; then
+    install -d /usr/lib/nethos/wayfire
+    install -m 0755 "$GLASS_BUILD/libnethos-glass.so" /usr/lib/nethos/wayfire/
+fi
+
 install -d "$PREFIX/shell" "$PREFIX/lib" "$PREFIX/apps"
 install -m 0644 "$PAYLOAD"/shell/* "$PREFIX/shell/"
 # Files only. lib/ holds the fonts directory as well now, and `install` on a
@@ -463,7 +473,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$(tty)" = "/dev/tty1" ]; then
 
     # Without a GPU, wlroots refuses a software renderer unless told to.
     export WLR_RENDERER_ALLOW_SOFTWARE=1
-    export WEBKIT_DISABLE_COMPOSITING_MODE=1
+    unset WEBKIT_DISABLE_COMPOSITING_MODE
     # LIBGL_ALWAYS_SOFTWARE is not forced: Mesa refuses it once the compositor
     # has opened a real DRM node ("Not allowed to force software rendering when
     # API explicitly selects a hardware device"), EGL fails, and the compositor
@@ -489,7 +499,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] && [ "$(tty)" = "/dev/tty1" ]; then
         wayfire)
             if command -v wayfire >/dev/null; then
                 export XDG_CURRENT_DESKTOP=wayfire
-                exec wayfire
+                exec nethos-wayfire
             fi
             ;;
         hyprland)

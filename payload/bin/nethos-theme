@@ -1,44 +1,32 @@
-#!/bin/sh
-# Light or dark.
-#
-#   nethos-theme            what is set now
-#   nethos-theme dark
-#   nethos-theme light
-#   nethos-theme auto       follow the system preference
-#
-# Dark is a separate set of values, not an inversion: shadows deepen rather
-# than lighten, and the rim that catches light on a pale surface becomes a
-# darker line on a deep one. See docs/DESIGN.md, rule 10.
-set -eu
-CONF="$HOME/.config/nethos"
+#!/usr/bin/env python3
+"""Read or change the desktop appearance without reloading open applications."""
+import json
+import os
+from pathlib import Path
+import sys
+import urllib.request
 
-case "${1:-}" in
-    "")
-        current=$(cat "$CONF/theme" 2>/dev/null || true)
-        printf '%s\n' "${current:-auto}"
-        exit 0
-        ;;
-    light|dark)
-        mkdir -p "$CONF"
-        printf '%s\n' "$1" > "$CONF/theme"
-        ;;
-    auto)
-        mkdir -p "$CONF"
-        : > "$CONF/theme"
-        ;;
-    -h|--help)
-        sed -n '2,12p' "$0" | sed 's/^# \?//'
-        exit 0
-        ;;
-    *)
-        echo "usage: nethos-theme [light|dark|auto]" >&2
-        exit 2
-        ;;
-esac
-
-# The class is injected when a surface loads, so the shell has to come back up
-# for the change to land. nethos-reload does that without ending the session.
-if command -v nethos-reload >/dev/null 2>&1; then
-    nethos-reload >/dev/null 2>&1 || true
-fi
-printf 'theme: %s\n' "$1"
+path = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'nethos/settings.json'
+try:
+    settings = json.loads(path.read_text())
+except (OSError, ValueError):
+    settings = {}
+if len(sys.argv) == 1:
+    print(settings.get('theme', 'dark'))
+    sys.exit(0)
+theme = sys.argv[1]
+if theme not in ('light', 'dark', 'auto'):
+    sys.exit('usage: nethos-theme [light|dark|auto]')
+try:
+    request = urllib.request.Request('http://127.0.0.1:7777/api/settings',
+        data=json.dumps({'theme': theme}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    with urllib.request.urlopen(request, timeout=3) as response:
+        response.read()
+except OSError:
+    settings['theme'] = theme
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(settings, indent=2))
+    temporary.replace(path)
+    (path.parent / 'theme').write_text(theme + '\n')
+print('theme: ' + theme)

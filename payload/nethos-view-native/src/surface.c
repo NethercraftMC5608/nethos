@@ -36,11 +36,11 @@ static gboolean suppress_context_menu(void) { return TRUE; }
  * rather than static in either file. */
 const char *nethos_read_theme(char *buf, size_t n) {
     const char *home = getenv("HOME");
-    if (!home) return "";
+    if (!home) return "dark";
     char path[1024];
     snprintf(path, sizeof(path), "%s/.config/nethos/theme", home);
     FILE *f = fopen(path, "r");
-    if (!f) return "";
+    if (!f) return "dark";
     size_t len = fread(buf, 1, n - 1, f);
     fclose(f);
     buf[len] = '\0';

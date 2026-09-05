@@ -40,7 +40,8 @@ grep -q 'nethos\.recovery=1' /proc/cmdline 2>/dev/null && RECOVERY=1
 # from the binary being missing unless someone thought to check `ps`.
 systemctl --user import-environment \
     WAYLAND_DISPLAY WAYFIRE_SOCKET SWAYSOCK HYPRLAND_INSTANCE_SIGNATURE \
-    XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
+    XDG_CURRENT_DESKTOP XDG_SESSION_TYPE NETHOS_GPU NETHOS_COMPOSITOR_GLASS \
+    WAYFIRE_CONFIG_FILE 2>/dev/null || true
 
 # Wayfire's own autostart already starts nethosd (nethosd = systemctl
 # --user start nethosd in wayfire.ini), often before this script's own
@@ -324,6 +325,7 @@ fi
 
 exec "$NETHOS_VIEW_BIN" \
     "url=$API/splash.html,role=overlay,name=splash,exclusive=0" \
+    "url=$API/wallpaper.html,role=widget,name=wallpaper,layer=background,anchor=all,exclusive=-1" \
     "url=$API/desktop.html,role=widget,name=desktop,layer=bottom,anchor=top,exclusive=-1" \
     "url=$API/panel.html,role=panel,name=panel,height=360,anchor=top,exclusive=46,webgl=1" \
     "url=$API/dock.html,role=dock,name=dock,height=110,anchor=bottom,exclusive=0,webgl=1" \

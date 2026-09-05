@@ -15,7 +15,7 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-OUT="$ROOT/../bin/nethos-view-native"
+OUT="${NETHOS_VIEW_OUT:-$ROOT/../bin/nethos-view-native}"
 
 # gtk4-layer-shell-0 first: its own docs (linking.md) ask to be linked before
 # libwayland when linking against libwayland directly, which this process no

@@ -925,6 +925,8 @@ SETTINGS_SCHEMA = [
     {"key": "theme", "label": "Theme", "group": "Appearance",
      "type": "choice", "options": ["auto", "light", "dark"], "default": "dark",
      "help": "Auto follows the system appearance."},
+    {"key": "reduced_transparency", "label": "Reduce transparency", "group": "Appearance",
+     "type": "bool", "default": False, "help": "Solid reading surfaces and no backdrop effects. Restart the session to change compositor effects."},
     {"key": "accent", "label": "Accent", "group": "Appearance",
      "type": "colour", "default": "#3b6ea5",
      "help": "Used for focus rings and the active item."},
@@ -1013,6 +1015,14 @@ def read_settings():
         pass
     except (ValueError, OSError) as exc:
         diag("settings", "unreadable, using defaults: %s" % exc)
+    out["effective_theme"] = out.get("theme", "dark")
+    if out["effective_theme"] == "auto":
+        try:
+            out["effective_theme"] = subprocess.check_output(
+                ["nethos-compositor-config", "--theme"], text=True,
+                stderr=subprocess.DEVNULL, timeout=2).strip()
+        except (OSError, subprocess.SubprocessError):
+            out["effective_theme"] = "dark"
     return out
 
 
@@ -1041,10 +1051,22 @@ def write_settings(changes):
         else:
             current[key] = str(value)[:64]
     os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+    current.pop("effective_theme", None)
     tmp = SETTINGS_PATH + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(current, fh, indent=2, sort_keys=True)
     os.replace(tmp, SETTINGS_PATH)
+    theme_path = os.path.join(os.path.dirname(SETTINGS_PATH), "theme")
+    with open(theme_path + ".tmp", "w") as fh:
+        fh.write(read_settings()["effective_theme"] + "\n")
+    os.replace(theme_path + ".tmp", theme_path)
+    if os.environ.get("WAYFIRE_CONFIG_FILE"):
+        try:
+            subprocess.run(["nethos-compositor-config", "--refresh"], timeout=3, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except (OSError, subprocess.SubprocessError) as exc:
+            diag("appearance", "window palette update failed: %s" % exc)
+    current = read_settings()
     EVENTS.publish("settings", current)
     return current
 

@@ -784,7 +784,7 @@ def install_npkg(root: str) -> None:
             fh.write('{\n  "repos": []\n}\n')
 
 
-def install_desktop(root: str, payload: str, username: str) -> None:
+def install_desktop(root: str, payload: str, username: str, arch: str) -> None:
     """Install the NETHOS shell onto the built root.
 
     The shell itself is distribution-agnostic -- HTML, CSS, a Python daemon and
@@ -845,6 +845,20 @@ def install_desktop(root: str, payload: str, username: str) -> None:
 
     # the user's session
     home = os.path.join(root, "home", username)
+
+    # Ship both the base config and metadata. A plugin artifact must match the
+    # target CPU, not the machine on which this root filesystem is assembled.
+    wf_dest = os.path.join(root, "usr/share/nethos/wayfire")
+    os.makedirs(os.path.join(wf_dest, "metadata"), exist_ok=True)
+    shutil.copy2(os.path.join(payload, "wayfire/glass/nethos-glass.xml"),
+                 os.path.join(wf_dest, "metadata/nethos-glass.xml"))
+    shutil.copy2(os.path.join(payload, "wayfire/wayfire.ini"), wf_dest)
+    machine = {"amd64": "x86_64", "arm64": "aarch64"}.get(arch, arch)
+    glass = os.path.join(payload, "wayfire/built", machine, "libnethos-glass.so")
+    if os.path.isfile(glass):
+        dest = os.path.join(root, "usr/lib/nethos/wayfire")
+        os.makedirs(dest, exist_ok=True)
+        shutil.copy2(glass, dest)
 
     # Wayfire reads ~/.config/wayfire.ini.
     _wf_src = os.path.join(payload, "wayfire", "wayfire.ini")
@@ -930,7 +944,7 @@ def install_desktop(root: str, payload: str, username: str) -> None:
             "    # the shell is identical either way -- Hyprland just blurs\n"
             "    # behind it and rounds the corners.\n"
             "    if command -v wayfire >/dev/null 2>&1; then\n"
-            "        wayfire >~/.cache/wayfire.log 2>&1 && exit\n"
+            "        nethos-wayfire >~/.cache/wayfire.log 2>&1 && exit\n"
             "        echo '--- wayfire failed; falling back ---' "
             ">>~/.cache/wayfire.log\n"
             "    fi\n"
@@ -1641,7 +1655,7 @@ def _finish_root(root: str, username: str, password: str,
             os.path.abspath(__file__))), "payload")
         if os.path.isdir(payload):
             say("\n== installing the NETHOS desktop ==")
-            install_desktop(root, payload, username)
+            install_desktop(root, payload, username, arch)
             for unit in ("seatd.service", "NetworkManager.service",
                          "nethos-growroot.service"):
                 try:

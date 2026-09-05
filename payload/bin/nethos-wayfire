@@ -1,0 +1,20 @@
+#!/bin/sh
+# One capability decision before Wayfire and every child process starts.
+set -eu
+eval "$(nethos-gpu-env)"
+# Wayfire 0.9 requires a DRM-backed GLES renderer, even with WLR_RENDERER=pixman.
+# The existing sway session is the compatible software fallback.
+if [ "$NETHOS_GPU" != 1 ]; then
+    export NETHOS_COMPOSITOR_GLASS=0
+    exec sway "$@"
+fi
+export WAYFIRE_PLUGIN_PATH="/usr/lib/nethos/wayfire${WAYFIRE_PLUGIN_PATH:+:$WAYFIRE_PLUGIN_PATH}"
+export WAYFIRE_PLUGIN_XML_PATH="/usr/share/nethos/wayfire/metadata${WAYFIRE_PLUGIN_XML_PATH:+:$WAYFIRE_PLUGIN_XML_PATH}"
+WAYFIRE_CONFIG_FILE=$(nethos-compositor-config)
+export WAYFIRE_CONFIG_FILE
+NETHOS_COMPOSITOR_GLASS=0
+case "$(cat "$(dirname "$WAYFIRE_CONFIG_FILE")/glass-mode")" in
+    nethos-glass|blur) NETHOS_COMPOSITOR_GLASS=1 ;;
+esac
+export NETHOS_COMPOSITOR_GLASS
+exec wayfire -c "$WAYFIRE_CONFIG_FILE" "$@"

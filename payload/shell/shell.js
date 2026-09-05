@@ -1162,43 +1162,28 @@ function initMenu() {
 
   const switcherLabel = (w) => w.title || w.app_id || "Window";
 
-  /* Position (and re-position, on every step) each card by its offset from
-     the selected one -- a small 3D carousel, computed here rather than in
-     CSS with calc()/abs() so it behaves the same regardless of what CSS math
-     functions this WebKit build happens to support. */
   function switcherLayout() {
     switcherUnits.forEach((unit, i) => {
-      const offset = i - switcherSelected;
-      const dist = Math.abs(offset);
-      const tx = offset * 210;
-      const tz = -Math.min(240, dist * 70);
-      const scale = i === switcherSelected ? 1.08 : Math.max(0.72, 1 - dist * 0.12);
-      const ty = i === switcherSelected ? -14 : 0;
-      unit.style.transform =
-        `translate(-50%, -50%) translate3d(${tx}px, ${ty}px, ${tz}px) scale(${scale})`;
-      unit.style.opacity = Math.max(0.35, 1 - dist * 0.28);
-      unit.classList.toggle("sel", i === switcherSelected);
+      const selected = i === switcherSelected;
+      unit.classList.toggle("sel", selected);
+      unit.setAttribute("aria-selected", String(selected));
     });
+    switcherUnits[switcherSelected]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 
   async function switcherBuild() {
     switcherWorld.replaceChildren();
     switcherUnits = switcherWindows.map((w) => {
       const unit = el("div", "sw-unit");
+      unit.setAttribute("role", "option");
+      unit.title = switcherLabel(w);
 
       const card = el("div", "sw-card glass");
       card.append(el("div", "sw-icon"));   // filled in below, once icons resolve
       card.append(el("div", "sw-name", switcherLabel(w)));
+      card.append(el("div", "sw-app", w.app_id || w.nethos_app || "Application"));
       unit.append(card);
 
-      // Hover previews (moves the selection, same as the arrow keys) and a
-      // click confirms it -- the same two-step mouse gesture the keyboard
-      // already gets, rather than a click being the only thing the mouse can
-      // do at all.
-      unit.addEventListener("mouseenter", () => {
-        const i = switcherUnits.indexOf(unit);
-        if (i !== switcherSelected) post("/api/switcher", { action: "select", index: i });
-      });
       unit.addEventListener("click", () =>
         post("/api/switcher", { action: "close", activate: true, index: switcherUnits.indexOf(unit) }));
 
@@ -1211,6 +1196,7 @@ function initMenu() {
     switcherWindows.forEach(async (w, i) => {
       const unit = switcherUnits[i];
       const src = await appIcon(w.nethos_app);
+      if (!unit?.isConnected) return;
       unit.querySelector(".sw-icon").replaceWith(
         iconTile({ name: switcherLabel(w), icon_url: src && src.icon_url, icon: src && src.icon },
                  "sw-icon"));
@@ -1248,9 +1234,11 @@ function initMenu() {
   onEvent((msg) => {
     if (msg.type !== "switcher") return;
     if (!msg.data.open) { switcherHide(); return; }
+    const changed = JSON.stringify(switcherWindows) !== JSON.stringify(msg.data.windows || []);
     switcherWindows = msg.data.windows || [];
     switcherSelected = msg.data.selected || 0;
     if (!switcherOpen) switcherShow();
+    else if (changed) switcherBuild();
     else switcherLayout();
   });
 
@@ -1388,8 +1376,7 @@ function initDesktop() {
      five widgets cost one web process instead of five.
      The list of shown widgets lives in /api/storage/shell.desktop as
      {"widgets":[{id,w,h}]}, the same pattern as the dock's shell.dock. With
-     no stored list (first run, or a wiped profile) every widget-mode app is
-     shown, which is what the desktop did before this existed. */
+     no stored list the desk starts empty; Add widget makes each choice explicit. */
   async function saveWidgets() {
     try {
       await put("/api/storage/shell.desktop", { data: widgetConfig });
@@ -1409,7 +1396,7 @@ function initDesktop() {
       const installed = new Set(widgetApps.map((a) => a.id));
       widgetConfig = { widgets: (cfg.widgets || []).filter((w) => installed.has(w.id)) };
     } else {
-      widgetConfig = { widgets: widgetApps.map((a) => ({ id: a.id })) };
+      widgetConfig = { widgets: [] };
     }
     render();
   }
@@ -1436,6 +1423,7 @@ function initDesktop() {
          widget manager, not to whatever the app would have done with it. */
       frame.addEventListener("load", () => {
         try {
+          frame.contentWindow.nethos?.applyAppearance(window.nethosAppearance || {});
           const doc = frame.contentDocument;
           if (!doc) return;
           doc.addEventListener("contextmenu", (e) => {
@@ -1550,6 +1538,9 @@ window.nethosEvent = function (msg) {
       return;
     }
   }
+  document.querySelectorAll("iframe").forEach(frame => {
+    try { frame.contentWindow.nethosEvent?.(msg); } catch {}
+  });
   handlers.forEach((fn) => { try { fn(msg); } catch (e) { console.error(e); } });
 };
 
@@ -1846,13 +1837,20 @@ function applySettings(s) {
   // "auto" is resolved here rather than left to the stylesheet, because the
   // stylesheet's media query cannot see a stored preference of "dark" on a
   // host that reports light.
-  const dark = s.theme === "dark" ||
-    (s.theme === "auto" &&
+  const theme = s.effective_theme || s.theme || "dark";
+  const dark = theme === "dark" ||
+    (theme === "auto" &&
      window.matchMedia("(prefers-color-scheme: dark)").matches);
+  root.classList.remove("neth-dark", "neth-light");
   root.setAttribute("data-theme", dark ? "dark" : "light");
   if (s.accent) root.style.setProperty("--accent", s.accent);
   if (s.font_scale) root.style.fontSize = s.font_scale + "%";
   root.classList.toggle("no-motion", s.animations === false);
+  root.classList.toggle("reduced-transparency", s.reduced_transparency === true);
+  window.nethosAppearance = s;
+  document.querySelectorAll("iframe").forEach(f => {
+    try { f.contentWindow.nethos?.applyAppearance(s); } catch {}
+  });
   // The desktop surface paints the wallpaper; the others are transparent and
   // let the compositor blur it. Setting it on body rather than root because
   // the selectors key off body[data-view="desktop"].
@@ -1884,6 +1882,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   else if (view === "dock") initDock(settings);
   else if (view === "menu") initMenu();
   else if (view === "desktop") initDesktop();
+  else if (view === "wallpaper") window.nethosHost?.inputRect(0, 0, 0, 0);
 });
 
 /* ---------------------------------------------------------- diagnostics --

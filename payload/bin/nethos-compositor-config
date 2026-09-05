@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Generate a session config without modifying the user's Wayfire config."""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+def set_option(text, section, key, value):
+    section_re = re.compile(r'(?ms)^\[' + re.escape(section) + r'\][^\n]*\n(.*?)(?=^\[|\Z)')
+    match = section_re.search(text)
+    if not match:
+        return text + f'\n[{section}]\n{key} = {value}\n'
+    body = match.group(1)
+    # Consume continuation lines explicitly; plugin lists use backslashes.
+    lines = body.splitlines(keepends=True)
+    out, i, found = [], 0, False
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r'^' + re.escape(key) + r'\s*=', line):
+            while line.rstrip().endswith('\\') and i + 1 < len(lines):
+                i += 1
+                line = lines[i]
+            out.append(f'{key} = {value}\n')
+            found = True
+        else:
+            out.append(line)
+        i += 1
+    if not found:
+        out.append(f'{key} = {value}\n')
+    return text[:match.start(1)] + ''.join(out) + text[match.end(1):]
+
+
+def material(text, dark, reduced=False):
+    border = r'\#161B22CC' if dark else r'\#F4F7FAC7'
+    if reduced:
+        border = border[:-2] + 'FF'
+    ink = r'\#F1F4F8FF' if dark else r'\#222B36FF'
+    muted = r'\#BDC6D1FF' if dark else r'\#66717DFF'
+    for key in ('active_border', 'inactive_border', 'active_accent', 'inactive_accent'):
+        text = set_option(text, 'firedecor', key, border)
+    for key, value in [('active_title', ink), ('inactive_title', muted), ('corner_radius', '16')]:
+        text = set_option(text, 'firedecor', key, value)
+    return set_option(text, 'core', 'background_color', r'\#161B22FF' if dark else r'\#E0E5EEFF')
+
+
+def select_effect(text, gpu, available, reduced):
+    joined = text.replace('\\\n', ' ')
+    match = re.search(r'(?m)^plugins\s*=([^\n]*)', joined)
+    if not match:
+        raise ValueError('Wayfire configuration has no plugin list')
+    plugins = match.group(1).replace('\\\n', ' ').split()
+    plugins = [p for p in plugins if p not in ('blur', 'nethos-glass')]
+    effect = ('nethos-glass' if available else 'blur') if gpu and not reduced else None
+    if effect:
+        plugins.append(effect)
+    return set_option(text, 'core', 'plugins', ' '.join(plugins)), effect
+
+
+def resolved_theme(settings):
+    theme = settings.get('theme', 'dark')
+    if theme != 'auto':
+        return 'light' if theme == 'light' else 'dark'
+    try:
+        preference = subprocess.check_output(
+            ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme'],
+            text=True, stderr=subprocess.DEVNULL, timeout=1).strip().strip("'")
+        return 'light' if preference == 'prefer-light' else 'dark'
+    except (OSError, subprocess.SubprocessError):
+        return 'dark'
+
+
+def main():
+    config_home = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config')))
+    try:
+        settings = json.loads((config_home / 'nethos/settings.json').read_text())
+    except (OSError, ValueError):
+        settings = {}
+    if '--theme' in sys.argv:
+        print(resolved_theme(settings))
+        return
+    refresh = '--refresh' in sys.argv
+    runtime = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / 'nethos'
+    runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target = runtime / 'wayfire.ini'
+    if refresh:
+        # Only touch the config created by this launcher. Never hot-swap plugins.
+        if os.environ.get('WAYFIRE_CONFIG_FILE') != str(target) or not target.exists():
+            return
+        text = target.read_text()
+    else:
+        source = config_home / 'wayfire.ini'
+        if not source.exists():
+            source = Path('/usr/share/nethos/wayfire/wayfire.ini')
+        text = source.read_text()
+        plugin_dir = Path('/usr/lib/nethos/wayfire')
+        try:
+            version = subprocess.check_output(['wayfire', '--version'], text=True, stderr=subprocess.STDOUT, timeout=3)
+            available = bool(re.search(r'\b0\.9\.\d+\b', version)) and (plugin_dir / 'libnethos-glass.so').is_file()
+        except (OSError, subprocess.SubprocessError):
+            available = False
+        text, effect = select_effect(text, os.environ.get('NETHOS_GPU') == '1', available,
+                                     settings.get('reduced_transparency', False))
+        (runtime / 'glass-mode').write_text(effect or 'solid')
+    text = material(text, resolved_theme(settings) == 'dark', settings.get('reduced_transparency', False))
+    temporary = target.with_suffix('.tmp')
+    temporary.write_text(text)
+    temporary.replace(target)
+    print(target)
+
+
+if __name__ == '__main__':
+    main()

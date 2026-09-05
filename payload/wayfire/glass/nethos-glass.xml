@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<wayfire><plugin name="nethos-glass">
+<_short>NETHOS glass</_short><_long>Damage-tracked backdrop blur and edge refraction.</_long><category>Effects</category>
+<option name="blur_by_default" type="string"><default>type is "toplevel" | type is "layer"</default></option>
+<option name="toggle" type="button"><default>none</default></option>
+<option name="method" type="string"><default>kawase</default></option>
+<option name="saturation" type="double"><default>1.05</default><min>0</min><max>2</max></option>
+<option name="kawase_offset" type="double"><default>1.5</default><min>0</min><max>5</max></option>
+<option name="kawase_degrade" type="int"><default>1</default><min>1</min><max>4</max></option>
+<option name="kawase_iterations" type="int"><default>2</default><min>1</min><max>4</max></option>
+<option name="refraction" type="double"><default>4</default><min>0</min><max>8</max></option>
+<option name="rim" type="double"><default>0.16</default><min>0</min><max>0.4</max></option>
+</plugin></wayfire>

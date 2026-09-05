@@ -290,14 +290,14 @@ window, window.background, .background {
    rendering artefact; 14 reads as a decision. */
 .nethos-frame {
   background-color: rgba(244, 247, 250, 0.84);
-  border-radius: 14px;
+  border-radius: 16px;
   box-shadow: 0 12px 40px rgba(16, 22, 32, 0.28);
 }
 
 .nethos-titlebar {
   min-height: 38px;
   padding: 0 14px;
-  border-radius: 14px 14px 0 0;
+  border-radius: 16px 14px 0 0;
   /* A hairline, not a border. The bar and the content are one surface. */
   box-shadow: inset 0 -1px 0 0 rgba(120, 130, 150, 0.16);
 }
@@ -428,6 +428,7 @@ class Surface:
         if not Surface._transparent_css:
             Surface._transparent_css = True
             provider = Gtk.CssProvider()
+            Surface._appearance_provider = provider
             # GTK CSS has no prefers-color-scheme, so the dark frame is
             # appended rather than queried. _theme() reads the same file the
             # shell writes, before any page has painted, so a window never
@@ -591,7 +592,7 @@ class Surface:
         // Light or dark, decided once by the system rather than negotiated by
         // each page. "auto" adds no class and lets prefers-color-scheme win.
         var _t = %s;
-        if (_t) { document.documentElement.classList.add("neth-" + _t); }
+        if (_t) { document.documentElement.classList.add("neth-" + _t); document.documentElement.dataset.theme = _t; }
         // Hyprland blurs behind transparent surfaces itself, so the stylesheet
         // must not blur as well -- doubling it pays the cost we removed twice,
         // for a worse result. Checked at run time, since the same binary hosts
@@ -599,6 +600,7 @@ class Surface:
         if (%s) {
           document.documentElement.classList.add("neth-compositor-blur");
         }
+        if (%s) document.documentElement.classList.add("neth-window");
         // The frame's bottom corners are rounded by GTK, but the WebView is a
         // child widget and paints over them, so a window with a rounded top
         // and square bottom looks like a mistake rather than a style. The page
@@ -606,26 +608,18 @@ class Surface:
         if (%s) {
           var _r = document.createElement("style");
           _r.textContent =
-            "html{border-radius:0 0 14px 14px;overflow:hidden;}" +
-            "body{border-radius:0 0 14px 14px;}";
+            "html{border-radius:0 0 16px 16px;overflow:hidden;}" +
+            "body{border-radius:0 0 16px 16px;}";
           document.documentElement.appendChild(_r);
         }
         """ % (json.dumps(self.name),
-               "true" if os.environ.get("NETHOS_GPU") else "false",
+               "true" if os.environ.get("NETHOS_GPU") == "1" else "false",
                json.dumps(_theme()),
-               # WAYFIRE_SOCKET is the one Wayfire actually exports.
-               # XDG_CURRENT_DESKTOP reads "sway" on a NETHOS session -- it is
-               # set by the session for portal matching, not by the
-               # compositor -- and WAYFIRE_CONFIG_FILE is only present when
-               # the config path was overridden. So neither of those fired,
-               # the class was never added, and the stylesheet blurred a
-               # surface the compositor was already blurring.
-               "true" if (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
-                          or os.environ.get("WAYFIRE_SOCKET")
-                          or os.environ.get("WAYFIRE_CONFIG_FILE")
-                          or "wayfire" in os.environ.get(
-                              "XDG_CURRENT_DESKTOP", "").lower()) else "false",
-               # 5th: only when this process is drawing its own frame does
+               "true" if os.environ.get("NETHOS_GPU") == "1" and (
+                   os.environ.get("NETHOS_COMPOSITOR_GLASS") == "1"
+                   or os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")) else "false",
+               "true" if self.role == "window" else "false",
+               # Only when this process is drawing its own frame does
                # the page need to clip its own corners to match it. Under
                # Wayfire, firedecor's own rounding wraps the whole surface --
                # the page has no bottom corners of its own to clip.
@@ -1001,6 +995,20 @@ class App(Gtk.Application):
                 time.sleep(2)
 
     def _deliver(self, payload):
+        try:
+            message = json.loads(payload)
+            if message.get("type") == "settings":
+                settings = message.get("data", {})
+                dark = settings.get("effective_theme", settings.get("theme")) == "dark"
+                css = NETHOS_GTK_CSS + (NETHOS_GTK_CSS_DARK if dark else b"")
+                if settings.get("reduced_transparency"):
+                    colour = b"#161b22" if dark else b"#f4f7fa"
+                    css += b".nethos-frame { background-color: " + colour + b"; }"
+                provider = getattr(Surface, "_appearance_provider", None)
+                if provider:
+                    provider.load_from_data(css)
+        except (ValueError, TypeError):
+            pass
         script = "window.nethosEvent && window.nethosEvent(%s);" % payload
         for surface in self.surfaces:
             try:

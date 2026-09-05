@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><title>NETHOS material review</title>
+<link rel="stylesheet" href="../payload/lib/nethos.css">
+<link rel="stylesheet" href="../payload/shell/style.css">
+<style>
+body { margin:0; min-height:100vh; background:linear-gradient(130deg,#263344,#10151d 58%,#263039); padding:32px; overflow:auto; }
+html[data-theme="light"] body { background:linear-gradient(130deg,#d2dce9,#edf0f5 58%,#c7d1dd); }
+.review-toolbar {display:flex;align-items:center;justify-content:space-between;margin:0 auto 32px;max-width:1100px;color:var(--ink-soft);font-size:13px;}
+.review-grid {display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:24px;max-width:1100px;margin:auto;}
+.review-window {padding:0;border-radius:var(--r);overflow:hidden;}
+.review-title {display:flex;align-items:center;gap:8px;padding:16px 24px;border-bottom:1px solid var(--rim-soft);font-size:13px;font-weight:600;}
+.review-title span:last-child {margin:auto;}
+.light-dot {width:12px;height:12px;border-radius:50%;background:var(--ink-faint);}
+.review-content {padding:32px;background:var(--glass-strong);min-height:280px;}
+.review-content h1 {font-size:28px;letter-spacing:-.03em;margin:0 0 8px;}
+.review-content p {color:var(--ink-soft);margin-bottom:24px;}
+.review-row {display:flex;justify-content:space-between;padding:16px 0;border-bottom:1px solid var(--rim-soft);}
+.review-row span:last-child {color:var(--ink-soft);}
+.review-side {display:flex;flex-direction:column;gap:24px;}
+.review-widget {padding:24px;border-radius:var(--r-lg);}
+.review-widget h2 {font-size:14px;margin:0 0 16px;}
+.review-number {font-size:40px;letter-spacing:-.04em;font-weight:600;}
+.review-label {color:var(--ink-soft);font-size:13px;}
+.review-switcher {grid-column:1/-1;}
+.review-switcher #switcher-world {max-width:100%;opacity:1;}
+.review-footer {max-width:1100px;margin:24px auto;color:var(--ink-soft);font-size:12px;}
+@media(max-width:760px){.review-grid{grid-template-columns:1fr;}body{padding:16px;}}
+</style></head><body>
+<div class="review-toolbar"><span>NETHOS · Appearance review</span><div><button class="btn" id="theme">Light appearance</button> <button class="btn" id="solid">Reduce transparency</button></div></div>
+<main class="review-grid">
+<section class="review-window glass"><div class="review-title"><i class="light-dot"></i><i class="light-dot"></i><i class="light-dot"></i><span>System</span></div>
+<div class="review-content"><h1>Your workspace, ready.</h1><p>A shared material for windows, controls and the things you keep close.</p>
+<div class="review-row"><span>Appearance</span><span id="appearance">Smoked glass</span></div>
+<div class="review-row"><span>Window surfaces</span><span>Clear surround · solid content</span></div>
+<div class="review-row"><span>Motion</span><span>Only when you interact</span></div>
+<div style="margin-top:24px;display:flex;gap:8px"><button class="btn">Open settings</button><button class="btn btn-quiet">Customise desktop</button></div></div></section>
+<aside class="review-side"><section class="review-widget glass"><h2>Today</h2><div class="review-number">09:41</div><div class="review-label">Sunday, 6 September</div></section>
+<section class="review-widget glass"><h2>Files are ready</h2><p class="review-label">Your workspace has finished syncing.</p><button class="btn btn-quiet">View files</button></section></aside>
+<section class="review-switcher"><div id="switcher-world" role="listbox" aria-label="Open windows">
+<div class="sw-unit sel" role="option" aria-selected="true"><div class="sw-card glass"><div class="sw-icon">Sy</div><div class="sw-name">System</div><div class="sw-app">NETHOS Settings</div></div></div>
+<div class="sw-unit" role="option" aria-selected="false"><div class="sw-card glass"><div class="sw-icon">Fi</div><div class="sw-name">Design files</div><div class="sw-app">Files</div></div></div>
+<div class="sw-unit" role="option" aria-selected="false"><div class="sw-card glass"><div class="sw-icon">Te</div><div class="sw-name">Build output</div><div class="sw-app">Terminal</div></div></div>
+</div></section></main>
+<p class="review-footer">Shared production CSS · browser layout review. Backdrop refraction is rendered by the Linux compositor and is tested separately.</p>
+<script>
+const root=document.documentElement;
+document.getElementById('theme').onclick=e=>{const dark=root.dataset.theme!=='dark';root.dataset.theme=dark?'dark':'light';e.target.textContent=dark?'Light appearance':'Dark appearance';document.getElementById('appearance').textContent=dark?'Smoked glass':'Clear glass';};
+document.getElementById('solid').onclick=e=>{const solid=root.classList.toggle('reduced-transparency');e.target.textContent=solid?'Restore transparency':'Reduce transparency';};
+</script></body></html>

@@ -3,9 +3,10 @@
 > focus colour and no idle animation. This supersedes the historical light
 > default and Copperplate guidance below. Existing user preferences survive.
 > Glass surrounds readable content; third-party opaque interiors remain opaque.
-> Compositor blur and CSS lighting are implemented treatments, not physical
-> refraction. Do not describe highlights or a WebGL metal simulation as actual
-> backdrop refraction. GPU acceleration must be measured in the guest.
+> Wayfire 0.9 uses the nethos-glass backdrop blur and edge-refraction module
+> when built for the target CPU. CSS lighting and WebGL metal are not substitutes
+> for scene refraction. GPU performance still requires hardware validation; see
+> [implementation and validation](LIQUID-GLASS.md).
 
 # The NETHOS design doctrine
 
