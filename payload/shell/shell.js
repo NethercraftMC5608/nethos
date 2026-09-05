@@ -95,7 +95,7 @@ function initPanel(settings) {
      The bar is taller than the glass one, so both the input region and the
      exclusive zone have to grow with it, or maximised windows slide under the
      metal and clicks along its lower edge fall through to the desktop. */
-  if (!settings || settings.panel_liquid !== false) {
+  if (settings && settings.panel_liquid === true) {
     import("./liquid.js")
       .then((m) => m.startPanelMetal(settings))
       .then((h) => {
@@ -317,7 +317,7 @@ function initDock(settings) {
   /* The dock's metal surround. Same three gates as the panel; the module
      returns false and changes nothing when any of them refuses. The dock keeps
      its glass either way -- the metal wraps the pill rather than replacing it. */
-  if (!settings || settings.panel_liquid !== false) {
+  if (settings && settings.panel_liquid === true) {
     import("./liquid.js")
       .then((m) => m.startDockMetal(settings))
       .catch((e) => console.log("liquid: " + e.message));
@@ -1185,7 +1185,6 @@ function initMenu() {
     switcherWorld.replaceChildren();
     switcherUnits = switcherWindows.map((w) => {
       const unit = el("div", "sw-unit");
-      unit.append(el("div", "sw-puffs"));
 
       const card = el("div", "sw-card glass");
       card.append(el("div", "sw-icon"));   // filled in below, once icons resolve
@@ -1208,8 +1207,7 @@ function initMenu() {
     });
     switcherLayout();
 
-    // Icons and puffs both need something the card doesn't have until it has
-    // a frame: a real icon_url (an async lookup) and a real measured size.
+    // Resolve installed app icons without delaying keyboard selection.
     switcherWindows.forEach(async (w, i) => {
       const unit = switcherUnits[i];
       const src = await appIcon(w.nethos_app);
@@ -1217,12 +1215,7 @@ function initMenu() {
         iconTile({ name: switcherLabel(w), icon_url: src && src.icon_url, icon: src && src.icon },
                  "sw-icon"));
     });
-    requestAnimationFrame(() => {
-      switcherUnits.forEach((unit) => {
-        const r = unit.querySelector(".sw-card").getBoundingClientRect();
-        buildCloudPuffs(unit.querySelector(".sw-puffs"), r.width, r.height, "sw-puff", 6);
-      });
-    });
+
   }
 
   function switcherShow() {

@@ -923,14 +923,14 @@ SETTINGS_PATH = os.path.expanduser("~/.config/nethos/settings.json")
 # hardcoding a form that drifts from what the daemon actually stores.
 SETTINGS_SCHEMA = [
     {"key": "theme", "label": "Theme", "group": "Appearance",
-     "type": "choice", "options": ["auto", "light", "dark"], "default": "auto",
-     "help": "Auto follows the time of day."},
+     "type": "choice", "options": ["auto", "light", "dark"], "default": "dark",
+     "help": "Auto follows the system appearance."},
     {"key": "accent", "label": "Accent", "group": "Appearance",
      "type": "colour", "default": "#3b6ea5",
      "help": "Used for focus rings and the active item."},
     {"key": "wallpaper", "label": "Wallpaper", "group": "Appearance",
      "type": "choice",
-     "options": ["dawn", "slate", "meadow", "dusk"], "default": "dawn"},
+     "options": ["dawn", "slate", "meadow", "dusk"], "default": "slate"},
     {"key": "font_scale", "label": "Text size", "group": "Appearance",
      "type": "range", "min": 85, "max": 130, "step": 5, "default": 100,
      "unit": "%"},
@@ -947,7 +947,7 @@ SETTINGS_SCHEMA = [
     # picked separately -- and the rest of this group adjusts it around the
     # edges. Everything here is inert on a machine that cannot draw it.
     {"key": "panel_liquid", "label": "Liquid metal", "group": "Liquid metal",
-     "type": "bool", "default": True,
+     "type": "bool", "default": False,
      "help": "Draws the panel as chrome. Needs a GPU; falls back to glass on "
              "its own if there is not one, so leaving this on costs nothing."},
     {"key": "panel_quality", "label": "Quality", "group": "Liquid metal",

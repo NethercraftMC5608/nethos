@@ -266,7 +266,7 @@ body[data-view="menu"].shown { opacity: 1; }
  * (and Control Centre and Ask, see .cc-card and .ask-input/.ask-log)
  * feeling unresponsive under Wayfire specifically, where
  * neth-compositor-blur is always set (see bridge.c). */
-html:not(.neth-compositor-blur) #menu {
+html.neth-gpu:not(.neth-compositor-blur) #menu {
   -webkit-backdrop-filter: blur(30px) saturate(180%) brightness(1.06);
   backdrop-filter: blur(30px) saturate(180%) brightness(1.06);
 }
@@ -512,7 +512,7 @@ body[data-view="desktop"][data-wallpaper="dusk"] {
   z-index: -1;
   opacity: 0.9;
 }
-.notif-puff { animation: puff-drift 7s ease-in-out infinite; }
+.notif-puff { animation: none; }
 @keyframes puff-drift {
   0%, 100% { transform: translateY(0); }
   50%      { transform: translateY(-6px); }
@@ -583,8 +583,8 @@ body[data-view="desktop"][data-wallpaper="dusk"] {
  * different reason: closing a window left the old title painted under the new
  * one, so "Settings" and "foot" appeared on top of each other as "footings".
  * Verified by screenshotting a close on the running machine. */
-html:not(.neth-compositor-blur) #panel,
-html:not(.neth-compositor-blur) #dock {
+html.neth-gpu:not(.neth-compositor-blur) #panel,
+html.neth-gpu:not(.neth-compositor-blur) #dock {
   -webkit-backdrop-filter: blur(16px) saturate(170%);
   backdrop-filter: blur(16px) saturate(170%);
 }
@@ -724,7 +724,7 @@ body[data-view="menu"]:not(.shown) #menu { display: none; }
  * own comment on backdrop-filter, and confirmed live as the specific cause
  * of Control Centre feeling unresponsive while every other panel/menu
  * surface -- already gated this way -- did not. */
-html:not(.neth-compositor-blur) .cc-card {
+html.neth-gpu:not(.neth-compositor-blur) .cc-card {
   -webkit-backdrop-filter: blur(30px) saturate(180%);
   backdrop-filter: blur(30px) saturate(180%);
 }
@@ -808,12 +808,6 @@ html.no-motion .cc-card { animation: none; }
  * whether it is open and which window is selected (see switcher_open() in
  * nethosd.py) -- this only ever renders whatever the "switcher" event says.
  *
- * Puffs behind each card are sized in JS off that card's own measured
- * footprint (swPuffs() in shell.js), the same technique as the notification
- * cloud above and for the same reason: a cloud sized independently of its
- * content is either dwarfing a short title or too small for a long one, and
- * looks like a different, unrelated shape every time rather than the same
- * kind of thing scaled to what it is wrapping.
  */
 body[data-view="menu"]:not(.shown):not(.ctx):not(.switching) { pointer-events: none; }
 body[data-view="menu"].switching { opacity: 1; pointer-events: auto; }
@@ -843,27 +837,14 @@ body[data-view="menu"].switching #switcher-world { opacity: 1; transform: none; 
 
 .sw-unit {
   position: absolute; left: 50%; top: 50%;
-  width: 200px; margin: -70px 0 0 -100px;
+  width: 200px; margin: 0;
   display: flex; flex-direction: column; align-items: center; gap: 10px;
   transition: transform var(--slow), opacity var(--slow);
   cursor: pointer;
 }
 
-.sw-puffs { position: absolute; inset: -40%; z-index: -1; pointer-events: none; }
-.sw-puff {
-  position: absolute;
-  border-radius: 50%;
-  /* --glass-strong/--glass-dim are tuned for a translucent overlay *on top
-     of* content -- reading a shape made only of them, on its own, against a
-     dim backdrop, is exactly what "very faint" meant. A cloud needs to be
-     solid enough to read as a cloud. */
-  background: radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.55) 75%);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5), 0 4px 18px rgba(20, 26, 36, 0.10);
-  filter: blur(1.5px);
-}
-
 .sw-card {
-  width: 100%; padding: 14px 12px;
+  width: 100%; padding: 16px;
   border-radius: var(--r-lg);
   display: flex; flex-direction: column; align-items: center; gap: 8px;
   text-align: center;
@@ -974,8 +955,8 @@ body[data-view="menu"].switching #switcher-world { opacity: 1; transform: none; 
  * comment for why doubling a compositor's own blur is not just wasted, it
  * is actively worse, and confirmed live as one of the causes of this shell
  * feeling unresponsive under Wayfire. */
-html:not(.neth-compositor-blur) .ask-input,
-html:not(.neth-compositor-blur) .ask-log {
+html.neth-gpu:not(.neth-compositor-blur) .ask-input,
+html.neth-gpu:not(.neth-compositor-blur) .ask-log {
   -webkit-backdrop-filter: blur(30px) saturate(180%);
   backdrop-filter: blur(30px) saturate(180%);
 }
@@ -1191,4 +1172,23 @@ body[data-view="dock"].metal .dock-item .fallback,
 body[data-view="dock"].metal .dock-label { color: var(--metal-ink, #eaeef1); }
 body[data-view="dock"].metal .dock-item.running::after {
   background: var(--metal-ink, #eaeef1);
+}
+
+/* Shared material: shell chrome has one fill, edge and depth treatment. */
+#panel, #dock, #menu, .cc-card, .sw-card, .notif-card, .ctxmenu {
+  background: var(--glass-strong);
+  box-shadow: inset 0 1px 0 var(--rim), inset 0 -1px 0 var(--edge), var(--shadow);
+}
+#menu, .cc-card, .ctxmenu { background: var(--cc-fill); }
+#menu, .cc-card { padding: 16px; }
+.sw-unit.sel .sw-card { box-shadow: inset 0 0 0 2px var(--accent), var(--shadow-lg); }
+.sw-name { font-size: 14px; }
+.sw-icon { font-family: var(--sans); }
+body[data-view="desktop"] .widget { opacity: 1; }
+:root[data-theme="dark"] body[data-view="desktop"][data-wallpaper="slate"] {
+  background: radial-gradient(ellipse at 25% 0%, #303a46, transparent 65%),
+              linear-gradient(145deg, #171c23, #0c1015);
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
 }

@@ -143,7 +143,7 @@ def _theme():
             value = fh.read().strip().lower()
         return value if value in ("light", "dark") else ""
     except OSError:
-        return ""
+        return "dark"
 
 
 def _window_action(action, app_name):
@@ -289,7 +289,7 @@ window, window.background, .background {
 /* docs/DESIGN.md 31: larger than feels right. A 6px radius reads as a
    rendering artefact; 14 reads as a decision. */
 .nethos-frame {
-  background-color: #f4f6fa;
+  background-color: rgba(244, 247, 250, 0.84);
   border-radius: 14px;
   box-shadow: 0 12px 40px rgba(16, 22, 32, 0.28);
 }
@@ -348,11 +348,11 @@ window:backdrop .nethos-title { color: #8b94a0; }
 
 NETHOS_GTK_CSS_DARK = b"""
 .nethos-frame {
-  background-color: #171b22;
+  background-color: rgba(22, 27, 34, 0.88);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
 }
 .nethos-titlebar { box-shadow: inset 0 -1px 0 0 rgba(255, 255, 255, 0.08); }
-.nethos-title { color: #a8b2c0; }
+.nethos-title { color: #f1f4f8; }
 .nethos-light { box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35); }
 .nethos-light label { color: rgba(0, 0, 0, 0.65); }
 """

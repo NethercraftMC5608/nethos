@@ -264,7 +264,7 @@ body { padding: 22px 24px; }
    the glass edge instead.
    Radius is smaller than the 24px used before: past about 16px the visual
    difference is slight and the cost is not. */
-html:not(.neth-compositor-blur) .glass-blur.blur-cheap {
+html.neth-gpu:not(.neth-compositor-blur) .glass-blur.blur-cheap {
   -webkit-backdrop-filter: blur(16px) saturate(170%);
   backdrop-filter: blur(16px) saturate(170%);
 }
@@ -958,4 +958,31 @@ html.no-motion .spin { animation-duration: 2s; }
   box-shadow: inset 0 1px 0 0 var(--rim), var(--shadow);
   pointer-events: auto;
   animation: ui-toast-in 260ms var(--ease);
+}
+
+/* Material roles: a clear surround and a denser reading surface. */
+:root {
+  --r-sm: 8px; --r: 16px; --r-lg: 24px; --r-xl: 32px;
+  --glass: rgba(244, 247, 250, .68);
+  --glass-strong: rgba(244, 247, 250, .84);
+  --cc-fill: rgba(244, 247, 250, .94);
+  --ink-faint: #66717d;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --glass: rgba(22, 27, 34, .72);
+  --glass-strong: rgba(22, 27, 34, .88);
+  --glass-dim: rgba(22, 27, 34, .56);
+  --cc-fill: rgba(22, 27, 34, .96);
+  --menu-fill: var(--cc-fill);
+  --ink: #f1f4f8; --ink-soft: #bdc6d1; --ink-faint: #9aa7b5;
+  --shadow: 0 2px 6px rgba(0,0,0,.24), 0 16px 40px rgba(0,0,0,.32);
+}
+:root[data-theme="light"] { color-scheme: light; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not(.neth-light) {
+    --glass: rgba(22,27,34,.72); --glass-strong: rgba(22,27,34,.88);
+    --cc-fill: rgba(22,27,34,.96); --menu-fill: var(--cc-fill);
+    --ink: #f1f4f8; --ink-soft: #bdc6d1; --ink-faint: #9aa7b5;
+  }
 }

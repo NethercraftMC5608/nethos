@@ -1,3 +1,12 @@
+> Current direction (2026-09-05): dark smoked glass by default, with an
+> explicit light mode. One Space Grotesk family, an 8px spacing grid, restrained
+> focus colour and no idle animation. This supersedes the historical light
+> default and Copperplate guidance below. Existing user preferences survive.
+> Glass surrounds readable content; third-party opaque interiors remain opaque.
+> Compositor blur and CSS lighting are implemented treatments, not physical
+> refraction. Do not describe highlights or a WebGL metal simulation as actual
+> backdrop refraction. GPU acceleration must be measured in the guest.
+
 # The NETHOS design doctrine
 
 Most Linux desktops are *arranged*, not *designed*. Every element is
