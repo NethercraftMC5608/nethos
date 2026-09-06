@@ -13,9 +13,13 @@ use core::arch::global_asm;
 pub mod dt;
 pub mod exceptions;
 pub mod frames;
+pub mod gic;
 pub mod heap;
+pub mod mmio;
 pub mod paging;
+pub mod sched;
 pub mod selftest;
+pub mod timer;
 pub mod uart;
 
 // The assembly lives in a real .s file rather than inline in a string, so it
@@ -61,14 +65,12 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
         let r = gic.reg(1).map(|r| r.0).unwrap_or(0);
         println!("  gicv3:  dist {:#x}  redist {:#x}", d, r);
     }
-    if let Some((_, num, _)) = fdt.find_compatible("arm,armv8-timer").and_then(|n| n.interrupt(1)) {
+    if let Some((_, num, _)) = fdt.find_compatible("arm,armv8-timer").and_then(|n| n.interrupt(2)) {
         // The four entries are secure physical, non-secure physical, virtual,
-        // hypervisor -- in that order. Index 1 is the non-secure physical
-        // timer, INTID 30, which is the one EL1 can program through
-        // CNTP_*_EL0 with nobody's permission. Read off the real device tree
-        // rather than assumed: index 2 is the virtual timer, and picking the
-        // wrong one gives a timer that arms and never fires.
-        println!("  timer:  EL1 physical, PPI INTID {}", num + 16);
+        // hypervisor -- in that order. Index 2, the virtual timer, is the one
+        // nk uses; see the note at the top of timer.rs for why the physical
+        // one at index 1 is the trap it looks like the right answer.
+        println!("  timer:  virtual, PPI INTID {}", num + 16);
     }
     let mut virtio = 0;
     fdt.each_compatible("virtio,mmio", |_| virtio += 1);
@@ -85,10 +87,63 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
     heap::init(16);
     selftest::run();
 
-    println!();
-    println!("Stage 1: MMU on, memory up. No scheduler yet.");
+    let gic = fdt.find_compatible("arm,gic-v3").expect("no GICv3 in the device tree");
+    let gicd = gic.reg(0).expect("GIC has no distributor reg").0 as usize;
+    let gicr = gic.reg(1).expect("GIC has no redistributor reg").0 as usize;
+    unsafe { gic::init(gicd, gicr) };
 
-    halt();
+    let (_, ppi, _) = fdt
+        .find_compatible("arm,armv8-timer")
+        .and_then(|n| n.interrupt(2))
+        .expect("no virtual timer in the device tree");
+    unsafe { timer::init(ppi + 16) };
+
+    sched::init();
+    sched::spawn("ping", worker, 0);
+    sched::spawn("pong", worker, 1);
+
+    println!();
+    println!("Stage 1 up. Unmasking interrupts; two threads should now alternate.");
+    println!();
+
+    sched::enable();
+    unsafe { core::arch::asm!("msr daifclr, #0xf", options(nomem, nostack)) };
+
+    // The boot thread becomes the idle task. wfi rather than a spin, so an
+    // idle machine is genuinely idle: under HVF a busy loop here pins a whole
+    // host core for as long as the kernel is running.
+    loop {
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+    }
+}
+
+/// Two of these run, to show that preemption works and that each one keeps its
+/// own stack and registers across a switch it never asked for.
+extern "C" fn worker(id: usize) {
+    let names = ["ping", "pong"];
+    let mut n = 0u64;
+    loop {
+        // A local that must survive being preempted: if the context switch
+        // loses a callee-saved register or lands on the wrong stack, this is
+        // where it shows, as a counter that jumps or resets.
+        n += 1;
+        println!("[{:>5}ms] {} #{}", timer::ms(), names[id], n);
+        if n == 5 {
+            println!();
+            sched::report();
+            println!();
+        }
+        if n >= 8 {
+            println!("{} done", names[id]);
+            return;
+        }
+        // Spin out the slice rather than sleeping: there is no sleep yet, and
+        // the point is to be interrupted involuntarily rather than to yield.
+        let until = timer::ticks() + 20;
+        while timer::ticks() < until {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 /// Hand every page of RAM to the frame allocator except the ones already

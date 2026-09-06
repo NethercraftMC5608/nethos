@@ -17,5 +17,10 @@ Ctrl-A X to quit QEMU.
 **`docs/KERNEL.md` is the real documentation** — the architecture, why it is
 shaped this way, the stages, and what Stage 0 already cost. Read it first.
 
-Stage 0 is done: nk boots, reaches Rust, owns the exception table, and is
-handed a device tree. There is no MMU, no allocator and no scheduler yet.
+Stages 0 and 1 are done. nk boots on QEMU `virt` under HVF, parses the device
+tree, turns on the MMU, allocates frames and heap, brings up GICv3 and the
+virtual timer, and runs preemptive kernel threads — two of which alternate on
+the tick without either ever yielding.
+
+Next is Stage 2: `ldk`, the tool that compiles a Linux driver against Linux's
+own headers and reports which of its undefined symbols the shim still owes it.

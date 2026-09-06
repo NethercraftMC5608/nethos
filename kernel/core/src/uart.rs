@@ -28,11 +28,11 @@ impl Uart {
 
     pub fn put(&self, byte: u8) {
         unsafe {
-            // Spin while the FIFO is full. Unbounded on purpose: at Stage 0
-            // there is nothing useful to do on a timeout, and a hang here is
-            // a far clearer symptom than silently dropped output.
-            while core::ptr::read_volatile((self.base + FR) as *const u32) & (1 << 5) != 0 {}
-            core::ptr::write_volatile((self.base + DR) as *mut u32, byte as u32);
+            // Spin while the FIFO is full. Unbounded on purpose: there is
+            // nothing useful to do on a timeout, and a hang here is a far
+            // clearer symptom than silently dropped output.
+            while crate::mmio::readl(self.base + FR) & (1 << 5) != 0 {}
+            crate::mmio::writel(self.base + DR, byte as u32);
         }
     }
 }

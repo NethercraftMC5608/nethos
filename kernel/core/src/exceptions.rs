@@ -44,3 +44,33 @@ pub extern "C" fn rust_exception(id: u64, esr: u64, far: u64, elr: u64) -> ! {
     println!("   far {:#018x}   elr {:#018x}", far, elr);
     crate::halt();
 }
+
+/// Every IRQ, from `irq_entry` in boot.s. Runs on the interrupted task's own
+/// kernel stack, with its full register frame sitting just below.
+#[no_mangle]
+pub extern "C" fn rust_irq() {
+    let intid = crate::gic::ack();
+
+    // 1023 is the GIC's way of saying the interrupt withdrew itself between
+    // being signalled and being read. It must not be EOI'd.
+    if intid == 1023 {
+        return;
+    }
+
+    if intid == crate::timer::intid() {
+        unsafe { crate::timer::rearm() };
+        crate::timer::on_tick();
+        // Completion before the switch, not after: cpu_switch does not return
+        // here, it returns into some other task, and an un-EOI'd interrupt
+        // stays active forever. The symptom is a timer that ticks exactly
+        // once and a machine that then does nothing at all.
+        crate::gic::eoi(intid);
+        if crate::sched::preempt_enabled() {
+            crate::sched::schedule();
+        }
+        return;
+    }
+
+    println!("!! unexpected interrupt {}", intid);
+    crate::gic::eoi(intid);
+}

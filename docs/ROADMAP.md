@@ -258,8 +258,13 @@ The shim is discovered, not designed.
       vector, owns the exception table, and is handed a device tree. Cost one
       real bug: QEMU passes no DTB at all to an ELF kernel, so `boot.s` carries
       the arm64 Linux image header and `run-kernel.sh` boots the flat binary.
-- [ ] **Stage 1.** Device tree, frame allocator, MMU, kernel heap, GICv3,
-      generic timer, threads. Done when two threads alternate on a tick.
+- [x] **Stage 1.** Device tree, frame allocator, MMU, kernel heap, GICv3, the
+      virtual timer, preemptive threads. Two threads alternate on the tick
+      without either yielding. Cost three bugs worth keeping: MMIO through
+      `read_volatile` compiled to a writeback load, which no hypervisor can
+      emulate and real hardware runs fine; the physical timer traps under any
+      hypervisor, so nk uses the virtual one; and a new task starts with
+      interrupts masked, which stops the machine without crashing it.
 - [ ] **Stage 2.** `ldk` -- compile a driver against Linux headers, list its
       undefined symbols, generate panicking stubs, report coverage. Extends
       `pkg/npkg_elf.py`, which already reads ELF symbol tables, rather than

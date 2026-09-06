@@ -55,9 +55,14 @@ real_start:
     mov     x0, #(1 << 31)          // HCR_EL2.RW: EL1 runs AArch64, not AArch32
     msr     hcr_el2, x0
 
-    // Let EL1 read CNTPCT/CNTVCT and program the timers. Skipping this costs
-    // nothing now and costs an afternoon at Stage 1, where the generic timer
-    // traps to EL2 and the symptom is simply that no tick ever arrives.
+    // Let EL1 read the counters, and make its virtual counter equal the
+    // physical one. nk uses the *virtual* timer (see timer.rs), so CNTVOFF is
+    // the line that matters here -- left at whatever reset gave it, EL1's idea
+    // of the time is offset from the machine's by an arbitrary amount.
+    //
+    // This path only runs when nk boots at EL2. Under a hypervisor it does
+    // not, EL2 is not ours, and no amount of setup here can grant EL1 the
+    // physical timer -- which is exactly why the virtual one is used.
     mrs     x0, cnthctl_el2
     orr     x0, x0, #3              // EL1PCTEN | EL1PCEN
     msr     cnthctl_el2, x0
@@ -116,18 +121,39 @@ park:
     b       rust_exception
 .endm
 
+// An IRQ, unlike every other entry here, returns -- so it saves state first.
+//
+// x0-x30 plus ELR_EL1 and SPSR_EL1: everything the interrupted code could be
+// holding. x19-x28 are callee-saved and rust_irq will preserve them, but they
+// are saved anyway because the scheduler switches stacks inside this handler,
+// and the frame is then also what the *other* task returns through.
+//
+// No stack switch. The handler runs on the interrupted task's own kernel
+// stack, which is what makes a context switch from here work at all: the
+// frame stays behind on the outgoing stack and is still there, untouched,
+// whenever that task is next chosen.
+.macro VENTRY_IRQ
+.balign 0x80
+    b       irq_entry
+.endm
+
 .global __vectors
 .balign 2048
 __vectors:
     VENTRY 0        // current EL, SP0:  synchronous
-    VENTRY 1        // current EL, SP0:  IRQ
+    VENTRY_IRQ      // current EL, SP0:  IRQ  (nk runs on SPx; cannot happen)
     VENTRY 2        // current EL, SP0:  FIQ
     VENTRY 3        // current EL, SP0:  SError
     VENTRY 4        // current EL, SPx:  synchronous
-    VENTRY 5        // current EL, SPx:  IRQ
+    VENTRY_IRQ      // current EL, SPx:  IRQ  <- the only one that fires
     VENTRY 6        // current EL, SPx:  FIQ
     VENTRY 7        // current EL, SPx:  SError
     VENTRY 8        // lower EL, AArch64: synchronous
+    // Deliberately not irq_entry. An interrupt from a lower EL arrives with
+    // SP still pointing at the user stack, and irq_entry pushes its frame
+    // wherever SP happens to be. There is no EL0 yet, so this cannot fire --
+    // and when there is one, this has to become a handler that swaps stacks
+    // first rather than a line someone changes without noticing.
     VENTRY 9        // lower EL, AArch64: IRQ
     VENTRY 10       // lower EL, AArch64: FIQ
     VENTRY 11       // lower EL, AArch64: SError
@@ -135,3 +161,106 @@ __vectors:
     VENTRY 13       // lower EL, AArch32: IRQ
     VENTRY 14       // lower EL, AArch32: FIQ
     VENTRY 15       // lower EL, AArch32: SError
+
+
+// 272 bytes: 31 general registers, then ELR_EL1 and SPSR_EL1. Sixteen-byte
+// aligned throughout, which the architecture requires of SP at every point an
+// exception could be taken -- including inside this handler.
+.section ".text", "ax"
+irq_entry:
+    sub     sp, sp, #272
+    stp     x0,  x1,  [sp, #16 * 0]
+    stp     x2,  x3,  [sp, #16 * 1]
+    stp     x4,  x5,  [sp, #16 * 2]
+    stp     x6,  x7,  [sp, #16 * 3]
+    stp     x8,  x9,  [sp, #16 * 4]
+    stp     x10, x11, [sp, #16 * 5]
+    stp     x12, x13, [sp, #16 * 6]
+    stp     x14, x15, [sp, #16 * 7]
+    stp     x16, x17, [sp, #16 * 8]
+    stp     x18, x19, [sp, #16 * 9]
+    stp     x20, x21, [sp, #16 * 10]
+    stp     x22, x23, [sp, #16 * 11]
+    stp     x24, x25, [sp, #16 * 12]
+    stp     x26, x27, [sp, #16 * 13]
+    stp     x28, x29, [sp, #16 * 14]
+    mrs     x0, elr_el1
+    mrs     x1, spsr_el1
+    stp     x30, x0,  [sp, #16 * 15]
+    str     x1,       [sp, #16 * 16]
+
+    bl      rust_irq
+
+    ldr     x1,       [sp, #16 * 16]
+    ldp     x30, x0,  [sp, #16 * 15]
+    msr     elr_el1, x0
+    msr     spsr_el1, x1
+    ldp     x0,  x1,  [sp, #16 * 0]
+    ldp     x2,  x3,  [sp, #16 * 1]
+    ldp     x4,  x5,  [sp, #16 * 2]
+    ldp     x6,  x7,  [sp, #16 * 3]
+    ldp     x8,  x9,  [sp, #16 * 4]
+    ldp     x10, x11, [sp, #16 * 5]
+    ldp     x12, x13, [sp, #16 * 6]
+    ldp     x14, x15, [sp, #16 * 7]
+    ldp     x16, x17, [sp, #16 * 8]
+    ldp     x18, x19, [sp, #16 * 9]
+    ldp     x20, x21, [sp, #16 * 10]
+    ldp     x22, x23, [sp, #16 * 11]
+    ldp     x24, x25, [sp, #16 * 12]
+    ldp     x26, x27, [sp, #16 * 13]
+    ldp     x28, x29, [sp, #16 * 14]
+    add     sp, sp, #272
+    eret
+
+
+// cpu_switch(prev_sp: *mut usize, next_sp: usize)
+//
+// Only the callee-saved registers, because this is reached by an ordinary
+// function call: AAPCS already says x0-x18 are the caller's problem, and the
+// caller has already dealt with them. What makes it a context switch rather
+// than a function call is the two instructions in the middle that put SP
+// somewhere else.
+.global cpu_switch
+cpu_switch:
+    sub     sp, sp, #96
+    stp     x19, x20, [sp, #16 * 0]
+    stp     x21, x22, [sp, #16 * 1]
+    stp     x23, x24, [sp, #16 * 2]
+    stp     x25, x26, [sp, #16 * 3]
+    stp     x27, x28, [sp, #16 * 4]
+    stp     x29, x30, [sp, #16 * 5]
+    mov     x2, sp
+    str     x2, [x0]                // remember where the outgoing task stopped
+    mov     sp, x1                  // and take up where the incoming one did
+    ldp     x19, x20, [sp, #16 * 0]
+    ldp     x21, x22, [sp, #16 * 1]
+    ldp     x23, x24, [sp, #16 * 2]
+    ldp     x25, x26, [sp, #16 * 3]
+    ldp     x27, x28, [sp, #16 * 4]
+    ldp     x29, x30, [sp, #16 * 5]
+    add     sp, sp, #96
+    ret                             // to wherever x30 came from: the other task
+
+
+// Where a task begins. sched.rs builds a frame whose x30 is this label and
+// whose x19/x20 hold the entry point and its argument, so the `ret` above
+// lands here with everything already in place. A task that returns falls into
+// task_exit rather than off the end of its stack.
+.global task_start
+task_start:
+    // Unmask interrupts before the task's first instruction.
+    //
+    // Every other task resumes by returning through irq_entry's epilogue,
+    // whose `eret` restores SPSR_EL1 and with it the interrupt mask. A brand
+    // new task has no such frame -- cpu_switch simply `ret`s here -- so it
+    // inherits DAIF exactly as the timer handler left it, which is masked,
+    // because the CPU masks interrupts on exception entry.
+    //
+    // The symptom is precise and misleading: the first task starts, runs, and
+    // then the whole machine stops. Nothing has crashed. It is spinning with
+    // the only thing that could ever preempt it switched off.
+    msr     daifclr, #0xf
+    mov     x0, x20
+    blr     x19
+    b       task_exit

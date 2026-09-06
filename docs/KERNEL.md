@@ -93,6 +93,15 @@ kernel/
     src/uart.rs    PL011 and the print!/println! macros
     src/exceptions.rs  where every vector lands until IRQs have somewhere to go
     linker.ld      links at 0x40080000, which the image header agrees to
+    src/dt.rs      the flattened device tree, parsed from the specification
+    src/paging.rs  MMU: identity map, 1GB blocks, device vs normal memory
+    src/frames.rs  4KB physical frames: bump, then a free list in the frames
+    src/heap.rs    first fit, splitting and coalescing -- what kmalloc will use
+    src/mmio.rs    register access in assembly. Read its header before using it.
+    src/gic.rs     GICv3: distributor, redistributor, system-register CPU interface
+    src/timer.rs   the virtual timer, and the tick
+    src/sched.rs   kernel threads, preemptive round robin
+    src/selftest.rs what the kernel checks about itself at boot
   ldk/             the Linux Driver Kit: fetch, compile, list undefined symbols,
                    generate stubs, report coverage           (Stage 2)
   linux/           the shim. GPL-2.0, kept in its own directory on purpose.
@@ -127,9 +136,9 @@ one boots.
 
 - **0 — done.** Reach Rust from the reset vector, own the exception table, and
   say so on the serial port.
-- **1** — device tree parsing, physical frame allocator, MMU on, kernel heap,
-  GICv3, generic timer, threads and a round-robin scheduler.
-  *Done when two kernel threads alternate on a timer tick.*
+- **1 — done.** Device tree, MMU, frame allocator, kernel heap, GICv3, the
+  virtual timer, and preemptive round-robin threads. Two kernel threads
+  alternate on a tick, neither of them yielding.
 - **2** — `ldk`: compile a driver against Linux headers, list its undefined
   symbols, generate stubs, report coverage.
   *Done when `ldk syms virtio-blk` prints a clean list that links.*
@@ -143,6 +152,59 @@ one boots.
   *Done when nk answers an ARP request from the host.*
 - **5** — decide with `ldk report`'s numbers whether USB, DRM or WiFi is worth
   attempting. Genode is funded and staffed and still does not do GPU.
+
+## What Stage 1 already cost
+
+**MMIO through `read_volatile` is not safe on aarch64, and the reason
+generalises.** `read_volatile`/`write_volatile` guarantee that an access
+happens, once, in order. They do not guarantee *which instruction*. Three
+volatile 32-bit accesses to nearby GIC registers were compiled to:
+
+```
+    ldr w13, [x10, #0x80]!
+```
+
+a load with pre-index writeback. The architecture defines `ESR_EL1.ISV` as 0
+for a data abort on any load or store with writeback — the syndrome cannot
+describe "and also update the base register", so the fault carries no
+instruction decode at all, and a hypervisor trapping it has nothing to emulate
+from. QEMU's HVF backend asserts outright; KVM is no better placed. **On real
+hardware it works**, which is the worst failure mode available: correct until
+the machine is virtualised.
+
+`kernel/core/src/mmio.rs` therefore writes the accessors in inline assembly,
+which is exactly why Linux's `__raw_readl`/`__raw_writel` have always been
+`asm volatile` rather than a volatile pointer. Use them for every register
+access; do not reach for a raw pointer.
+
+Finding it needed all three instruments: `--tcg` proved the kernel's logic was
+right and the hypervisor was the problem, a `println!` inserted anywhere in the
+function made it vanish (which is the signature of a codegen artefact), and
+`llvm-objdump` around the faulting address named the instruction. Guessing
+produced two wrong answers first — the byte-wide priority write, and the timer.
+
+**The physical timer is not available under a hypervisor.** The device tree
+lists four timer interrupts and index 1 is the non-secure physical one, which
+looks like the obvious choice for a kernel at EL1. Under HVF, EL2 belongs to
+Apple's hypervisor, `CNTHCTL_EL2.EL1PCEN` is not set for guests, and `msr
+CNTP_TVAL_EL0` traps — arriving as a synchronous exception with `EC` 0,
+"unknown reason", which says nothing about what happened. nk uses the **virtual**
+timer, index 2, INTID 27, which works bare-metal and virtualised alike. Linux
+picks it for the same reason whenever it does not own EL2.
+
+**A new task starts with interrupts masked.** Every task except a brand new one
+resumes by returning through the IRQ epilogue, whose `eret` restores `SPSR_EL1`
+and with it the interrupt mask. A new task is reached by `cpu_switch`'s plain
+`ret`, so it inherits `DAIF` as the timer handler left it — masked, because the
+CPU masks interrupts on exception entry. The symptom is precise and misleading:
+the first thread starts, runs, and the machine stops. Nothing has crashed. It
+is spinning with the only thing that could preempt it switched off. `task_start`
+in `boot.s` clears `DAIF` before the task's first instruction.
+
+**EOI before the context switch, not after.** `cpu_switch` does not return to
+its caller; it returns into a different task. An interrupt EOI'd after it is
+never EOI'd at all, and the GIC offers no further interrupt at that priority.
+The symptom is a timer that ticks exactly once.
 
 ## What Stage 0 already cost, so nobody pays it twice
 

@@ -7,6 +7,7 @@
 #   scripts/run-kernel.sh --disk FILE      attach FILE as virtio-blk  (stage 3)
 #   scripts/run-kernel.sh --net            attach virtio-net, user mode (stage 4)
 #   scripts/run-kernel.sh --smp N          more CPUs than the one boot.s uses
+#   scripts/run-kernel.sh --tcg            emulate instead of using HVF
 #   scripts/run-kernel.sh --gdb            wait for gdb on :1234
 #   scripts/run-kernel.sh --timeout N      kill after N seconds (for tests)
 #
@@ -26,6 +27,7 @@ MEM=512
 DISK=""
 NET=0
 GDB=0
+TCG=0
 TIMEOUT=0
 
 while [ $# -gt 0 ]; do
@@ -37,6 +39,7 @@ while [ $# -gt 0 ]; do
         --net)       NET=1; shift ;;
         --smp)       SMP="${2:?--smp needs a count}"; shift 2 ;;
         --mem)       MEM="${2:?--mem needs MB}"; shift 2 ;;
+        --tcg)       TCG=1; shift ;;
         --gdb)       GDB=1; shift ;;
         --timeout)   TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
         -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
@@ -90,9 +93,13 @@ command -v qemu-system-aarch64 >/dev/null || die "qemu-system-aarch64 is missing
 # Same test scripts/run.sh uses: HVF is Apple's hypervisor and runs ARM code
 # natively. -cpu host only means anything under HVF; under TCG it is not a
 # valid model, so the two move together.
+# --tcg forces emulation. Worth having as a first-class option rather than
+# something to hack in: it is the one experiment that separates "nk is wrong"
+# from "the hypervisor cannot do this", and that distinction has already been
+# the whole answer once -- see the writeback note in kernel/core/src/mmio.rs.
 ACCEL=tcg
 CPU=max
-if [ "$(uname -m)" = "arm64" ] && [ "$(sysctl -n kern.hv_support 2>/dev/null)" = "1" ]; then
+if [ "$TCG" -eq 0 ] && [ "$(uname -m)" = "arm64" ] && [ "$(sysctl -n kern.hv_support 2>/dev/null)" = "1" ]; then
     ACCEL=hvf
     CPU=host
 fi

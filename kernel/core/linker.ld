@@ -22,7 +22,13 @@ SECTIONS
     .rodata ALIGN(8)  : { *(.rodata .rodata.*) }
     .data   ALIGN(8)  : { *(.data .data.*) }
 
-    .bss ALIGN(16) (NOLOAD) : {
+    /* 4096, not 16: the page tables in paging.rs are 4KB-aligned statics and
+     * TTBR0_EL1 silently ignores the low bits of an address that is not, so a
+     * misaligned table is not a fault -- it is a translation regime pointing
+     * somewhere arbitrary. lld places the symbols correctly regardless by
+     * padding inside the section, but it warns that the section's own
+     * alignment contradicts its contents, and it is right to. */
+    .bss ALIGN(4096) (NOLOAD) : {
         __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)

@@ -25,7 +25,7 @@ HAVE = bool(CARGO) and bool(shutil.which('qemu-system-aarch64'))
 
 def boot(*args, timeout=60):
     out = subprocess.run(
-        ['bash', str(RUN), '--timeout', '8', *args],
+        ['bash', str(RUN), '--timeout', '10', *args],
         capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
     )
     return out.stdout + out.stderr
@@ -38,8 +38,14 @@ class KernelBoot(unittest.TestCase):
         cls.out = boot()
 
     def test_reaches_rust_and_names_itself(self):
+        # The banner is printed from rust_main, so seeing it at all means
+        # boot.s got through the image header, the EL check, the stack, the
+        # BSS and the vector table.
         self.assertIn('NETHOS kernel (nk)', self.out)
-        self.assertIn('Stage 0 reached', self.out)
+        # Stage-independent on purpose: this asserted "Stage 0 reached" and
+        # broke the moment Stage 1 changed the wording, which is a test
+        # failing for a reason that is not a bug.
+        self.assertRegex(self.out, r'Stage \d')
 
     def test_runs_at_el1(self):
         # boot.s drops from EL2 if firmware left it there. Everything from
@@ -59,6 +65,69 @@ class KernelBoot(unittest.TestCase):
     def test_never_faults_on_the_way(self):
         self.assertNotIn('!! exception', self.out)
         self.assertNotIn('!! kernel panic', self.out)
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class Stage1(unittest.TestCase):
+    """Memory, interrupts and the scheduler, checked from the serial console."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot()
+
+    def test_mmu_is_actually_on(self):
+        # Read back from SCTLR_EL1, not inferred from the kernel still
+        # running: under an identity map a kernel that failed to enable the
+        # MMU behaves identically until something needs a cache.
+        m = re.search(r'sctlr_el1 (0x[0-9a-f]+)\s+M=(\d) C=(\d) I=(\d)', self.out)
+        self.assertIsNotNone(m, f'no sctlr line in:\n{self.out}')
+        self.assertEqual((m.group(2), m.group(3), m.group(4)), ('1', '1', '1'))
+
+    def test_reserves_the_kernel_and_the_device_tree(self):
+        # Not a round number: whatever is left after the image and the DTB are
+        # held back. A kernel that handed out its own pages would report the
+        # full count here and fail later, somewhere else entirely.
+        m = re.search(r'frames: \d+ of (\d+) pages', self.out)
+        self.assertIsNotNone(m)
+        total = int(m.group(1))
+        self.assertLess(total, 512 * 1024 // 4, 'nothing was reserved')
+        self.assertGreater(total, 500 * 1024 // 4, 'far too much was reserved')
+
+    def test_heap_passes_its_own_checks(self):
+        self.assertIn('heap ok', self.out, 'the boot-time heap self-test did not pass')
+
+    def test_gic_and_timer_come_up(self):
+        self.assertIn('gic:    v3 up', self.out)
+        self.assertRegex(self.out, r'timer:  100 Hz on PPI 27')
+
+    def test_two_threads_alternate_under_preemption(self):
+        # The whole point of Stage 1. Neither worker yields: each spins until
+        # the tick count moves, so every switch between them is involuntary.
+        order = re.findall(r'\] (ping|pong) #(\d+)', self.out)
+        self.assertGreaterEqual(len(order), 16, f'threads did not run:\n{self.out}')
+        # Strictly alternating, and each counter strictly increasing -- a lost
+        # callee-saved register or a switch onto the wrong stack shows up here
+        # as a counter that repeats or jumps.
+        for i, (name, n) in enumerate(order[:16]):
+            self.assertEqual(name, 'ping' if i % 2 == 0 else 'pong', 'threads did not alternate')
+            self.assertEqual(int(n), i // 2 + 1, 'a thread lost its local state across a switch')
+
+    def test_both_threads_finish(self):
+        self.assertIn('ping done', self.out)
+        self.assertIn('pong done', self.out)
+
+    def test_slices_are_shared_out(self):
+        # Round robin over three runnable tasks. Nothing should be starved,
+        # and nothing should be getting all of it.
+        slices = [int(n) for n in re.findall(r'(\d+) slices', self.out)]
+        self.assertGreaterEqual(len(slices), 3)
+        self.assertGreater(min(slices), 0, 'a task was starved')
+        self.assertLess(max(slices) - min(slices), 5, f'slices badly skewed: {slices}')
+
+    def test_no_faults_or_spurious_interrupts(self):
+        self.assertNotIn('!! exception', self.out)
+        self.assertNotIn('!! kernel panic', self.out)
+        self.assertNotIn('!! unexpected interrupt', self.out)
 
 
 @unittest.skipUnless(BIN.exists(), 'kernel not built')
