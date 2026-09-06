@@ -146,19 +146,44 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         sys_exit(frame.x[0] as i32);
     }
 
-    // LKL treats user pointers as kernel pointers. Only reviewed scalar
-    // calls cross directly; pointer-bearing calls need explicit copying.
-    let ret = match frame.x[8] {
-        64 => sys_write(frame.x[0], frame.x[1], frame.x[2]),
-        #[cfg(nk_lkl)]
-        172 | 174 | 175 | 176 | 177 | 178 => crate::lkl::syscall(frame.x[8] as i64, [0; 6]),
-        _ => {
-            println!("  syscall {} is not implemented", frame.x[8]);
-            -38
-        }
+    // The console is nk's, and only the console.
+    //
+    // File descriptors 1 and 2 have no meaning to Linux here: nk's process
+    // has a Linux task, but nothing has opened a terminal for it and there is
+    // no terminal to open. So writes to them go to nk's UART, and everything
+    // else -- including writes to a descriptor the process opened itself --
+    // is Linux's. This is the one place nk still answers on Linux's behalf,
+    // and it goes away when there is a real console device.
+    let ret = if frame.x[8] == 64 && (frame.x[0] == 1 || frame.x[0] == 2) {
+        sys_write(frame.x[0], frame.x[1], frame.x[2])
+    } else {
+        forward(frame.x[8], &frame.x[..6].try_into().unwrap())
     };
 
     frame.x[0] = ret as u64;
+}
+
+/// Hand a call to Linux, with its pointers copied across.
+#[cfg(nk_lkl)]
+fn forward(nr: u64, args: &[u64; 6]) -> i64 {
+    match crate::syscall::forward(nr, args) {
+        Some(ret) => ret,
+        None => {
+            // Named, not merely refused. The list of what to describe next is
+            // written by whatever real binary runs here, which is a better
+            // order than guessing at it.
+            println!("  syscall {} has no descriptor yet", nr);
+            -38 // -ENOSYS
+        }
+    }
+}
+
+/// Without Linux there is nothing to forward to, and nk's own table is two
+/// entries: the console, and exit.
+#[cfg(not(nk_lkl))]
+fn forward(nr: u64, _args: &[u64; 6]) -> i64 {
+    println!("  syscall {} is not implemented", nr);
+    -38
 }
 
 /// # write(fd, buf, count)
@@ -170,31 +195,22 @@ fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
     if fd != 1 && fd != 2 {
         return -9; // -EBADF
     }
-    if buf.checked_add(count).is_none() {
-        return -14;
+    let count = (count as usize).min(crate::uaccess::MAX_TRANSFER);
+    let mut bytes = alloc::vec![0u8; count];
+    if crate::uaccess::copy_from_user(&mut bytes, buf).is_err() {
+        // Said out loud, because a refusal that only shows up as an errno in
+        // an exit status is a thing nobody reads.
+        println!("  refused a user pointer into kernel memory (EFAULT)");
+        return crate::uaccess::EFAULT;
     }
-    // Bound time spent in the console path with exceptions masked.
-    let count = count.min(4096);
-    let mut copied = 0usize;
     let uart = crate::uart::console();
-    while copied < count as usize {
-        let Some(pa) = paging::user_to_phys(buf + copied as u64) else {
-            if copied == 0 {
-                // Said out loud, because a refusal that only shows up as an
-                // errno in an exit status is a thing nobody reads.
-                println!("  refused a user pointer into kernel memory (EFAULT)");
-                return -14;
-            }
-            return copied as i64;
-        };
-        let byte = unsafe { core::ptr::read_volatile(pa as *const u8) };
-        if byte == b'\n' {
+    for b in &bytes {
+        if *b == b'\n' {
             uart.put(b'\r');
         }
-        uart.put(byte);
-        copied += 1;
+        uart.put(*b);
     }
-    copied as i64
+    count as i64
 }
 
 fn sys_exit(status: i32) -> ! {

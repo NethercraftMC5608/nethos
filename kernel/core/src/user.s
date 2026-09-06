@@ -193,6 +193,50 @@ __user_blob_start:
     cmp     x20, x19
     b.ne    9f
 
+    // Open this very file through Linux's VFS, read its header back, and
+    // print it. Every pointer here -- the path, the buffer -- is a user
+    // address that nk copies across rather than handing to Linux.
+    mov     x0, #-100               // AT_FDCWD
+    adr     x1, 3f                  // "/nk-init"
+    mov     x2, #0                  // O_RDONLY
+    mov     x3, #0
+    mov     x8, #56                 // __NR_openat
+    svc     #0
+    mov     x22, x0
+    tbnz    x22, #63, 4f            // negative: openat failed, skip
+
+    sub     sp, sp, #64
+    mov     x0, x22
+    mov     x1, sp
+    mov     x2, #16
+    mov     x8, #63                 // __NR_read
+    svc     #0
+    mov     x23, x0
+
+    mov     x0, #1
+    adr     x1, 5f
+    mov     x2, 6f - 5f
+    mov     x8, #64
+    svc     #0
+
+    add     x1, sp, #1              // skip the 0x7f, print "ELF"
+    mov     x0, #1
+    mov     x2, #3
+    mov     x8, #64
+    svc     #0
+
+    mov     x0, #1
+    adr     x1, 7f
+    mov     x2, #1
+    mov     x8, #64
+    svc     #0
+    add     sp, sp, #64
+
+    mov     x0, x22
+    mov     x8, #57                 // __NR_close
+    svc     #0
+4:
+
     // Then something the kernel must refuse: 0x40080000 is the kernel's own
     // image. Whoever answers, a user pointer into kernel memory has to come
     // back as an error rather than as the kernel's first instructions.
@@ -205,10 +249,18 @@ __user_blob_start:
     cmp     x20, #14
     b.ne    9f
 
-    // Pointer-bearing calls without a marshaller must never enter LKL.
-    mov     x8, #56                 // openat
+    // A call nk has no descriptor for must not reach LKL.
+    //
+    // This asserted that of `openat` until openat grew a descriptor, at which
+    // point the program was asserting the absence of the feature that had
+    // just been added. `mount` stands in now: it takes four pointers, nk does
+    // not describe it, and forwarding it unmarshalled would hand Linux user
+    // addresses it cannot safely hold. When mount is described, this line
+    // moves to whatever is still undescribed -- the check is the rule, not
+    // the number.
+    mov     x8, #40                 // __NR_mount
     svc     #0
-    cmn     x0, #38
+    cmn     x0, #38                 // -ENOSYS
     b.ne    9f
 
     // The ELF file ends before this word; PT_LOAD's memory tail must be zero.
@@ -236,6 +288,11 @@ __user_blob_start:
 0:  b       0b
 1:  .ascii  "hello from EL0 -- this is user space, on nk.\n"
 2:
+3:  .asciz  "/nk-init"
+5:  .ascii  "  /nk-init, opened and read from EL0 through Linux, begins: "
+6:
+7:  .ascii  "\n"
+.balign 4
 .balign 4
 .global __user_blob_end
 __user_blob_end:

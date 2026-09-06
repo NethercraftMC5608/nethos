@@ -206,6 +206,30 @@ pub unsafe fn map_user_permissions(ttbr0: u64, va: u64, pa: u64, size: u64, exec
 /// This is the smallest honest `copy_from_user`. It is also slow: one
 /// translation per byte in the caller above. Batching by page is the obvious
 /// next step and needs no new mechanism.
+/// As `user_to_phys`, but asks whether EL0 may *write* there.
+///
+/// A separate instruction, not a flag: `AT S1E0R` and `AT S1E0W` ask
+/// different questions, and a read-only user page answers yes to the first
+/// and no to the second. Copying a syscall's results back through the read
+/// check would let a process ask the kernel to write into its own text.
+pub fn user_to_phys_write(va: u64) -> Option<u64> {
+    let par: u64;
+    unsafe {
+        core::arch::asm!(
+            "at s1e0w, {va}",
+            "isb",
+            "mrs {par}, par_el1",
+            va = in(reg) va,
+            par = out(reg) par,
+            options(nostack)
+        );
+    }
+    if par & 1 != 0 {
+        return None;
+    }
+    Some((par & 0x0000_ffff_ffff_f000) | (va & 0xfff))
+}
+
 pub fn user_to_phys(va: u64) -> Option<u64> {
     let par: u64;
     unsafe {

@@ -29,6 +29,9 @@ pub mod sched;
 pub mod selftest;
 pub mod stub;
 pub mod sync;
+#[cfg(nk_lkl)]
+pub mod syscall;
+pub mod uaccess;
 pub mod user;
 pub mod timer;
 pub mod uart;

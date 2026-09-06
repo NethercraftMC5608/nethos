@@ -351,9 +351,30 @@ class LinuxOnNk(unittest.TestCase):
         self.assertEqual(self.out.count('ELF: 1 PT_LOAD segment(s)'), 2)
 
     def test_lkl_user_pointer_boundary(self):
+        # This used to assert `syscall 56 is not implemented`, which was the
+        # old contract: pointer-bearing calls were refused outright. openat
+        # has a descriptor now, so the assertion had become a claim that the
+        # feature was absent. What still holds -- and what the boundary is
+        # actually for -- is that a *kernel* address is refused whoever asks.
         self.assertIn('refused a user pointer into kernel memory (EFAULT)', self.out)
-        self.assertIn('syscall 56 is not implemented', self.out)
         self.assertIn('hello from EL0 -- this is user space, on nk.', self.out)
+
+    def test_a_process_reads_a_file_through_linuxs_vfs(self):
+        # The marshalling layer, end to end. Every pointer in this -- the
+        # path handed to openat, the buffer handed to read -- is a user
+        # address that nk copied across rather than giving to Linux, because
+        # Linux blocks inside syscalls and TTBR0 changes underneath it.
+        #
+        # "ELF" is the first three printable bytes of /nk-init, which is the
+        # process's own executable, read back out of Linux's rootfs.
+        self.assertIn('opened and read from EL0 through Linux, begins: ELF', self.out)
+
+    def test_an_undescribed_syscall_is_refused_and_named(self):
+        # 40 is mount: four pointers, no descriptor. Forwarding it
+        # unmarshalled would hand Linux user addresses it cannot safely hold.
+        # Naming the number is how the list of what to describe next gets
+        # written by a real binary rather than guessed at.
+        self.assertIn('syscall 40 has no descriptor yet', self.out)
 
     def test_nothing_faulted(self):
         self.assertNotIn('!!EXC', self.out)
