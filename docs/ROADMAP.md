@@ -238,6 +238,39 @@ handful of triggers that matter.
       section 5 has ~14s of boot time NETHOS actually owns, and the last
       memory win came from one process change rather than a scheduler.
 
+### nk -- a kernel of our own, hosting unmodified Linux drivers
+
+`kernel/`, and `docs/KERNEL.md` is the documentation. A **sibling project, not
+a replacement**: the shipping images keep booting Debian's kernel, and nothing
+in `payload/`, `pkg/` or the image build depends on any of this. Stated up
+front because the honest horizon for stages 0-4 is 6-12 months, and Genode's
+equivalent is a funded team over roughly a decade.
+
+The design rests on one fact: Linux driver source cannot be translated into
+another kernel's driver model, because Linux has no stable in-kernel API and a
+driver is welded to the kernel's internals rather than written against an
+interface. What does work -- Genode's `dde_linux`, LKL, rump kernels -- is to
+keep the driver source byte-for-byte, compile it against Linux's own headers,
+and reimplement underneath it only the out-of-line symbols the linker names.
+The shim is discovered, not designed.
+
+- [x] **Stage 0.** Boots on QEMU `virt` under HVF, reaches Rust from the reset
+      vector, owns the exception table, and is handed a device tree. Cost one
+      real bug: QEMU passes no DTB at all to an ELF kernel, so `boot.s` carries
+      the arm64 Linux image header and `run-kernel.sh` boots the flat binary.
+- [ ] **Stage 1.** Device tree, frame allocator, MMU, kernel heap, GICv3,
+      generic timer, threads. Done when two threads alternate on a tick.
+- [ ] **Stage 2.** `ldk` -- compile a driver against Linux headers, list its
+      undefined symbols, generate panicking stubs, report coverage. Extends
+      `pkg/npkg_elf.py`, which already reads ELF symbol tables, rather than
+      shelling out to `nm`.
+- [ ] **Stage 3.** Unmodified `virtio_mmio` + `virtio_blk`. Forces most of the
+      shim that will ever exist. Done when nk reads a sector.
+- [ ] **Stage 4.** `virtio_net`, then `e1000` -- a real vendor driver that does
+      not cooperate. Done when nk answers an ARP request.
+- [ ] **Stage 5.** Decide against `ldk report`'s numbers whether USB, DRM or
+      WiFi is worth attempting. Genode still does not do GPU.
+
 ### Not started, and honest about why
 
 - [ ] **ARM.** `build-image.sh` targets arm64 and `build-arm.sh` exists, so

@@ -128,6 +128,24 @@ unrelated-looking bug. `docs/INTERNALS.md` lists all ten.
 
 ---
 
+### A kernel of our own is being built beside it
+
+`kernel/` is **nk**: our own core — MMU, allocator, scheduler — that runs
+**unmodified Linux driver source** on a reimplemented Linux internal API. Not
+translated drivers; there is no such thing, because Linux has no stable
+in-kernel API and a driver is welded to the kernel's internals rather than
+written against an interface. The approach is Genode's and LKL's: keep the
+driver source byte-for-byte, compile it against Linux's own headers, and
+implement what the linker says is missing.
+
+```bash
+scripts/run-kernel.sh        # boots on QEMU virt, natively under HVF on a Mac
+```
+
+It is a **sibling, not a replacement**. NETHOS still boots Debian's kernel and
+nothing above depends on this. `docs/KERNEL.md` has the architecture, the
+stages, and an honest account of what it will and will not reach.
+
 ## What it is built from, honestly
 
 - **Debian's binary packages and kernel.** NETHOS is Debian-derived, the way
@@ -147,6 +165,7 @@ pkg/npkg_elf.py        DT_SONAME / DT_NEEDED - the capability index
 pkg/npkg_bootstrap.py  building a root filesystem from nothing
 pkg/npkg_service.py    enabling systemd units without systemctl
 payload/               the desktop: shell, nethosd, nethos-view, apps
+kernel/                nk: our own kernel, hosting unmodified Linux drivers
 scripts/               build, run, and flash
 docs/                  everything below
 ```
@@ -167,6 +186,7 @@ flattened away, `sbin` merged into `bin`, `wheel` for administrators.
 | `docs/INSTALLER.md` | the online installer: design and sizes |
 | `docs/ABUPDATE.md` | A/B slot updates: the design, and why it is not built yet |
 | `docs/HANDOFF.md` | current state and open problems |
+| `docs/KERNEL.md` | nk: a kernel of our own that runs unmodified Linux drivers |
 
 ## Downloads
 

@@ -1,0 +1,17 @@
+[build]
+target = "aarch64-unknown-none-softfloat"
+
+[target.aarch64-unknown-none-softfloat]
+rustflags = [
+  # The MMU is off until Stage 1, and with it off every access is
+  # Device-nGnRnE, which faults on an unaligned load or store. LLVM will
+  # happily emit unaligned accesses for struct copies otherwise, and the
+  # result is an alignment fault in code that looks completely innocent.
+  "-C", "target-feature=+strict-align",
+  # A fixed-address kernel with no dynamic loader. Without this LLVM emits
+  # GOT-relative sequences that nothing will ever relocate.
+  "-C", "relocation-model=static",
+]
+
+[unstable]
+# nothing -- this builds on stable, deliberately.

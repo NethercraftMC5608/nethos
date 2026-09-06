@@ -1,0 +1,15 @@
+# One workspace so `cargo build` at kernel/ builds everything that is Rust.
+# The shim (linux/) is C and is built by the Makefile, not by cargo.
+[workspace]
+resolver = "2"
+members = ["core"]
+
+# Bare metal has no unwinder, so a panic that tried to unwind would call into
+# personality routines that do not exist and fail to link. Abort in both
+# profiles; the panic handler prints first.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
