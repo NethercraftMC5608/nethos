@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 static int shared = 1;
 
@@ -15,6 +16,16 @@ int main(void)
 {
 	pid_t child, seen;
 	int status;
+	int fd;
+	char buf[16] = "";
+
+	/* A descriptor opened before the fork. The child must be able to read
+	 * through it, which is what redirection in a shell is made of. */
+	fd = open("/etc/nk-greeting", O_RDONLY);
+	if (fd < 0) {
+		perror("open");
+		return 5;
+	}
 
 	child = fork();
 	if (child < 0) {
@@ -23,8 +34,19 @@ int main(void)
 	}
 
 	if (child == 0) {
+		ssize_t n;
+
 		shared = 20;
 		printf("child: fork() returned 0, shared is %d\n", shared);
+		n = read(fd, buf, 8);
+		if (n != 8) {
+			printf("child: could not read the inherited fd\n");
+			fflush(stdout);
+			_exit(6);
+		}
+		buf[8] = 0;
+		printf("child: read \"%s\" through a descriptor its parent opened\n",
+		       buf);
 		fflush(stdout);
 		_exit(9);
 	}

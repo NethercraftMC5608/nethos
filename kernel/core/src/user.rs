@@ -443,6 +443,8 @@ struct Forked {
     brk_min: u64,
     mmap_next: u64,
     tpidr: u64,
+    /// Whose descriptors the child is to inherit.
+    parent_pid: i64,
     /// Signalled once the child has a Linux pid, because `fork` has to return
     /// that pid to the parent and only the child can obtain one: attaching
     /// binds the Linux task to the host thread it runs on.
@@ -502,6 +504,7 @@ fn fork(frame: &Frame) -> i64 {
         brk_min,
         mmap_next,
         tpidr,
+        parent_pid: crate::sched::linux_pid(crate::sched::current_id()),
         ready,
         pid,
     })) as usize;
@@ -530,8 +533,14 @@ extern "C" fn forked_entry(arg: usize) {
     // a shell will need. It is a limitation, not a design.
     let pid = crate::lkl::attach_process().expect("Linux process attach failed");
     crate::sched::bind_linux_pid(pid);
+    // Before the parent is told the child exists, so the parent cannot close
+    // a descriptor between forking and the child copying it.
+    let inherited = crate::lkl::inherit_fds(f.parent_pid);
     f.pid.store(pid, Ordering::Release);
     f.ready.up();
+    if inherited > 0 {
+        println!("  fork: child {} inherited {} descriptors", pid, inherited);
+    }
 
     crate::sched::set_user_memory_full(f.brk, f.brk_min, f.mmap_next);
     unsafe {

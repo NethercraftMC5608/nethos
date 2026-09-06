@@ -580,8 +580,9 @@ class Fork(unittest.TestCase):
     def setUpClass(cls):
         root = ROOT / 'kernel/ldk/build/fork-root'
         shutil.rmtree(root, ignore_errors=True)
-        root.mkdir(parents=True)
+        (root / 'etc').mkdir(parents=True)
         shutil.copy(build_c('fork', 'nk-fork'), root / 'nk-init')
+        (root / 'etc/nk-greeting').write_text('inherited\n')
         cls.out = boot('--lkl', '--initrd', str(make_cpio(root, 'fork.cpio')),
                        timeout=180, watchdog=90)
 
@@ -594,6 +595,15 @@ class Fork(unittest.TestCase):
         # page would make one of these read the other's value.
         self.assertIn('child: fork() returned 0, shared is 20', self.out)
         self.assertIn('parent: fork() returned a pid, shared is 10', self.out)
+
+    def test_the_child_inherits_its_parents_descriptors(self):
+        # The parent opens a file before forking and the child reads through
+        # the same descriptor number. LKL clones every task from its own init,
+        # never from the caller, so this is pidfd_open plus pidfd_getfd rather
+        # than anything the task model gives us.
+        self.assertRegex(self.out, r'fork: child \d+ inherited \d+ descriptors')
+        self.assertIn('child: read "inherite" through a descriptor its parent'
+                      ' opened', self.out)
 
     def test_the_parent_reaps_the_child_and_reads_its_status(self):
         self.assertIn('parent: reaped its child, which exited 9', self.out)

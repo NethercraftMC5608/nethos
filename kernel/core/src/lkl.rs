@@ -75,6 +75,60 @@ pub fn write_file(path: &core::ffi::CStr, bytes: &[u8]) -> Result<(), i64> {
     let close = syscall(57, [fd, 0, 0, 0, 0, 0]);
     result.and(if close < 0 { Err(close) } else { Ok(()) })
 }
+/// Give the calling task a copy of another task's open descriptors.
+///
+/// A forked child should inherit its parent's descriptors -- redirection in a
+/// shell is a `dup2` in the child of a file the parent opened -- and LKL does
+/// not provide that. Its `new_thread_group_leader` clones from LKL's own init
+/// task, never from the caller, so every nk process starts with an empty
+/// table no matter who forked it.
+///
+/// Rather than patch LKL's task creation, this uses the syscalls Linux
+/// already has for reaching into another process's descriptor table:
+/// `pidfd_open` to name the parent and `pidfd_getfd` to pull each descriptor
+/// across. That is what a debugger or a container runtime does, it needs no
+/// kernel change, and it copies the *description* -- the child shares the
+/// file offset with its parent, which is what fork means and what makes two
+/// processes appending to the same log not overwrite each other.
+///
+/// Returns how many it inherited.
+pub fn inherit_fds(parent_pid: i64) -> usize {
+    const PIDFD_OPEN: i64 = 434;
+    const PIDFD_GETFD: i64 = 438;
+    const DUP3: i64 = 24;
+    const CLOSE: i64 = 57;
+    // Far more than anything here opens, and bounded because this is a linear
+    // scan: there is no "list the open descriptors" syscall, only asking.
+    const MAX_FD: i64 = 64;
+
+    let pidfd = syscall(PIDFD_OPEN, [parent_pid, 0, 0, 0, 0, 0]);
+    if pidfd < 0 {
+        return 0;
+    }
+    let mut n = 0;
+    for fd in 0..MAX_FD {
+        let got = syscall(PIDFD_GETFD, [pidfd, fd, 0, 0, 0, 0]);
+        if got < 0 {
+            continue; // the parent has nothing there
+        }
+        // pidfd_getfd allocates the lowest free descriptor, which is not
+        // necessarily the number the parent used -- and the number is what a
+        // program depends on. Descriptors already placed are occupied, so the
+        // lowest free is never one of them and moving this one cannot
+        // dislodge an earlier one.
+        if got != fd {
+            if syscall(DUP3, [got, fd, 0, 0, 0, 0]) < 0 {
+                syscall(CLOSE, [got, 0, 0, 0, 0, 0]);
+                continue;
+            }
+            syscall(CLOSE, [got, 0, 0, 0, 0, 0]);
+        }
+        n += 1;
+    }
+    syscall(CLOSE, [pidfd, 0, 0, 0, 0, 0]);
+    n
+}
+
 /// Create a directory, treating "it is already there" as success.
 ///
 /// A cpio archive lists directories before their contents, but it does not
