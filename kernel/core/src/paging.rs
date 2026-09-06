@@ -56,6 +56,16 @@ mod pte {
     pub const UXN: u64 = 1 << 54; // never executable at EL0
     pub const PXN: u64 = 1 << 53; // never executable at EL1
 
+    /// Not global: this translation belongs to one ASID only.
+    ///
+    /// Every mapping nk made was global, which is the default and is wrong
+    /// for user space: a global entry is valid in every address space, so two
+    /// processes with pages at the same address share whichever the TLB saw
+    /// first. It was invisible because nk flushed the whole TLB on every
+    /// switch -- which is both slower and less correct than saying what is
+    /// actually private.
+    pub const NG: u64 = 1 << 11;
+
     /// AP[2:1] at bits 7:6. EL0 can only reach a page that says so; there is
     /// no separate user page table, only this bit.
     pub const AP_RW_ANY: u64 = 1 << 6; // read/write at EL1 and EL0
@@ -178,6 +188,28 @@ pub unsafe fn map_normal(va: u64, pa: u64, size: u64) {
 
 const L3_SHIFT: u64 = 12;
 
+/// Mask for the output address in a descriptor or a TTBR value.
+const ADDR: u64 = 0x0000_ffff_ffff_f000;
+
+/// The table a TTBR value points at, without its ASID.
+///
+/// TTBR0_EL1 carries the ASID in bits [63:48], so the register value and the
+/// table pointer are no longer the same number. Every walk goes through this
+/// -- dereferencing a TTBR value directly reads memory at `asid << 48 |
+/// table`, which is unmapped, and the fault names the address rather than the
+/// mistake.
+pub const fn table_of(ttbr: u64) -> u64 {
+    ttbr & ADDR
+}
+
+/// A descriptor is a table when both low bits are set. A *block* has only
+/// bit 0, and telling them apart matters wherever tables are walked or freed:
+/// a block's output address is memory, and following it as a table reads a
+/// gigabyte of RAM as page-table entries.
+const fn is_table(entry: u64) -> bool {
+    entry & 3 == 3
+}
+
 /// A fresh address space for a process.
 ///
 /// It starts as a copy of the kernel's top-level table, so that kernel code
@@ -191,6 +223,26 @@ const L3_SHIFT: u64 = 12;
 /// move there. Until then, every process carries a copy of the kernel's
 /// mappings and `USER_BASE` sits in a top-level slot the kernel does not use,
 /// so that adding to one address space cannot alter another.
+/// Address-space identifiers, so the hardware can tell one process's
+/// translations from another's.
+///
+/// nk used ASID 0 everywhere and flushed the entire TLB on every switch. That
+/// is correct and expensive, and it hides mistakes: with distinct ASIDs a
+/// stale entry from another address space cannot be used at all, rather than
+/// being avoided by a flush somebody has to remember.
+static mut NEXT_ASID: u64 = 1;
+
+fn next_asid() -> u64 {
+    unsafe {
+        // 8-bit ASIDs are the minimum the architecture guarantees. Wrapping
+        // reuses one, which is why the switch still flushes -- a real
+        // implementation tracks generations and flushes only on rollover.
+        let a = NEXT_ASID;
+        NEXT_ASID = if NEXT_ASID >= 255 { 1 } else { NEXT_ASID + 1 };
+        a
+    }
+}
+
 pub fn new_address_space() -> u64 {
     unsafe {
         let l0 = crate::frames::alloc().expect("no memory for an address space") as *mut u64;
@@ -212,7 +264,9 @@ pub fn new_address_space() -> u64 {
         core::ptr::copy_nonoverlapping(&raw const L2_LOW as *const Table as *const u64, l2, 512);
         *l0 = (l1 as u64) | pte::VALID | pte::TABLE;
         *l1 = (l2 as u64) | pte::VALID | pte::TABLE;
-        l0 as u64
+        // TTBR0_EL1[63:48] is the ASID; TCR_EL1.A1 is 0, so TTBR0 is what
+        // defines it.
+        (l0 as u64) | (next_asid() << 48)
     }
 }
 
@@ -230,7 +284,7 @@ pub unsafe fn map_user(ttbr0: u64, va: u64, pa: u64, size: u64, exec: bool) {
 /// Same requirements as `map_user`; writable executable pages are forbidden.
 pub unsafe fn map_user_permissions(ttbr0: u64, va: u64, pa: u64, size: u64, exec: bool, writable: bool) {
     assert!(!(exec && writable));
-    let l0 = ttbr0 as *mut u64;
+    let l0 = table_of(ttbr0) as *mut u64;
     let mut off = 0;
     while off < size {
         let v = va + off;
@@ -242,7 +296,9 @@ pub unsafe fn map_user_permissions(ttbr0: u64, va: u64, pa: u64, size: u64, exec
         // entry without it is simply invalid, and the fault says nothing
         // about why.
         let perms = (if writable { pte::AP_RW_ANY } else { pte::AP_RO_ANY })
-            | pte::PXN | if exec { 0 } else { pte::UXN };
+            | pte::PXN
+            | pte::NG
+            | if exec { 0 } else { pte::UXN };
         *l3.add(((v >> L3_SHIFT) & 511) as usize) = (pa + off)
             | pte::VALID
             | pte::TABLE
@@ -258,7 +314,7 @@ pub unsafe fn map_user_permissions(ttbr0: u64, va: u64, pa: u64, size: u64, exec
 /// PROBE: walk a table by hand and print every descriptor.
 pub fn dump_walk(ttbr0: u64, va: u64) {
     unsafe {
-        let l0 = ttbr0 as *const u64;
+        let l0 = table_of(ttbr0) as *const u64;
         let e0 = *l0.add(((va >> L0_SHIFT) & 511) as usize);
         crate::println!("    L0[{}] = {:#018x}", (va >> L0_SHIFT) & 511, e0);
         if e0 & pte::VALID == 0 { return; }
@@ -483,18 +539,46 @@ pub fn kernel_address_space() -> u64 { &raw const L0 as u64 }
 /// This is a finished, single-threaded process's inactive address space,
 /// created by new_address_space/map_user in USER_BASE's top-level slot only.
 pub unsafe fn destroy_user_address_space(root: u64) {
-    unsafe fn free_table(table: *mut u64, level: usize) {
-        for i in 0..512 {
-            let entry = *table.add(i);
-            if entry & 1 == 0 { continue; }
-            let child = (entry & 0x0000_ffff_ffff_f000) as *mut u64;
-            if level < 3 { free_table(child, level+1); }
-            else { crate::frames::free(child as *mut u8); }
+    // Only what this address space owns.
+    //
+    // Its L0, L1 and low L2 are its own copies, and the L3s hanging off that
+    // L2 are its own. Everything else in L0 and L1 is a copy of the kernel's
+    // and is shared with every other process -- including a one-gigabyte RAM
+    // *block* at L1[1], which the previous version of this function would
+    // have followed as though it were a table and freed a gigabyte of the
+    // kernel's memory one page-table entry at a time.
+    //
+    // That was safe only because user space used to live under its own
+    // top-level entry, where nothing was shared. It stopped being safe the
+    // moment processes moved into the low half.
+    let l0 = table_of(root) as *mut u64;
+    assert_ne!(table_of(root), table_of(kernel_address_space()));
+
+    let e0 = *l0;
+    if is_table(e0) {
+        let l1 = (e0 & ADDR) as *mut u64;
+        let e1 = *l1;
+        if is_table(e1) {
+            let l2 = (e1 & ADDR) as *mut u64;
+            for i in 0..512 {
+                let e2 = *l2.add(i);
+                // Tables are this process's leaf levels. Blocks are the
+                // copied device mappings and belong to everyone.
+                if !is_table(e2) {
+                    continue;
+                }
+                let l3 = (e2 & ADDR) as *mut u64;
+                for j in 0..512 {
+                    let e3 = *l3.add(j);
+                    if e3 & 1 != 0 {
+                        crate::frames::free((e3 & ADDR) as *mut u8);
+                    }
+                }
+                crate::frames::free(l3 as *mut u8);
+            }
+            crate::frames::free(l2 as *mut u8);
         }
-        crate::frames::free(table as *mut u8);
+        crate::frames::free(l1 as *mut u8);
     }
-    assert_ne!(root, kernel_address_space());
-    let entry = *(root as *const u64).add((crate::user::USER_BASE >> 39) as usize);
-    if entry & 1 != 0 { free_table((entry & 0x0000_ffff_ffff_f000) as *mut u64, 1); }
-    crate::frames::free(root as *mut u8);
+    crate::frames::free(l0 as *mut u8);
 }

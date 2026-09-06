@@ -332,11 +332,24 @@ the one below it.
       translates with `AT S1E0R` so a pointer into kernel memory is refused
       with `EFAULT` -- demonstrated, not asserted: the demo carries the errno
       out through the exit status.
-- [ ] **The kernel into TTBR1's half.** Required before processes can live at
-      the low addresses every real binary is linked for, and it removes the
-      copy of the kernel's tables every address space currently carries.
-- [ ] **An ELF loader and a filesystem to load from.** The program is
-      currently assembly in the kernel image.
+- [x] **Processes at the addresses real binaries use.** `USER_BASE` is
+      0x400000. Needed the device map narrowed from the whole first gigabyte
+      to the 34MB of devices that exist (which exposed three latent shim bugs
+      hiding behind it), user pages marked non-global with a per-process ASID
+      -- without which the kernel's own walking of the low half left global
+      TLB entries that poisoned the process, visible only under HVF -- and
+      address-space teardown rewritten, since it would otherwise have
+      followed a copied 1GB RAM block as though it were a table.
+- [x] **Marshalled syscall arguments.** A table describes each forwarded
+      call's arguments; buffers are copied in and out with `AT S1E0R`/`S1E0W`
+      rather than passed, because LKL is a flat address space and Linux
+      blocks inside syscalls. An undescribed call is refused, not passed
+      through. Nested pointers (`execve`, `writev`, `sendmsg`) are next.
+- [ ] **The kernel into TTBR1's half.** No longer a prerequisite for low
+      addresses, but it removes the copy of the kernel's tables that every
+      address space carries. TTBR1 is enabled and aliases the kernel already.
+- [ ] **A persistent root, and an externally supplied init.** The rootfs is
+      memory-backed and `/nk-init` is seeded from the kernel image.
 - [ ] `fork`, `exec`, `mmap`, `futex`, signals, `epoll` -- the long tail, and
       the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.

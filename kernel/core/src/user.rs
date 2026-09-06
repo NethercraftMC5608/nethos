@@ -35,8 +35,8 @@ use crate::println;
 /// the kernel never uses and every table below it is freshly allocated. That
 /// is the configuration that works on both, and the difference between the
 /// two is the clue the next attempt should start from.
-pub const USER_BASE: u64 = 0x80_0000_0000;
-pub const USER_STACK_TOP: u64 = USER_BASE + 0x10_0000;
+pub const USER_BASE: u64 = 0x0040_0000;
+pub const USER_STACK_TOP: u64 = 0x0100_0000;
 
 /// The bootstrap process entry state and its own translation table.
 pub struct Process {

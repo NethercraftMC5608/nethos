@@ -157,12 +157,12 @@ __user_elf_start:
     .zero 8
     .short 2, 183
     .long 1
-    .quad 0x8000000000              // e_entry: 4MB, where aarch64 links
+    .quad 0x400000                  // e_entry: 4MB, where aarch64 links
     .quad 64, 0
     .long 0
     .short 64, 56, 1, 0, 0, 0
     .long 1, 5
-    .quad 4096, 0x8000000000, 0         // p_offset, p_vaddr, p_paddr
+    .quad 4096, 0x400000, 0         // p_offset, p_vaddr, p_paddr
     .quad __user_blob_end - __user_blob_start
     .quad 4096
     .quad 4096

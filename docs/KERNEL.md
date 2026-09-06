@@ -297,11 +297,9 @@ execve. LKL's memory and signal-handler sharing remain its host-task model;
 user signals, FP/SIMD context, ordinary binary startup and child inheritance
 from arbitrary nk parents still need integration.
 
-And a real limitation worth stating before it is discovered: **Linux, under
-LKL, believes it is in a single flat address space.** Its `copy_from_user` is
-a `memcpy`. So the user/kernel separation nk enforces with `AT S1E0R` is
-nk's alone -- Linux will not check a pointer for us, and every syscall that
-takes one has to be checked on nk's side before it is passed through.
+And a limitation worth stating before it is discovered: the user/kernel
+separation is nk's alone. Linux will not check a pointer for us. See
+"Marshalling, and why a pointer cannot simply be passed" below.
 
 ### Filesystem-backed ELF bootstrap
 
@@ -314,17 +312,103 @@ nk validates ELF64 little-endian AArch64 ET_EXEC headers before mapping
 PT_LOAD segments, copies file bytes, zero-fills the memory tail, preserves
 write/execute permissions, and enters the file's entry point at EL0. It
 rejects dynamic images, overlapping load pages, overflowing/truncated ranges,
-kernel addresses and entries outside executable file data. The current user
-window is still at 512GiB; ordinary low-address Linux binaries need the
-kernel mapping moved first. The bootstrap stack has empty argument and
-auxiliary-vector terminators, not the full libc startup contract.
+kernel addresses and entries outside executable file data. Processes load at
+`0x400000` now, where aarch64 links a non-PIE executable. The bootstrap stack
+has empty argument and auxiliary-vector terminators, not the full libc startup
+contract.
 
 The fixture checks zero-filled memory, rejects a kernel pointer with EFAULT,
-and checks that an unimplemented pointer-bearing syscall returns ENOSYS.
-It then prints via nk's checked console write and exits with Linux's getpid.
-Only reviewed identity calls pass directly to LKL. Forwarding arbitrary
-syscalls would bypass nk's memory protection because LKL copies pointers
-without checking EL0 access permissions.
+opens `/nk-init` by path and reads its own ELF magic back, checks that a
+syscall nk has not described returns ENOSYS, prints via nk's checked console
+write, and exits with Linux's getpid.
+
+### Marshalling, and why a pointer cannot simply be passed
+
+**Linux, under LKL, believes it is in a single flat address space.** Its
+`copy_from_user` is a `memcpy`. Handing it an EL0 pointer would therefore
+bypass every protection nk has -- and would not work anyway, because nk
+switches `TTBR0` and Linux *blocks inside syscalls*: the address space the
+pointer belonged to can be gone by the time Linux dereferences it.
+
+So arguments are copied, not passed. `syscall.rs` holds a table describing
+each forwarded call's six arguments:
+
+```rust
+enum Arg { Scalar, Path, In(usize), Out(usize), Struct(usize) }
+```
+
+`In` is copied EL0→kernel before the call, `Out` kernel→EL0 after it, `Struct`
+both ways, `Path` is a NUL-terminated string bounded at `PATH_MAX`, and the
+length that sizes `In`/`Out` is named by *argument index* because that is how
+the calls themselves are shaped -- `read`'s count is argument 2. A call with
+no description returns `None` and the caller reports the number rather than
+guessing; **a missing entry is a refusal, never a passthrough.**
+
+`uaccess.rs` does the copying, a page at a time, with `AT S1E0R` for reads and
+`AT S1E0W` for writes -- two instructions, because read and write permission
+are different questions and asking the wrong one lets a read-only page be
+written. Transfers are bounded at 64KB.
+
+What this does not yet do is *nested* pointers. `execve`'s argv and envp,
+`writev`'s iovecs, `sendmsg`'s control messages are arrays of pointers into
+user memory, and each has to be walked and each element copied. That is the
+next piece of the layer, and it is the reason those calls are absent rather
+than described.
+
+### The low half, and the global mapping that was blocking it
+
+`USER_BASE` is `0x400000`. Getting there took three things, and the middle one
+is the reason this has its own section.
+
+**The devices had to stop occupying the whole first gigabyte.** `paging` mapped
+`0..1GB` as one block because that was the cheapest thing that worked. The
+machine has 34MB of devices, at `0x8000000..0xa200000`, so the map is now a
+table of 2MB blocks covering only those. Narrowing it immediately exposed three
+shim bugs that had been writing to address 0 and getting away with it: a
+`cpumask_var_t` that was never allocated (`CPUMASK_OFFSTACK=y` makes it a
+pointer), `alloc_netdev_mqs` never allocating `_tx`/`_rx`, and `free_skb`
+freeing a head that belonged to `build_skb`'s caller. **A too-generous mapping
+does not prevent bugs; it hides them.**
+
+**Every mapping nk made was global.** With the devices out of the way,
+`0x400000` was free -- and a process there faulted at level 2, on descriptors
+that read back correct at every level in raw memory, with `AT S1E1R` agreeing
+with the fault, **only under HVF**. Under `--tcg` the same kernel and the same
+tables ran it to completion.
+
+The cause was two defaults nk had never had reason to question. The `nG` bit
+is off unless you set it, and a global translation is valid in *every* address
+space regardless of ASID -- so the kernel's own constant walking of the low
+half, where it is identity mapped, left entries that the process's
+translations then collided with. And every address space used ASID 0, nk
+flushing the whole TLB at each switch instead: slower, and it hides exactly
+this, because with distinct ASIDs a stale entry from another address space
+*cannot be used*, rather than being avoided by a flush somebody has to
+remember to write. At 512GiB neither ever showed, because the kernel never
+walks there.
+
+User pages are `nG` now and each address space carries its own ASID in
+`TTBR0[63:48]`. That also means a TTBR value and a table pointer stopped being
+the same number, which is what `paging::table_of` exists to make unmissable:
+dereferencing the register value reads memory at `asid << 48 | table`, and the
+fault names the address rather than the mistake.
+
+**Teardown had to change with it.** It used to free everything under the
+process's top-level entry, which was safe only while that entry was the
+process's alone. In the low half, L0[0] holds a *copy* of the kernel's L1 --
+including a one-gigabyte RAM **block** at L1[1] that the old code would have
+followed as though it were a table, freeing a gigabyte of kernel memory one
+page-table entry at a time. It now frees only the three tables an address
+space owns plus the leaf tables below them, and tells a table from a block
+before following anything.
+
+`TTBR1` is enabled too, and aliases the whole kernel for free: with `T1SZ` 16
+the top regime translates bits [47:0] of a high address, which for
+`PA | 0xFFFF_0000_0000_0000` *are* the physical address, so pointing `TTBR1`
+at nk's existing identity tables costs nothing and no extra memory. Moving the
+kernel to *run* from there is still right -- it would remove the copy of the
+kernel's tables every address space carries -- but it is no longer what stands
+between nk and an ordinary binary.
 
 Validation: `python3 -m unittest discover -s tests -p 'test_kernel_elf.py'`
 compiles the actual parser for host tests, including every truncated prefix
@@ -333,11 +417,11 @@ and keeps the standalone and driver-shim boot paths covered.
 
 ### What is next
 
-Attach a persistent root device to LKL, support normal executable addresses
-and startup state, marshal file and memory syscalls, and extend process
-inheritance beyond the bootstrap parent. Dynamic linking, signals, shared memory, futexes,
-thread register state and DRM/device access still require integration and
-validation. A working PID call and ELF fixture do not establish desktop
+Attach a persistent root device to LKL, walk nested pointer arguments
+(`execve`, `writev`, `sendmsg`), supply the full libc startup contract, and
+extend process inheritance beyond the bootstrap parent. Dynamic linking,
+signals, shared memory, futexes, thread register state and DRM/device access
+still require integration and validation. A working PID call and ELF fixture do not establish desktop
 compatibility or GPU acceleration.
 
 ## Historical symbol survey
@@ -537,14 +621,14 @@ Batching by page needs no new mechanism.
 An exception from EL0 does **not** change `TTBR0`. So the first instruction of
 the handler is fetched through the *process's* tables, and a table without the
 kernel in it faults before anything can report why. Every address space
-therefore starts as a copy of the kernel's top-level table, and `USER_BASE` is
-512GiB -- a top-level slot the kernel does not use -- so that building one
-process's mappings cannot alter another's.
+therefore starts as a copy of the kernel's top-level table -- three levels of
+it now that processes live in the low half and share the first gigabyte with
+the devices.
 
-A kernel in `TTBR1`'s half needs none of that, and **that is the next
-structural change.** It is also what user space at address zero requires: nk
-is identity-mapped across the bottom of the address space, so processes
-currently live at 512GiB because the obvious addresses are taken.
+A kernel in `TTBR1`'s half needs none of that, and it remains the right
+structural change. It is no longer a prerequisite for anything, though: see
+"The low half, and the global mapping that was blocking it" above for what
+actually stood in the way, which was not the address layout.
 
 `SP_EL0` is the other cost, and it is Linux's design for Linux's reason. In
 kernel mode it holds the current task, because that is where the stack-canary
@@ -642,9 +726,9 @@ address, which is all virtio-blk ever did, and fatal the moment anyone looks
 inside one.
 
 **The fix is known and is the next piece of work**: allocate a real `struct
-page` array for RAM -- 8MB for this guest -- enable `TTBR1`, and map it at
-`VMEMMAP_START`. `paging.rs` currently disables `TTBR1` outright (`TCR_EL1.
-EPD1`), so this is the first thing nk will map at a high address.
+page` array for RAM -- 8MB for this guest -- and map it at `VMEMMAP_START`.
+`TTBR1` is enabled now (it was disabled outright via `TCR_EL1.EPD1` when this
+was written), so the high half is available to map it into.
 
 Two other things Stage 4 established:
 

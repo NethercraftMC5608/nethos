@@ -253,6 +253,23 @@ class UserSpace(unittest.TestCase):
     def setUpClass(cls):
         cls.out = boot()
 
+    def test_a_process_runs_where_real_binaries_are_linked(self):
+        # 0x400000 is where aarch64 links a non-PIE executable. Getting here
+        # took two things: mapping only the 34MB of devices the machine
+        # actually has instead of the whole first gigabyte, and marking user
+        # pages non-global with a per-process ASID -- without which the
+        # kernel's own constant walking of the low half left TLB entries that
+        # poisoned the process's translations, but only under HVF.
+        self.assertRegex(self.out, r'user:\s+\d+ bytes of program at 0x400000')
+
+    def test_each_address_space_has_its_own_asid(self):
+        # TTBR0[63:48] is the ASID, so a non-zero value here means the
+        # hardware can tell this address space from the kernel's rather than
+        # relying on a full TLB flush at every switch.
+        m = re.search(r'ttbr0 (0x[0-9a-f]+)', self.out)
+        self.assertIsNotNone(m)
+        self.assertNotEqual(int(m.group(1), 16) >> 48, 0, 'ASID is still zero')
+
     def test_a_process_gets_its_own_address_space(self):
         m = re.search(r'user:\s+(\d+) bytes of program at (0x[0-9a-f]+).*ttbr0 (0x[0-9a-f]+)',
                       self.out)
