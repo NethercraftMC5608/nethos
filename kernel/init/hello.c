@@ -31,6 +31,7 @@ static void __attribute__((destructor)) goodbye(void)
 int main(int argc, char **argv)
 {
 	char *heap = malloc(64);
+	FILE *f;
 
 	if (heap == NULL)
 		return 1;
@@ -38,5 +39,17 @@ int main(int argc, char **argv)
 	printf("hello from a real compiled binary, on nk.\n");
 	printf("  argv[0] is %s, argc is %d, and %s.\n", argv[0], argc, heap);
 	free(heap);
+
+	/* Only present when nk was given an initrd. Reading it proves the
+	 * archive's other files landed as well, and through stdio's open and
+	 * read rather than the raw syscalls. */
+	f = fopen("/etc/nk-greeting", "r");
+	if (f != NULL) {
+		char line[64] = "";
+
+		if (fgets(line, sizeof line, f) != NULL)
+			printf("  and /etc/nk-greeting says: %s", line);
+		fclose(f);
+	}
 	return argc == 1 ? 7 : 1;
 }

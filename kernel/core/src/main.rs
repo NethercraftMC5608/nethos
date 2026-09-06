@@ -10,6 +10,12 @@ extern crate alloc;
 
 use core::arch::global_asm;
 
+/// Where the boot loader left an initial ramdisk. Read once from the device
+/// tree at boot, because the device tree is parsed long before there is a
+/// filesystem to unpack it into.
+static mut INITRD: Option<(u64, u64)> = None;
+
+pub mod cpio;
 pub mod dt;
 #[cfg(nk_lkl)]
 pub mod elf;
@@ -72,6 +78,10 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
     }
     if let Some((base, size)) = fdt.find_by_prefix("memory@").and_then(|n| n.reg(0)) {
         println!("  memory: {:#x}..{:#x} ({} MiB)", base, base + size, size >> 20);
+    }
+    if let Some((s, e)) = fdt.initrd() {
+        println!("  initrd: {:#x}..{:#x} ({} KiB)", s, e, (e - s) >> 10);
+        unsafe { INITRD = Some((s, e)) };
     }
     if let Some((base, _)) = fdt.find_compatible("arm,pl011").and_then(|n| n.reg(0)) {
         println!("  pl011:  {:#x}", base);
@@ -151,6 +161,17 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             // And from user space, which is the whole point: a process at
             // EL0 makes an `svc`, nk catches it, and Linux answers.
             println!();
+            // Anything the boot loader handed over goes into Linux's rootfs
+            // before the first process looks for a program there.
+            if let Some((s, e)) = unsafe { INITRD } {
+                let archive =
+                    unsafe { core::slice::from_raw_parts(s as *const u8, (e - s) as usize) };
+                match user::unpack_initrd(archive) {
+                    Ok(n) => println!("  initrd: {} entries unpacked into Linux's rootfs", n),
+                    Err(e) => println!("  initrd: {} -- ignored", e),
+                }
+            }
+
             println!("Now the same question from EL0:");
             let first = user::spawn_from_rootfs().expect("cannot load rootfs executable");
             let second = user::spawn_from_rootfs().expect("cannot load rootfs executable");
@@ -159,10 +180,7 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             assert!(fd >= 0);
             selftest::process_descriptor(fd);
             let a = user::launch(first, Some(selftest::process_context));
-            #[cfg(nk_init)]
-            sched::join(a);
             let b = user::launch(second, Some(selftest::process_context));
-            #[cfg(not(nk_init))]
             sched::join(a);
             sched::join(b);
             let pa = sched::linux_pid(a);
@@ -171,13 +189,16 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             // The fixture exits with its own Linux pid, which is how the two
             // processes prove they were told different ones. An externally
             // supplied init exits with whatever it likes.
-            #[cfg(not(nk_init))]
-            {
+            if user::ran_fixture() {
                 assert_eq!(sched::exit_status(a), pa as i32);
                 assert_eq!(sched::exit_status(b), pb as i32);
+            } else {
+                println!(
+                    "  init: exited with {} and {}",
+                    sched::exit_status(a),
+                    sched::exit_status(b)
+                );
             }
-            #[cfg(nk_init)]
-            println!("  init: exited with {} and {}", sched::exit_status(a), sched::exit_status(b));
             assert_eq!(lkl::syscall(57, [fd,0,0,0,0,0]), 0);
             assert_eq!(lkl::syscall(166, [parent_mask,0,0,0,0,0]), 0o22);
             assert_eq!(lkl::syscall(129, [pa,0,0,0,0,0]), -3);
@@ -189,8 +210,9 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             // purpose, which is how it demonstrates that address spaces
             // survive a switch. A real binary is simply too quick, so this
             // is a claim about the fixture and not about the kernel.
-            #[cfg(not(nk_init))]
-            assert!(sched::user_irqs(a) > 0 && sched::user_irqs(b) > 0);
+            assert!(
+                !user::ran_fixture() || (sched::user_irqs(a) > 0 && sched::user_irqs(b) > 0)
+            );
             println!("  processes: EL0 IRQs {} and {}, private stacks survived", sched::user_irqs(a), sched::user_irqs(b));
             sched::reap_process(a);
             sched::reap_process(b);
@@ -531,9 +553,15 @@ unsafe fn claim_memory(fdt: &dt::Fdt, ram_start: usize, ram_end: usize) {
     let image_start = 0x4008_0000usize; // where linker.ld links; see boot.s
     let image_end = &raw const __image_end as usize;
 
+    // The initial ramdisk sits in RAM like everything else and nothing else
+    // knows it is there. Handing its pages to the allocator does not fail
+    // anywhere near the initrd: it fails later, in whatever happened to be
+    // given the page, with the archive's bytes in it.
+    let (istart, iend) = fdt.initrd().unwrap_or((0, 0));
     let mut reserved = [
         (image_start, image_end),
         (fdt.base(), fdt.base() + fdt.total_size()),
+        (istart as usize, iend as usize),
     ];
     reserved.sort_unstable();
 

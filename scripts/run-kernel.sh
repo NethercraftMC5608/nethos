@@ -11,6 +11,8 @@
 #   scripts/run-kernel.sh --lkl            link the whole Linux kernel in
 #   scripts/run-kernel.sh --init FILE      run FILE at EL0 instead of the
 #                                          built-in fixture (needs --lkl)
+#   scripts/run-kernel.sh --initrd FILE    unpack a newc cpio archive into
+#                                          Linux's rootfs (needs --lkl)
 #   scripts/run-kernel.sh --tcg            emulate instead of using HVF
 #   scripts/run-kernel.sh --gdb            wait for gdb on :1234
 #   scripts/run-kernel.sh --trace FILE     log EL0 instructions (needs --tcg)
@@ -32,6 +34,7 @@ MEM=512
 DISK=""
 NET=0
 INIT=""
+INITRD=""
 TRACE=""
 GDB=0
 TCG=0
@@ -51,6 +54,7 @@ while [ $# -gt 0 ]; do
         --port)      PORT="${2:?--port needs a name, e.g. virtio-blk}"; shift 2 ;;
         --lkl)       LKL=1; shift ;;
         --init)      INIT="${2:?--init needs a file}"; shift 2 ;;
+        --initrd)    INITRD="${2:?--initrd needs a cpio archive}"; shift 2 ;;
         --tcg)       TCG=1; shift ;;
         --gdb)       GDB=1; shift ;;
         --trace)     TRACE="${2:?--trace needs a file}"; shift 2 ;;
@@ -201,6 +205,17 @@ if [ -n "$TRACE" ]; then
     # branches taken -- exactly what a control-flow question needs, and a
     # fraction of the volume.
     say "Tracing EL0 execution to $TRACE"
+fi
+
+# The boot loader's initial ramdisk, which is how a userland gets in without
+# being part of the kernel image. QEMU puts it in RAM and names the range in
+# /chosen; nk reads it from there, reserves those pages, and unpacks the
+# archive into Linux's rootfs once Linux is up.
+if [ -n "$INITRD" ]; then
+    [ -f "$INITRD" ] || die "no such file: $INITRD"
+    [ "$LKL" -eq 1 ] || die "--initrd needs --lkl: the rootfs it unpacks into is Linux's"
+    ARGS+=( -initrd "$INITRD" )
+    say "Initrd: $INITRD ($(du -h "$INITRD" | cut -f1))"
 fi
 
 if [ "$GDB" -eq 1 ]; then

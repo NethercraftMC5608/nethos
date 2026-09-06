@@ -177,6 +177,32 @@ impl Fdt {
         found
     }
 
+    /// Where the boot loader left an initial ramdisk, if it left one.
+    ///
+    /// `/chosen/linux,initrd-start` and `-end`, which is how every arm64 boot
+    /// loader hands one over -- QEMU's `-initrd` writes exactly these. The
+    /// width is not fixed: the properties carry as many bytes as the address
+    /// needs, so both four and eight are ordinary and a parser that assumes
+    /// one of them works on one machine and reads rubbish on the next.
+    pub fn initrd(&self) -> Option<(u64, u64)> {
+        let chosen = self.find_by_prefix("chosen")?;
+        let cell = |name: &str| -> Option<u64> {
+            let v = chosen.prop(name)?;
+            match v.len() {
+                4 => Some(u32::from_be_bytes(v.try_into().ok()?) as u64),
+                8 => Some(u64::from_be_bytes(v.try_into().ok()?)),
+                _ => None,
+            }
+        };
+        let start = cell("linux,initrd-start")?;
+        let end = cell("linux,initrd-end")?;
+        if end > start {
+            Some((start, end))
+        } else {
+            None
+        }
+    }
+
     /// #address-cells and #size-cells from the root node.
     ///
     /// Only the root's, which is a real limitation and the right one for now:

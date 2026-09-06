@@ -75,6 +75,49 @@ pub fn write_file(path: &core::ffi::CStr, bytes: &[u8]) -> Result<(), i64> {
     let close = syscall(57, [fd, 0, 0, 0, 0, 0]);
     result.and(if close < 0 { Err(close) } else { Ok(()) })
 }
+/// Create a directory, treating "it is already there" as success.
+///
+/// A cpio archive lists directories before their contents, but it does not
+/// have to list them at all, so the unpacker creates parents as it goes and
+/// meets the same directory twice as a matter of course.
+pub fn mkdir(path: &core::ffi::CStr, mode: i64) -> Result<(), i64> {
+    match syscall(34, [-100, path.as_ptr() as i64, mode, 0, 0, 0]) {
+        0 => Ok(()),
+        -17 => Ok(()), // -EEXIST
+        e => Err(e),
+    }
+}
+
+/// Write a file, creating it with the mode given rather than a fixed one.
+pub fn write_file_mode(
+    path: &core::ffi::CStr,
+    bytes: &[u8],
+    mode: i64,
+) -> Result<(), i64> {
+    let fd = syscall(56, [-100, path.as_ptr() as i64, 0o1101, mode, 0, 0]);
+    if fd < 0 {
+        return Err(fd);
+    }
+    let result = write_all(fd, bytes);
+    let close = syscall(57, [fd, 0, 0, 0, 0, 0]);
+    result.and(if close < 0 { Err(close) } else { Ok(()) })
+}
+
+fn write_all(fd: i64, bytes: &[u8]) -> Result<(), i64> {
+    let mut off = 0;
+    while off < bytes.len() {
+        let n = syscall(
+            64,
+            [fd, bytes[off..].as_ptr() as i64, (bytes.len() - off) as i64, 0, 0, 0],
+        );
+        if n <= 0 {
+            return Err(if n == 0 { -5 } else { n });
+        }
+        off += n as usize;
+    }
+    Ok(())
+}
+
 pub fn read_file(path: &core::ffi::CStr) -> Result<alloc::vec::Vec<u8>, i64> {
     let fd = syscall(56, [-100, path.as_ptr() as i64, 0, 0, 0, 0]);
     if fd < 0 {

@@ -27,3 +27,5 @@ payload/wayfire/built/
 kernel/target/
 kernel/ldk/build/
 kernel/ldk/build/nk-hello
+kernel/ldk/build/initrd-root/
+kernel/ldk/build/initrd.cpio

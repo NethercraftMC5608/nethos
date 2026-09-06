@@ -457,6 +457,52 @@ the line that *creates* the argument array it appends to.
 Every register is cleared now, not just `x0`. The rest are kernel state, and
 handing them to EL0 is a leak whether or not anything reads them.
 
+### A userland that is not part of the kernel
+
+`--init FILE` embeds a binary in `nk.bin`, which is fine for one program and
+useless for a userland: a real one is many files. `--initrd FILE` is the
+answer, and it is the ordinary Linux one.
+
+A cpio archive is what an initial ramdisk is, because cpio is the format you
+can unpack without already having a filesystem: a flat stream of (header,
+name, data), no index, no compression, no seeking. QEMU's `-initrd` leaves it
+in RAM and names the range in `/chosen/linux,initrd-start` and `-end`, which
+nk already had a device-tree parser for. `kernel/core/src/cpio.rs` reads it
+and `user::unpack_initrd` writes it into Linux's rootfs through the same VFS
+syscalls everything else uses -- open, write, mkdir. No new filesystem, no new
+driver.
+
+```
+$ (cd root && find . | cpio -o -H newc > ../initrd.cpio)
+$ scripts/run-kernel.sh --lkl --initrd initrd.cpio
+  initrd: 0x48000000..0x480ac600 (689 KiB)
+  ...
+  initrd: 3 entries unpacked into Linux's rootfs
+  rootfs: /nk-init came from the initrd (705456 bytes)
+  hello from a real compiled binary, on nk.
+    argv[0] is /nk-init, argc is 1, and the heap works too.
+    and /etc/nk-greeting says: a userland that is not part of the kernel image
+```
+
+Three things this had to get right, none of them obvious:
+
+- **The initrd's pages must be reserved.** It sits in RAM like everything
+  else and nothing else knows it is there. Handing them to the frame
+  allocator does not fail anywhere near the initrd -- it fails later, in
+  whatever was given the page, with the archive's bytes in it.
+- **The `/chosen` properties are not a fixed width.** They carry as many
+  bytes as the address needs, so both four and eight are ordinary; a parser
+  that assumes one works on one machine and reads rubbish on the next.
+- **Parents are created as they are met, not assumed.** A cpio archive
+  usually lists a directory before its contents and is not required to, so
+  `mkdir` treats "already there" as success -- which it will be, constantly.
+
+An initrd's `/nk-init` wins over the built-in fixture. That also made
+"is this nk's own test program?" a *runtime* question rather than a build-time
+one, which it always was: the self-checks that follow a run -- that a process
+exits with its own Linux pid, that it spun long enough to be preempted -- are
+claims about the fixture and not about an arbitrary binary.
+
 ### What a real binary still cannot do
 
 `fork`, `execve`, threads, signals, and any `mmap` of a file. The rootfs is
@@ -1118,6 +1164,14 @@ components, BSD-licensed, no strings — at the price of far worse coverage of
 modern hardware. Both are real choices. This one assumes Linux drivers.
 
 ## Working here
+
+**Run the tests with `tests/run-kernel-tests.sh`.** Every class boots QEMU
+from scratch in `setUpClass`, so `unittest discover` is a dozen independent
+boots run one after another -- six and a half minutes of a machine that is
+idle for most of it. The script runs them in parallel and reports per class,
+which is under two minutes and, more usefully, names the class that failed
+instead of burying it in one very long log. `tests/run-kernel-tests.sh
+Initrd` runs a subset; `KEEP=1` keeps the per-class output for reading.
 
 The rule from `CLAUDE.md` applies more here than anywhere: **measure before
 concluding.** The missing device tree above looked like four different bugs

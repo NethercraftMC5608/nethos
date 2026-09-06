@@ -512,6 +512,98 @@ fn sys_exit(status: i32) -> ! {
     crate::stop()
 }
 
+/// Whether an initrd already put a program at `/nk-init`.
+///
+/// If it did, nk must not write over it; if it did not, nk has to seed
+/// something before there is anything to load. These are two different
+/// questions from the one below and conflating them cost a debugging round:
+/// a `--init` binary is not the fixture *and* still has to be seeded.
+#[cfg(nk_lkl)]
+static mut INIT_FROM_INITRD: bool = false;
+
+/// Whether the program at `/nk-init` is nk's own fixture.
+///
+/// The self-checks that follow a run are claims about the fixture -- that it
+/// exits with its own Linux pid, that it spun long enough to be preempted --
+/// and they are not true of an arbitrary binary. `--init` settles this at
+/// build time and an initrd settles it at run time.
+#[cfg(nk_lkl)]
+pub fn ran_fixture() -> bool {
+    !cfg!(nk_init) && !unsafe { INIT_FROM_INITRD }
+}
+
+/// Unpack a cpio archive into Linux's rootfs, and return how many entries it
+/// held.
+///
+/// This is what makes a program on nk something other than part of the
+/// kernel. Until now `/nk-init` was seeded from a fixture inside `nk.bin`,
+/// which is fine for a program written to be a test and useless for a
+/// userland: a real one is many files, and they have to come from outside.
+///
+/// Directories first is not assumed. A cpio archive usually lists a directory
+/// before its contents and is not required to, so each file's parents are
+/// created as it goes -- which also means the same directory is met more than
+/// once as a matter of course, and `mkdir` treats that as success.
+#[cfg(nk_lkl)]
+pub fn unpack_initrd(archive: &[u8]) -> Result<usize, &'static str> {
+    use alloc::vec::Vec;
+    let mut count = 0;
+    crate::cpio::each(archive, |e| {
+        // The names in an archive are relative ("bin/sh"); the rootfs wants
+        // them absolute, and a leading "./" is how most archives spell the
+        // same thing.
+        let name = e.name.strip_prefix("./").unwrap_or(e.name);
+        if name.is_empty() {
+            return;
+        }
+        let mut path = Vec::with_capacity(name.len() + 2);
+        path.push(b'/');
+        path.extend_from_slice(name.as_bytes());
+        path.push(0);
+
+        // Every parent, in order, before the entry itself.
+        for i in 1..path.len() - 1 {
+            if path[i] != b'/' {
+                continue;
+            }
+            let saved = path[i];
+            path[i] = 0;
+            let _ = crate::lkl::mkdir(cstr(&path[..=i]), 0o755);
+            path[i] = saved;
+        }
+
+        let c = cstr(&path);
+        // Whether the archive supplies the init has to be settled here,
+        // while the rootfs is still empty. Asking later -- "does /nk-init
+        // exist?" -- gets the wrong answer the moment nk has seeded its own
+        // fixture, and the second process to start then reports that the
+        // first one's file came from an archive that was never there.
+        if name == "nk-init" && e.is_file() {
+            unsafe { INIT_FROM_INITRD = true };
+        }
+        let ok = if e.is_dir() {
+            crate::lkl::mkdir(c, e.perms() as i64).is_ok()
+        } else if e.is_file() {
+            crate::lkl::write_file_mode(c, e.data, e.perms() as i64).is_ok()
+        } else {
+            // Symlinks, devices and fifos. Nothing needs them yet and
+            // pretending to create one by making an empty file would be
+            // worse than leaving it out visibly.
+            false
+        };
+        if ok {
+            count += 1;
+        }
+    })?;
+    Ok(count)
+}
+
+/// A NUL-terminated slice as a `CStr`, for paths built a byte at a time.
+#[cfg(nk_lkl)]
+fn cstr(bytes: &[u8]) -> &core::ffi::CStr {
+    core::ffi::CStr::from_bytes_until_nul(bytes).unwrap_or(c"/")
+}
+
 /// Load the bootstrap ELF through Linux's existing rootfs and VFS. The file
 /// is seeded from the kernel image until a persistent root disk is attached.
 #[cfg(nk_lkl)]
@@ -532,15 +624,25 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
         let _ = (start, size);
         include_bytes!(concat!(env!("OUT_DIR"), "/nk-init.bin"))
     };
-    crate::lkl::write_file(c"/nk-init", fixture).map_err(|_| "rootfs write failed")?;
-    let bytes = crate::lkl::read_file(c"/nk-init").map_err(|_| "rootfs read failed")?;
-    if bytes != fixture {
-        return Err("rootfs round trip differs");
-    }
-    println!(
-        "  rootfs: /nk-init read back through Linux VFS ({} bytes)",
-        bytes.len()
-    );
+    // An initrd's /nk-init wins. Seeding the fixture over it would throw away
+    // the whole point of having unpacked an archive, and doing that silently
+    // is worse than not supporting it.
+    let bytes = if !unsafe { INIT_FROM_INITRD } {
+        crate::lkl::write_file(c"/nk-init", fixture).map_err(|_| "rootfs write failed")?;
+        let b = crate::lkl::read_file(c"/nk-init").map_err(|_| "rootfs read failed")?;
+        if b != fixture {
+            return Err("rootfs round trip differs");
+        }
+        println!(
+            "  rootfs: /nk-init read back through Linux VFS ({} bytes)",
+            b.len()
+        );
+        b
+    } else {
+        let b = crate::lkl::read_file(c"/nk-init").map_err(|_| "rootfs read failed")?;
+        println!("  rootfs: /nk-init came from the initrd ({} bytes)", b.len());
+        b
+    };
     let image = crate::elf::parse(&bytes, USER_BASE, USER_MMAP_TOP)?;
     let ttbr0 = paging::new_address_space();
     for s in &image.segments {

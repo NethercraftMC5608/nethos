@@ -425,6 +425,78 @@ NET_LIB = ROOT / 'kernel/ldk/build/virtio-net/libnklinux.a'
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
 @unittest.skipUnless(NET_LIB.exists(), 'virtio-net port not built')
+def build_hello():
+    """Compile kernel/init/hello.c in ldk's container. Returns its path.
+
+    Raises SkipTest rather than failing when there is no container: this
+    suite has to keep passing on a machine with no docker.
+    """
+    out = ROOT / 'kernel/ldk/build/nk-hello'
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        build = subprocess.run(
+            ['docker', 'run', '--rm', '-v', f'{ROOT}:/w', '-w', '/w', 'nethos-ldk',
+             'gcc', '-static', '-O2', '-o', 'kernel/ldk/build/nk-hello',
+             'kernel/init/hello.c'],
+            capture_output=True, text=True, timeout=300)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        raise unittest.SkipTest(f'no ldk container: {e}')
+    if build.returncode != 0:
+        raise unittest.SkipTest(f'no aarch64 toolchain: {build.stderr.strip()[:200]}')
+    return out
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class Initrd(unittest.TestCase):
+    """A userland that is not part of the kernel image.
+
+    The boot loader leaves a cpio archive in RAM and names the range in
+    /chosen; nk reserves those pages, unpacks the archive into Linux's rootfs,
+    and runs what it finds. That is what makes a program on nk something other
+    than a fixture compiled into nk.bin.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        hello = build_hello()
+        root = ROOT / 'kernel/ldk/build/initrd-root'
+        shutil.rmtree(root, ignore_errors=True)
+        (root / 'etc').mkdir(parents=True)
+        shutil.copy(hello, root / 'nk-init')
+        (root / 'etc/nk-greeting').write_text(
+            'a userland that is not part of the kernel image\n')
+        cls.archive = ROOT / 'kernel/ldk/build/initrd.cpio'
+        names = '\n'.join(sorted(
+            str(p.relative_to(root)) for p in root.rglob('*'))) + '\n'
+        with open(cls.archive, 'wb') as out:
+            cpio = subprocess.run(['cpio', '-o', '-H', 'newc'], cwd=root,
+                                  input=names.encode(), stdout=out,
+                                  stderr=subprocess.PIPE)
+        if cpio.returncode != 0:
+            raise unittest.SkipTest(f'cpio failed: {cpio.stderr.decode()[:200]}')
+        cls.out = boot('--lkl', '--initrd', str(cls.archive),
+                       timeout=180, watchdog=90)
+
+    def test_the_archive_is_found_and_unpacked(self):
+        self.assertRegex(self.out, r'initrd: \d+ entries unpacked into Linux')
+
+    def test_the_program_comes_from_the_archive_not_the_kernel_image(self):
+        self.assertIn('/nk-init came from the initrd', self.out)
+        self.assertNotIn('read back through Linux VFS', self.out)
+
+    def test_it_runs(self):
+        self.assertIn('hello from a real compiled binary, on nk', self.out)
+
+    def test_the_archives_other_files_landed_too(self):
+        # Opened with fopen, from a directory the unpacker had to create.
+        self.assertIn('/etc/nk-greeting says: a userland that is not part of'
+                      ' the kernel image', self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('fault in user space', self.out)
+        self.assertNotIn('kernel panic', self.out)
+
+
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
 class RealBinary(unittest.TestCase):
     """A program compiled by a real toolchain, unmodified, at EL0.
@@ -440,19 +512,8 @@ class RealBinary(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        out = ROOT / 'kernel/ldk/build/nk-hello'
-        out.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            build = subprocess.run(
-                ['docker', 'run', '--rm', '-v', f'{ROOT}:/w', '-w', '/w', 'nethos-ldk',
-                 'gcc', '-static', '-O2', '-o', 'kernel/ldk/build/nk-hello',
-                 'kernel/init/hello.c'],
-                capture_output=True, text=True, timeout=300)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            raise unittest.SkipTest(f'no ldk container: {e}')
-        if build.returncode != 0:
-            raise unittest.SkipTest(f'no aarch64 toolchain: {build.stderr.strip()[:200]}')
-        cls.out = boot('--lkl', '--init', str(out), timeout=180, watchdog=90)
+        cls.out = boot('--lkl', '--init', str(build_hello()),
+                       timeout=180, watchdog=90)
 
     def test_it_runs_and_prints(self):
         self.assertIn('hello from a real compiled binary, on nk', self.out)

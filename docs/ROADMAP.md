@@ -365,8 +365,15 @@ the one below it.
       `x0` at process entry is `rtld_fini`, so glibc had been registering
       `_start` as an atexit handler and calling it on the way out. See
       docs/KERNEL.md.
-- [ ] **A persistent root, and an externally supplied init.** The rootfs is
-      memory-backed and `/nk-init` is seeded from the kernel image.
+- [x] **A userland that is not part of the kernel image.** `--initrd FILE`
+      takes a newc cpio archive the way any Linux boot does: QEMU leaves it in
+      RAM, names the range in `/chosen`, and nk reserves those pages, reads
+      the archive and writes it into Linux's rootfs through the same VFS
+      syscalls everything else uses. An initrd's `/nk-init` wins over the
+      built-in fixture.
+- [ ] **A persistent root.** The rootfs is still memory-backed: an initrd is
+      unpacked into RAM and nothing survives a reboot. virtio-blk works under
+      the shim; giving Linux a real block device under LKL is the next step.
 - [ ] `fork`, `exec`, `mmap`, `futex`, signals, `epoll` -- the long tail, and
       the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.
