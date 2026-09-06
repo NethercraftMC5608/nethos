@@ -15,6 +15,14 @@ Both come out of the ELF .dynamic section: DT_SONAME for the first, DT_NEEDED
 for the second. Parsing it is a header, a program header table and a walk of
 tagged pairs — small enough to do here rather than depend on binutils being
 installed on a system we are still building.
+
+    symbols("virtio_mmio.o")   -> defined, undefined
+
+is the same question one level down, and it is what kernel/ldk uses to find
+out what a Linux driver wants from the kernel underneath it. A relocatable
+object has no program headers at all, so that path reads the *section* table
+instead and walks .symtab. Same file, same reason: the tool has to be able to
+read its own inputs before binutils exists anywhere near it.
 """
 
 from __future__ import annotations
@@ -26,6 +34,10 @@ ELF_MAGIC = b"\x7fELF"
 
 PT_LOAD, PT_DYNAMIC = 1, 2
 DT_NULL, DT_NEEDED, DT_STRTAB, DT_SONAME, DT_STRSZ = 0, 1, 5, 14, 10
+
+SHT_SYMTAB = 2
+SHN_UNDEF = 0
+STB_LOCAL = 0
 
 
 class ElfError(Exception):
@@ -54,10 +66,16 @@ class Elf:
             self.phoff = self._int(0x20, 8)
             self.phentsize = self._int(0x36, 2)
             self.phnum = self._int(0x38, 2)
+            self.shoff = self._int(0x28, 8)
+            self.shentsize = self._int(0x3A, 2)
+            self.shnum = self._int(0x3C, 2)
         else:
             self.phoff = self._int(0x1C, 4)
             self.phentsize = self._int(0x2A, 2)
             self.phnum = self._int(0x2C, 2)
+            self.shoff = self._int(0x20, 4)
+            self.shentsize = self._int(0x2E, 2)
+            self.shnum = self._int(0x30, 2)
 
         self.segments = list(self._program_headers())
 
@@ -162,6 +180,75 @@ class Elf:
         return out
 
 
+    # --- sections and symbols ------------------------------------------
+    #
+    # A separate path from everything above, because a relocatable object --
+    # a .o, which is what a compiled Linux driver is -- has no program
+    # headers and no .dynamic at all. Its symbols live in .symtab, which is
+    # reachable only through the section table.
+
+    def sections(self) -> list[dict]:
+        out = []
+        table = self._at(self.shoff, self.shentsize * self.shnum)
+        for i in range(self.shnum):
+            base = i * self.shentsize
+            if base + self.shentsize > len(table):
+                break
+            if self.is64:
+                out.append({
+                    "type": self._int(base + 0x04, 4, table, 0),
+                    "offset": self._int(base + 0x18, 8, table, 0),
+                    "size": self._int(base + 0x20, 8, table, 0),
+                    "link": self._int(base + 0x28, 4, table, 0),
+                    "entsize": self._int(base + 0x38, 8, table, 0),
+                })
+            else:
+                out.append({
+                    "type": self._int(base + 0x04, 4, table, 0),
+                    "offset": self._int(base + 0x10, 4, table, 0),
+                    "size": self._int(base + 0x14, 4, table, 0),
+                    "link": self._int(base + 0x18, 4, table, 0),
+                    "entsize": self._int(base + 0x24, 4, table, 0),
+                })
+        return out
+
+    def symbols(self) -> tuple[set[str], set[str]]:
+        """Global symbols this object defines, and the ones it does not.
+
+        Local symbols are skipped on both sides: a file-static function is
+        nobody else's business, and never appears as a requirement.
+        """
+        defined: set[str] = set()
+        undefined: set[str] = set()
+        secs = self.sections()
+        for sec in secs:
+            if sec["type"] != SHT_SYMTAB or not sec["entsize"]:
+                continue
+            if sec["link"] >= len(secs):
+                continue
+            strtab = secs[sec["link"]]
+            strings = self._at(strtab["offset"], strtab["size"])
+            blob = self._at(sec["offset"], sec["size"])
+            step = sec["entsize"]
+            for pos in range(0, len(blob) - step + 1, step):
+                if self.is64:
+                    name_off = self._int(pos, 4, blob, 0)
+                    info = self._int(pos + 4, 1, blob, 0)
+                    shndx = self._int(pos + 6, 2, blob, 0)
+                else:
+                    name_off = self._int(pos, 4, blob, 0)
+                    info = self._int(pos + 12, 1, blob, 0)
+                    shndx = self._int(pos + 14, 2, blob, 0)
+                if info >> 4 == STB_LOCAL or not name_off:
+                    continue
+                end = strings.find(b"\x00", name_off)
+                name = strings[name_off:end if end >= 0 else None].decode("utf-8", "replace")
+                if not name:
+                    continue
+                (undefined if shndx == SHN_UNDEF else defined).add(name)
+        return defined, undefined
+
+
 def _load(path: str) -> Elf | None:
     try:
         if os.path.islink(path) or not os.path.isfile(path):
@@ -195,6 +282,21 @@ def needed(path: str) -> list[str]:
         return []
     try:
         return elf.needed()
+    finally:
+        elf.fh.close()
+
+
+def symbols(path: str) -> tuple[set[str], set[str]]:
+    """(defined, undefined) global symbols of an object file.
+
+    The whole of what kernel/ldk needs to answer "what does this driver want
+    from the kernel underneath it" -- see docs/KERNEL.md.
+    """
+    elf = _load(path)
+    if elf is None:
+        return set(), set()
+    try:
+        return elf.symbols()
     finally:
         elf.fh.close()
 

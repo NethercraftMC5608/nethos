@@ -19,6 +19,7 @@ pub mod mmio;
 pub mod paging;
 pub mod sched;
 pub mod selftest;
+pub mod stub;
 pub mod timer;
 pub mod uart;
 

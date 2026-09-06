@@ -1,0 +1,19 @@
+{
+  "name": "virtio-blk",
+  "summary": "virtio-mmio transport and the block driver on top of it",
+  "why": [
+    "The first driver to port, chosen because success is unarguable: bytes",
+    "come back off a QEMU disk or they do not. It needs no real hardware, it",
+    "is small, and it forces most of the shim that will ever exist -- printk,",
+    "kmalloc, ioremap, request_irq, spinlocks, wait queues, the device/driver",
+    "model, dma_alloc_coherent and workqueues are all on the path from",
+    "module_init to a completed read."
+  ],
+  "linux": "7.2",
+  "sources": [
+    "drivers/virtio/virtio.c",
+    "drivers/virtio/virtio_ring.c",
+    "drivers/virtio/virtio_mmio.c",
+    "drivers/block/virtio_blk.c"
+  ]
+}

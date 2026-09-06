@@ -1,0 +1,17 @@
+{
+  "name": "virtio-net",
+  "summary": "the virtio network device",
+  "why": [
+    "Stage 4. A different class of device on the same transport, which is",
+    "what shows whether the shim generalised or was quietly shaped around",
+    "one driver. Forces sk_buff, netdev registration, NAPI and softirqs --",
+    "none of which virtio-blk touches."
+  ],
+  "linux": "7.2",
+  "sources": [
+    "drivers/virtio/virtio.c",
+    "drivers/virtio/virtio_ring.c",
+    "drivers/virtio/virtio_mmio.c",
+    "drivers/net/virtio_net.c"
+  ]
+}

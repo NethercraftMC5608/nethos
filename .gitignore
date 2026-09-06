@@ -25,3 +25,4 @@ payload/wayfire/built/
 # The kernel's build output. `build/` above already catches most of it by
 # accident; this is the one cargo actually writes to.
 kernel/target/
+kernel/ldk/build/

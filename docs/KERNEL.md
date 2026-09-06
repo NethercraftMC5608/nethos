@@ -139,9 +139,9 @@ one boots.
 - **1 — done.** Device tree, MMU, frame allocator, kernel heap, GICv3, the
   virtual timer, and preemptive round-robin threads. Two kernel threads
   alternate on a tick, neither of them yielding.
-- **2** — `ldk`: compile a driver against Linux headers, list its undefined
-  symbols, generate stubs, report coverage.
-  *Done when `ldk syms virtio-blk` prints a clean list that links.*
+- **2 — done.** `ldk` compiles unmodified Linux drivers against Linux's own
+  headers for aarch64 and reports what they need. virtio-blk: **108 symbols**.
+  virtio-net: 207, of which **139 are new** — the other 68 came free.
 - **3** — unmodified `virtio_mmio` + `virtio_blk`. Forces most of the shim that
   will ever exist: `printk`, `kmalloc`, `ioremap`, `request_irq`, spinlocks,
   wait queues, the device/driver model, `dma_alloc_coherent`, workqueues.
@@ -152,6 +152,46 @@ one boots.
   *Done when nk answers an ARP request from the host.*
 - **5** — decide with `ldk report`'s numbers whether USB, DRM or WiFi is worth
   attempting. Genode is funded and staffed and still does not do GPU.
+
+## What Stage 2 settled
+
+`kernel/ldk/` works, and two decisions in it are worth keeping.
+
+**kbuild compiles the drivers, not us.** The obvious approach is to
+reconstruct Linux's include paths and flags — `-I include`, `-I
+arch/arm64/include`, `-D__KERNEL__`, and a dozen more — and drive the compiler
+directly. That is a large and silent source of wrongness: a header found in the
+wrong place gives a driver that compiles and behaves differently. `make
+ARCH=arm64 drivers/virtio/virtio_mmio.o` uses exactly the flags Linux would, so
+the question of whether we got them right never arises. It also means a port
+manifest is four filenames and nothing else.
+
+**The Linux tree lives in a container, in its own volume.** It cannot live on
+macOS at all: Linux has filenames differing only in case, and a
+case-insensitive APFS volume silently loses one of each pair on extraction. It
+also cannot share `nethos-kernel`'s volume, which carries a dirty in-tree x86
+build — an out-of-tree `O=` build refuses to start against an unclean source,
+and the fix for that is `make mrproper`, which would destroy another tool's
+working state without asking. `ldk fetch` does reuse that volume's downloaded
+tarball rather than pulling 150MB again.
+
+`pkg/npkg_elf.py` gained the reader. It already parsed `DT_SONAME`/`DT_NEEDED`
+for packages; a relocatable object has no program headers and no `.dynamic` at
+all, so the symbol path walks the *section* table and `.symtab` instead. Same
+file, same reason it was written in the first place: the tool has to read its
+own inputs without binutils.
+
+The measurement, today:
+
+```
+  port           objects   needs   done   stub   todo
+  virtio-blk           4     108      0    108      0
+  virtio-net           4     207      0    207      0
+                             139 new beyond the ports above
+```
+
+108 is what the plan predicted for a first driver, and the "new beyond" figure
+is what makes Stage 5 a decision rather than a guess.
 
 ## What Stage 1 already cost
 

@@ -265,10 +265,12 @@ The shim is discovered, not designed.
       emulate and real hardware runs fine; the physical timer traps under any
       hypervisor, so nk uses the virtual one; and a new task starts with
       interrupts masked, which stops the machine without crashing it.
-- [ ] **Stage 2.** `ldk` -- compile a driver against Linux headers, list its
-      undefined symbols, generate panicking stubs, report coverage. Extends
-      `pkg/npkg_elf.py`, which already reads ELF symbol tables, rather than
-      shelling out to `nm`.
+- [x] **Stage 2.** `ldk` compiles unmodified Linux drivers against Linux's own
+      headers for aarch64 and reports what they need: **virtio-blk 108
+      symbols, virtio-net 207 of which 139 are new**. kbuild does the
+      compiling, so Linux's own flags are used rather than reconstructed.
+      `pkg/npkg_elf.py` gained a section-table reader for it -- a .o has no
+      program headers, which is what everything in that file used before.
 - [ ] **Stage 3.** Unmodified `virtio_mmio` + `virtio_blk`. Forces most of the
       shim that will ever exist. Done when nk reads a sector.
 - [ ] **Stage 4.** `virtio_net`, then `e1000` -- a real vendor driver that does

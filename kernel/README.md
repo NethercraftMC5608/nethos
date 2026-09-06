@@ -22,5 +22,9 @@ tree, turns on the MMU, allocates frames and heap, brings up GICv3 and the
 virtual timer, and runs preemptive kernel threads — two of which alternate on
 the tick without either ever yielding.
 
-Next is Stage 2: `ldk`, the tool that compiles a Linux driver against Linux's
-own headers and reports which of its undefined symbols the shim still owes it.
+Stage 2 is done too: `ldk` compiles unmodified Linux drivers against Linux's
+own headers and reports what they need. virtio-blk asks for 108 symbols;
+virtio-net asks for 207, of which only 139 are new. See `ldk/README.md`.
+
+Next is Stage 3: implement whichever of those 108 stubs virtio-blk actually
+reaches, and read a sector off a disk.
