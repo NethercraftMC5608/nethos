@@ -184,6 +184,18 @@ enter_user:
     eret
 
 
+// enter_user_fresh(entry, stack, ttbr0, kernel_sp)
+//
+// enter_user, with the kernel stack wound back first. This is execve's entry:
+// it is called from inside a syscall and never returns through it, so every
+// frame beneath -- the exception frame, the handler, the loader -- is dead the
+// moment the new program starts. Leaving them there leaks the stack for the
+// life of the task, which one exec would not notice and a shell would.
+.global enter_user_fresh
+enter_user_fresh:
+    mov     sp, x3
+    b       enter_user
+
 // The program itself, in the kernel image, because nk has no filesystem to
 // load one from yet. Position-independent -- it is copied to whatever address
 // the user address space puts it at, so every reference is PC-relative.

@@ -29,3 +29,7 @@ kernel/ldk/build/
 kernel/ldk/build/nk-hello
 kernel/ldk/build/initrd-root/
 kernel/ldk/build/initrd.cpio
+kernel/ldk/build/exec-root/
+kernel/ldk/build/exec.cpio
+kernel/ldk/build/exec-parent
+kernel/ldk/build/exec-child

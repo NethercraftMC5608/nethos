@@ -258,6 +258,16 @@ pub fn set_user_mmap_next(v: u64) {
     unsafe { TASKS[CURRENT].mmap_next = v }
 }
 
+/// The top of the running task's kernel stack.
+///
+/// `execve` needs it: it never returns through the exception frame it was
+/// called on, and every frame below that one is dead the moment the new
+/// program starts. Without resetting the stack pointer those frames are
+/// leaked for the life of the task, which a shell would notice.
+pub fn kernel_stack_top() -> usize {
+    unsafe { TASKS[CURRENT].stack + STACK_PAGES * PAGE }
+}
+
 pub fn bind_linux_pid(pid: i64) {
     unsafe {
         TASKS[CURRENT].linux_pid = pid;

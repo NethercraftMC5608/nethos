@@ -374,7 +374,14 @@ the one below it.
 - [ ] **A persistent root.** The rootfs is still memory-backed: an initrd is
       unpacked into RAM and nothing survives a reboot. virtio-blk works under
       the shim; giving Linux a real block device under LKL is the next step.
-- [ ] `fork`, `exec`, `mmap`, `futex`, signals, `epoll` -- the long tail, and
+- [x] **`execve`.** nk's own, since LKL has no user space to exec into: nk
+      reads the file through Linux's VFS and replaces the address space
+      itself. argv and envp are walked and copied out of the address space
+      being replaced before the new one is built, and the old one is freed
+      only once TTBR0 points at the new -- the kernel is mapped through the
+      same tables. A failed execve leaves the caller intact, which is what
+      execve promises and what building-before-tearing-down buys.
+- [ ] `fork`, `mmap` of a file, `futex`, signals, `epoll` -- the long tail, and
       the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.
 

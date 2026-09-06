@@ -59,6 +59,8 @@ extern "C" {
     static __user_blob_start: u8;
     static __user_blob_end: u8;
     fn enter_user(entry: u64, stack: u64, ttbr0: u64) -> !;
+    #[cfg(nk_lkl)]
+    fn enter_user_fresh(entry: u64, stack: u64, ttbr0: u64, kernel_sp: u64) -> !;
 }
 
 /// Build the standalone smoke-test address space, sharing EL1-only kernel
@@ -191,6 +193,11 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // The same rule as `write`, and it has to be here too because this is
         // the call a libc `printf` actually makes.
         sys_writev(frame.x[0], frame.x[1], frame.x[2])
+    } else if frame.x[8] == 221 && cfg!(nk_lkl) {
+        // execve does not return, so it is not part of the dispatch below:
+        // either it replaces the program or it fails and says why. It needs
+        // Linux only to read the file; the replacing is nk's own.
+        exec(frame.x[0], frame.x[1], frame.x[2])
     } else if matches!(frame.x[8], 214 | 222 | 215 | 226 | 96 | 99 | 293 | 261) {
         // The process's address space is nk's, not Linux's. LKL is one flat
         // region with no user half at all, so forwarding these would move
@@ -409,6 +416,142 @@ fn sys_munmap(addr: u64, len: u64) -> i64 {
     }
     unsafe { crate::paging::unmap_user(current_ttbr0(), start, end - start) };
     0
+}
+
+/// `execve`, or -ENOSYS on a build with no Linux to read the file through.
+#[cfg(nk_lkl)]
+fn exec(path: u64, argv: u64, envp: u64) -> i64 {
+    sys_execve(path, argv, envp)
+}
+
+#[cfg(not(nk_lkl))]
+fn exec(_path: u64, _argv: u64, _envp: u64) -> i64 {
+    println!("  execve needs a filesystem to read from");
+    -38
+}
+
+/// How many arguments and environment entries `execve` will carry, and how
+/// many bytes of them. Linux's own limits are a quarter of the stack rlimit
+/// and 32 pages per string; these are smaller because nk's initial stack is
+/// one fixed allocation and everything has to fit in it beside the vector.
+#[cfg(nk_lkl)]
+const MAX_ARGS: usize = 64;
+#[cfg(nk_lkl)]
+const MAX_ARG_BYTES: usize = 16 * 1024;
+
+/// Copy a NULL-terminated array of user string pointers.
+///
+/// This is the shape the marshalling table cannot describe: the argument is a
+/// pointer to an array of pointers, each into user memory, with no length
+/// anywhere -- the array ends at a NULL and each string at a NUL. So it is
+/// walked, one `copy_from_user` per pointer and one per string, with a bound
+/// on both counts because a process that asks for a million arguments should
+/// be told no rather than answered.
+#[cfg(nk_lkl)]
+fn copy_string_array(mut at: u64, budget: &mut usize) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, i64> {
+    use alloc::vec::Vec;
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    if at == 0 {
+        return Ok(out); // a null argv is an empty one, and legal
+    }
+    loop {
+        if out.len() >= MAX_ARGS {
+            return Err(-7); // -E2BIG
+        }
+        let mut word = [0u8; 8];
+        crate::uaccess::copy_from_user(&mut word, at)?;
+        let ptr = u64::from_le_bytes(word);
+        if ptr == 0 {
+            return Ok(out);
+        }
+        let mut buf = alloc::vec![0u8; (*budget).min(crate::uaccess::PATH_MAX)];
+        let len = crate::uaccess::copy_cstr_from_user(ptr, &mut buf)?;
+        if len > *budget {
+            return Err(-7);
+        }
+        *budget -= len;
+        buf.truncate(len);
+        out.push(buf);
+        at += 8;
+    }
+}
+
+/// # execve(path, argv, envp)
+///
+/// nk's, not Linux's. LKL has no user space to exec into -- forwarding this
+/// would ask Linux to replace an address space it does not have -- so nk reads
+/// the file through Linux's VFS and does the replacing itself.
+///
+/// The order is the whole difficulty. argv and envp live in the address space
+/// being replaced, so they are copied first. The new address space is built
+/// second, and only when it is complete and `TTBR0` points at it is the old
+/// one torn down: the kernel is mapped through the same tables, so a process
+/// that frees its own address space before leaving it does not survive to
+/// report the mistake.
+///
+/// On success this does not return. On failure it returns an errno and the
+/// caller carries on with everything it had, which is what execve promises.
+#[cfg(nk_lkl)]
+fn sys_execve(path: u64, argv: u64, envp: u64) -> i64 {
+    use crate::uaccess::{self, PATH_MAX};
+
+    let mut name = alloc::vec![0u8; PATH_MAX];
+    let len = match uaccess::copy_cstr_from_user(path, &mut name) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    name.truncate(len + 1); // keep the NUL: Linux's openat expects one
+
+    let mut budget = MAX_ARG_BYTES;
+    let args = match copy_string_array(argv, &mut budget) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let envs = match copy_string_array(envp, &mut budget) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let Ok(cpath) = core::ffi::CStr::from_bytes_with_nul(&name) else {
+        return -22; // -EINVAL: an embedded NUL is not a path
+    };
+    let Ok(bytes) = crate::lkl::read_file(cpath) else {
+        return -2; // -ENOENT
+    };
+
+    // Borrowed views, because the loader wants slices and the owners are the
+    // vectors above -- which must outlive the stack that is built from them.
+    let argv: alloc::vec::Vec<&[u8]> = args.iter().map(|v| v.as_slice()).collect();
+    let envv: alloc::vec::Vec<&[u8]> = envs.iter().map(|v| v.as_slice()).collect();
+
+    let p = match load(&bytes, &argv, &envv) {
+        Ok(p) => p,
+        // The image was rejected before anything was replaced, so the caller
+        // still has everything it had. That is what makes a failed execve
+        // survivable and why the loader validates before it allocates.
+        Err(why) => {
+            println!("  execve: {}", why);
+            return -8; // -ENOEXEC
+        }
+    };
+
+    let old = current_ttbr0();
+    unsafe {
+        // The new tables first, then the old ones freed. The other order
+        // unmaps the kernel from under the code doing the freeing.
+        core::arch::asm!(
+            "msr ttbr0_el1, {}", "dsb ishst", "tlbi vmalle1", "dsb ish", "isb",
+            in(reg) p.ttbr0, options(nostack)
+        );
+        paging::destroy_user_address_space(old);
+        // The thread pointer belonged to the program that is gone. A libc
+        // sets its own before it needs one; leaving the old value would give
+        // the new program a pointer into memory that has just been freed.
+        core::arch::asm!("msr tpidr_el0, xzr", options(nomem, nostack));
+    }
+    crate::sched::set_user_memory(p.brk, USER_MMAP_TOP);
+    println!("  execve: replaced this process with {} bytes at {:#x}", bytes.len(), p.entry);
+    unsafe { enter_user_fresh(p.entry, p.stack, p.ttbr0, crate::sched::kernel_stack_top() as u64) }
 }
 
 /// # mprotect(addr, len, prot)
@@ -643,7 +786,25 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
         println!("  rootfs: /nk-init came from the initrd ({} bytes)", b.len());
         b
     };
-    let image = crate::elf::parse(&bytes, USER_BASE, USER_MMAP_TOP)?;
+    load(&bytes, &[b"/nk-init"], &[b"PATH=/bin", b"HOME=/"])
+}
+
+/// Build a fresh address space around an ELF image and the arguments it is to
+/// start with.
+///
+/// Everything a process is: its mapped segments, a stack with argc/argv/envp
+/// and the auxiliary vector on it, and the address at which to begin. It does
+/// not touch the *current* address space, which is what lets `execve` build
+/// the replacement before tearing down what it replaces -- the order matters,
+/// because the kernel is mapped through the same tables and the process
+/// cannot survive unmapping itself half way through.
+#[cfg(nk_lkl)]
+pub fn load(
+    bytes: &[u8],
+    args: &[&[u8]],
+    envs: &[&[u8]],
+) -> Result<Process, &'static str> {
+    let image = crate::elf::parse(bytes, USER_BASE, USER_MMAP_TOP)?;
     let ttbr0 = paging::new_address_space();
     for s in &image.segments {
         let base = s.address & !(PAGE as u64 - 1);
@@ -688,7 +849,7 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
     let stack = frames::alloc_contiguous(USER_STACK_SIZE / PAGE)
         .ok_or("no memory for the ELF stack")?;
     unsafe { core::ptr::write_bytes(stack, 0, USER_STACK_SIZE) };
-    let sp = build_initial_stack(stack, &image)?;
+    let sp = build_initial_stack(stack, &image, args, envs)?;
     unsafe {
         paging::map_user(
             ttbr0,
@@ -759,7 +920,12 @@ fn stack_seed() -> Result<[u8; 16], &'static str> {
 /// the failure mode for getting it wrong is not a syscall nk could name, it
 /// is the program dereferencing whatever happened to be there.
 #[cfg(nk_lkl)]
-fn build_initial_stack(page: *mut u8, image: &crate::elf::Image) -> Result<u64, &'static str> {
+fn build_initial_stack(
+    page: *mut u8,
+    image: &crate::elf::Image,
+    args: &[&[u8]],
+    envs: &[&[u8]],
+) -> Result<u64, &'static str> {
     use crate::stack::*;
 
     // AT_PHDR is the *address* the program headers ended up at, which is only
@@ -797,10 +963,12 @@ fn build_initial_stack(page: *mut u8, image: &crate::elf::Image) -> Result<u64, 
     ];
 
     let sp = unsafe { crate::stack::Builder::new(page, USER_STACK_TOP, USER_STACK_SIZE) }
-        .build(&[b"/nk-init"], &[b"PATH=/bin", b"HOME=/"], &aux, &random)
+        .build(args, envs, &aux, &random)
         .ok_or("the initial stack does not fit")?;
     println!(
-        "  stack: argc 1, 2 environment entries, {} auxv pairs, sp {:#x}",
+        "  stack: argc {}, {} environment entries, {} auxv pairs, sp {:#x}",
+        args.len(),
+        envs.len(),
         aux.len() + 2,
         sp
     );

@@ -503,9 +503,45 @@ one, which it always was: the self-checks that follow a run -- that a process
 exits with its own Linux pid, that it spun long enough to be preempted -- are
 claims about the fixture and not about an arbitrary binary.
 
+### execve, and why the order is the whole difficulty
+
+`execve` is nk's, not Linux's. LKL has no user space to exec into --
+forwarding it would ask Linux to replace an address space it does not have --
+so nk reads the file through Linux's VFS and does the replacing itself.
+
+Two orderings have to be right, and neither is arbitrary:
+
+**argv and envp are copied before anything is built.** They live in the
+address space being replaced: an array of pointers, each into user memory,
+with no length anywhere -- the array ends at a NULL and each string at a NUL.
+This is the shape the marshalling table cannot describe, so it is walked, one
+`copy_from_user` per pointer and one per string, bounded at 64 entries and
+16KB because a process that asks for a million arguments should be told no
+rather than answered.
+
+**The old address space is freed only once `TTBR0` points at the new one.**
+The kernel is mapped through the same tables as the process -- that is what
+`new_address_space` copying three levels is for -- so a process that frees its
+own address space before leaving it does not survive to report the mistake.
+
+The consequence of building first is the thing execve actually promises: a
+failed one leaves the caller with everything it had. `exec-parent.c` checks
+that by execing a path that does not exist, confirming `ENOENT`, and carrying
+on to exec the one that does.
+
+The kernel stack is wound back before the new program starts. `execve` is
+called from inside a syscall and never returns through it, so the exception
+frame, the handler and the loader beneath it are all dead the moment the new
+image runs; leaving them there leaks the stack for the life of the task, which
+one exec would not notice and a shell would. `enter_user_fresh` is
+`enter_user` with `mov sp, x3` in front of it.
+
+`TPIDR_EL0` is cleared too. It belonged to the program that is gone, and the
+memory it pointed at has just been freed.
+
 ### What a real binary still cannot do
 
-`fork`, `execve`, threads, signals, and any `mmap` of a file. The rootfs is
+`fork`, threads, signals, and any `mmap` of a file. The rootfs is
 memory-backed and `/nk-init` is seeded from the kernel image, so the binary
 travels inside `nk.bin` rather than being read from a disk.
 

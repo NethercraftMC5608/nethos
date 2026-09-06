@@ -425,25 +425,80 @@ NET_LIB = ROOT / 'kernel/ldk/build/virtio-net/libnklinux.a'
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
 @unittest.skipUnless(NET_LIB.exists(), 'virtio-net port not built')
-def build_hello():
-    """Compile kernel/init/hello.c in ldk's container. Returns its path.
-
-    Raises SkipTest rather than failing when there is no container: this
-    suite has to keep passing on a machine with no docker.
-    """
-    out = ROOT / 'kernel/ldk/build/nk-hello'
-    out.parent.mkdir(parents=True, exist_ok=True)
+def build_c(name, out):
+    """Compile kernel/init/<name>.c in ldk's container to kernel/ldk/build/<out>."""
+    (ROOT / 'kernel/ldk/build').mkdir(parents=True, exist_ok=True)
     try:
         build = subprocess.run(
             ['docker', 'run', '--rm', '-v', f'{ROOT}:/w', '-w', '/w', 'nethos-ldk',
-             'gcc', '-static', '-O2', '-o', 'kernel/ldk/build/nk-hello',
-             'kernel/init/hello.c'],
+             'gcc', '-static', '-O2', '-o', f'kernel/ldk/build/{out}',
+             f'kernel/init/{name}.c'],
             capture_output=True, text=True, timeout=300)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         raise unittest.SkipTest(f'no ldk container: {e}')
     if build.returncode != 0:
         raise unittest.SkipTest(f'no aarch64 toolchain: {build.stderr.strip()[:200]}')
-    return out
+    return ROOT / 'kernel/ldk/build' / out
+
+
+def make_cpio(root, name):
+    """Pack a directory as a newc cpio archive and return its path."""
+    archive = ROOT / 'kernel/ldk/build' / name
+    names = '\n'.join(sorted(str(p.relative_to(root)) for p in root.rglob('*'))) + '\n'
+    with open(archive, 'wb') as out:
+        cpio = subprocess.run(['cpio', '-o', '-H', 'newc'], cwd=root,
+                              input=names.encode(), stdout=out,
+                              stderr=subprocess.PIPE)
+    if cpio.returncode != 0:
+        raise unittest.SkipTest(f'cpio failed: {cpio.stderr.decode()[:200]}')
+    return archive
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class Execve(unittest.TestCase):
+    """One program replacing itself with another, in the same process.
+
+    The hard part is the order. argv and envp live in the address space being
+    replaced, so they have to be copied out before the replacement is built;
+    and the kernel is mapped through the same tables as the process, so the
+    old address space cannot be freed until TTBR0 points at the new one.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        parent = build_c('exec-parent', 'exec-parent')
+        child = build_c('exec-child', 'exec-child')
+        root = ROOT / 'kernel/ldk/build/exec-root'
+        shutil.rmtree(root, ignore_errors=True)
+        (root / 'bin').mkdir(parents=True)
+        shutil.copy(parent, root / 'nk-init')
+        shutil.copy(child, root / 'bin/second')
+        cls.out = boot('--lkl', '--initrd', str(make_cpio(root, 'exec.cpio')),
+                       timeout=180, watchdog=90)
+
+    def test_a_failed_execve_leaves_the_caller_intact(self):
+        # execve promises this, and it is why nk validates the image and
+        # builds the new address space before tearing down the old one.
+        self.assertIn('survived a failed execve, errno was ENOENT', self.out)
+
+    def test_the_program_is_replaced(self):
+        self.assertIn('execve: replaced this process', self.out)
+
+    def test_the_new_program_gets_its_arguments(self):
+        # These pointers were the *parent's* memory, in an address space that
+        # no longer exists by the time the child reads them.
+        self.assertIn('child: argc 3, argv[0]=/bin/second, argv[1]=and,'
+                      ' argv[2]=its arguments', self.out)
+
+    def test_the_new_program_gets_its_environment(self):
+        self.assertIn('child: getenv(NK) is the environment survived too', self.out)
+
+    def test_it_exits_with_the_new_programs_status(self):
+        self.assertIn('the process exited with status 9', self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('fault in user space', self.out)
+        self.assertNotIn('kernel panic', self.out)
 
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
@@ -458,23 +513,13 @@ class Initrd(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        hello = build_hello()
         root = ROOT / 'kernel/ldk/build/initrd-root'
         shutil.rmtree(root, ignore_errors=True)
         (root / 'etc').mkdir(parents=True)
-        shutil.copy(hello, root / 'nk-init')
+        shutil.copy(build_c('hello', 'nk-hello'), root / 'nk-init')
         (root / 'etc/nk-greeting').write_text(
             'a userland that is not part of the kernel image\n')
-        cls.archive = ROOT / 'kernel/ldk/build/initrd.cpio'
-        names = '\n'.join(sorted(
-            str(p.relative_to(root)) for p in root.rglob('*'))) + '\n'
-        with open(cls.archive, 'wb') as out:
-            cpio = subprocess.run(['cpio', '-o', '-H', 'newc'], cwd=root,
-                                  input=names.encode(), stdout=out,
-                                  stderr=subprocess.PIPE)
-        if cpio.returncode != 0:
-            raise unittest.SkipTest(f'cpio failed: {cpio.stderr.decode()[:200]}')
-        cls.out = boot('--lkl', '--initrd', str(cls.archive),
+        cls.out = boot('--lkl', '--initrd', str(make_cpio(root, 'initrd.cpio')),
                        timeout=180, watchdog=90)
 
     def test_the_archive_is_found_and_unpacked(self):
@@ -512,7 +557,7 @@ class RealBinary(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.out = boot('--lkl', '--init', str(build_hello()),
+        cls.out = boot('--lkl', '--init', str(build_c('hello', 'nk-hello')),
                        timeout=180, watchdog=90)
 
     def test_it_runs_and_prints(self):
