@@ -142,16 +142,90 @@ one boots.
 - **2 — done.** `ldk` compiles unmodified Linux drivers against Linux's own
   headers for aarch64 and reports what they need. virtio-blk: **108 symbols**.
   virtio-net: 207, of which **139 are new** — the other 68 came free.
-- **3** — unmodified `virtio_mmio` + `virtio_blk`. Forces most of the shim that
-  will ever exist: `printk`, `kmalloc`, `ioremap`, `request_irq`, spinlocks,
-  wait queues, the device/driver model, `dma_alloc_coherent`, workqueues.
-  *Done when nk reads a sector off a QEMU disk and prints it.*
+- **3 — done.** Unmodified `virtio_mmio` + `virtio_blk` read a sector off a
+  QEMU disk. 113 of the 154 symbols they ask for are implemented; the other
+  41 are stubs that never ran.
 - **4** — `virtio_net`, then `e1000`: a different class of device, and then a
   real vendor driver that does not cooperate. Forces `sk_buff`, netdev
   registration, NAPI, streaming DMA.
   *Done when nk answers an ARP request from the host.*
 - **5** — decide with `ldk report`'s numbers whether USB, DRM or WiFi is worth
   attempting. Genode is funded and staffed and still does not do GPU.
+
+## What Stage 3 cost
+
+The method worked exactly as advertised: link, boot, read the name of the stub
+it stopped on, implement that, boot again. It stopped on `bus_register`, then
+`execute_with_initialized_rng`, then `get_random_bytes`, then
+`of_property_read_bool`, and so on. **113 of 154 symbols ended up implemented
+and 41 are stubs that never ran** — the "implement only what it reaches" claim
+in the plan, measured.
+
+The bugs that were not that shape are the ones worth keeping.
+
+**A data symbol defined as a function is unrecoverable.** An undefined ELF
+symbol carries no type, so nothing says whether `virtio_check_mem_acc_cb` is a
+function or a pointer to one. It is a pointer:
+
+    extern bool (*virtio_check_mem_acc_cb)(struct virtio_device *dev);
+
+Defining it as a function compiled and linked in silence, and the caller then
+loaded the first eight bytes of its machine code and branched to them. The
+fault reported an address of `0xd65f03c052800020`, which is `mov w0, #1; ret`
+— `return true` — and pointed nowhere near the cause. `ldk syms` now reports
+which symbols are never *called*, from the relocations, and generates a
+pointer rather than a function for those. The same bug then reappeared as
+`hex_asc_upper`, a character lookup table, which made every `%x` and every
+negative `%d` in the kernel log print rubbish; that one slipped past the first
+version of the check because a byte load uses a relocation type the check did
+not list.
+
+**Read the name of a callback, not what it looks like.**
+`virtio_check_mem_acc_cb` asks whether the system *restricts* what memory a
+device may reach — it is a question, not a permission. Answering `true`
+("nothing to refuse", which is what it looks like it means) makes
+`virtio_features_ok` demand `VIRTIO_F_ACCESS_PLATFORM` of every device and
+reject them all with "device must provide VIRTIO_F_VERSION_1", which reads
+like a fault in the device.
+
+**arm64's `virt_to_page` does not use `virt_to_pfn`.** This one was the last
+blocker and the least visible:
+
+    virt_to_page(x) = VMEMMAP_START + ((x - PAGE_OFFSET) / PAGE_SIZE) * sizeof(struct page)
+    page_to_pfn(p)  = p - vmemmap
+    vmemmap         = (struct page *)VMEMMAP_START - (memstart_addr >> PAGE_SHIFT)
+
+The first uses `PAGE_OFFSET`, the second uses `memstart_addr`, and they are
+inverses only when the two agree. With `memstart_addr` at zero — the obvious
+guess — `virt_to_phys` and `virt_to_pfn` are both *correct* and `sg_phys` still
+comes out 2⁵² too high, because only the page round-trip is broken. The driver
+then hands the device a descriptor pointing at an address that does not exist,
+**the device reports success**, and the buffer is never written. Nothing fails;
+the data simply does not arrive. `memstart_addr = PAGE_OFFSET` restores the
+pairing. The test now prefills the buffer with `0xAA` rather than zeroes,
+because a read that never happens leaves it untouched and zeroes are
+indistinguishable from a disk full of them.
+
+**The console had one failure mode, and it was the worst one.** `put` spun
+unbounded on a full FIFO, so any console problem presented as the machine
+stopping mid-line with no message — in the one device that reports every other
+problem. It is bounded now, and writes anyway when the bound runs out: a
+dropped character is a far smaller problem than a kernel that appears to have
+died. `rust_exception` also writes a raw marker and the ESR through the
+smallest possible path *before* it formats anything, and `nk` powers the
+machine off through PSCI when it finishes, so "hung" and "finished" are no
+longer the same observation.
+
+### Open, and not understood
+
+`hexdump` written with `print!("{:08x}")` stops the kernel dead after its first
+few lines — no fault, no panic, the CPU idle in `wfi`, every later print lost,
+**in the Linux-linked build only**. The identical `print!` calls work
+everywhere else, including in the line immediately after it. It is not the
+UART (removing flow control entirely changes nothing) and not an exception
+(the raw marker in `rust_exception` never appears). The version in the tree
+formats by hand and avoids it, which is the better thing for a memory-inspection
+routine regardless — but the cause is unknown and this is a real bug.
 
 ## What Stage 2 settled
 

@@ -7,13 +7,21 @@
     "is small, and it forces most of the shim that will ever exist -- printk,",
     "kmalloc, ioremap, request_irq, spinlocks, wait queues, the device/driver",
     "model, dma_alloc_coherent and workqueues are all on the path from",
-    "module_init to a completed read."
+    "module_init to a completed read.",
+    "",
+    "lib/hexdump.c and lib/scatterlist.c are here rather than shimmed:",
+    "hex_asc_upper is a lookup table every %x in the kernel log reads,",
+    "and scatterlist.c is real code with real edge cases. Taking Linux's",
+    "own is both cheaper and more correct than writing either."
   ],
   "linux": "7.2",
   "sources": [
     "drivers/virtio/virtio.c",
     "drivers/virtio/virtio_ring.c",
     "drivers/virtio/virtio_mmio.c",
-    "drivers/block/virtio_blk.c"
+    "drivers/block/virtio_blk.c",
+    "lib/vsprintf.c",
+    "lib/hexdump.c",
+    "lib/scatterlist.c"
   ]
 }

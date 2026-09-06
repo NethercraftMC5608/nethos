@@ -15,8 +15,11 @@ pub mod exceptions;
 pub mod frames;
 pub mod gic;
 pub mod heap;
+#[cfg(nk_linux)]
+pub mod linux;
 pub mod mmio;
 pub mod paging;
+pub mod psci;
 pub mod sched;
 pub mod selftest;
 pub mod stub;
@@ -100,26 +103,144 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
     unsafe { timer::init(ppi + 16) };
 
     sched::init();
-    sched::spawn("ping", worker, 0);
-    sched::spawn("pong", worker, 1);
+
+    psci::init(&fdt);
 
     println!();
-    println!("Stage 1 up. Unmasking interrupts; two threads should now alternate.");
-    println!();
-
+    println!("Stage 1 up. Unmasking interrupts.");
     sched::enable();
     unsafe { core::arch::asm!("msr daifclr, #0xf", options(nomem, nostack)) };
 
-    // The boot thread becomes the idle task. wfi rather than a spin, so an
-    // idle machine is genuinely idle: under HVF a busy loop here pins a whole
-    // host core for as long as the kernel is running.
-    loop {
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+    // Linux code runs from here on. Interrupts are already on and the
+    // scheduler is running, because a driver's probe may sleep, wait on a
+    // completion, or take a timeout -- all of which need a tick and something
+    // else to run.
+    #[cfg(nk_linux)]
+    {
+        linux::init();
+        linux::probe(&fdt);
+
+        // Probing is not synchronous from here: virtio_blk's own probe path
+        // defers part of itself to a workqueue, which runs on the kworker
+        // thread and needs the CPU. Yielding until the capacity arrives is
+        // what waiting for a device to appear looks like with no completion
+        // to wait on.
+        let deadline = timer::ticks() + timer::HZ * 3;
+        while linux::capacity() == 0 && timer::ticks() < deadline {
+            sched::yield_now();
+        }
+
+        println!();
+        if linux::capacity() == 0 {
+            println!("Stage 3: no block device appeared.");
+            stop();
+        }
+        println!(
+            "Stage 3: virtio-blk is up -- {} sectors, {} MiB",
+            linux::capacity(),
+            linux::capacity() * 512 / (1024 * 1024)
+        );
+
+        read_a_sector();
+        stop();
+    }
+
+    // Without a Linux port linked in there are no drivers to exercise, so the
+    // two demo threads run instead -- still the only thing that proves the
+    // context switch, and what tests/test_kernel_boot.py checks.
+    #[cfg(not(nk_linux))]
+    {
+        sched::spawn("ping", worker, 0);
+        sched::spawn("pong", worker, 1);
+        println!("Two threads should now alternate.");
+        println!();
+        let deadline = timer::ticks() + timer::HZ * 4;
+        while timer::ticks() < deadline {
+            sched::yield_now();
+        }
+        stop();
     }
 }
 
-/// Two of these run, to show that preemption works and that each one keeps its
-/// own stack and registers across a switch it never asked for.
+/// Finish: say so, and ask the machine to switch itself off.
+///
+/// Powering down rather than spinning matters for the tests. A kernel killed
+/// by a watchdog looks exactly like one that hung -- both end with a signal
+/// after N seconds -- and that ambiguity cost real time on one silent hang.
+fn stop() -> ! {
+    println!();
+    println!("nk: done.");
+    psci::poweroff();
+    halt()
+}
+
+/// The whole point of Stage 3: ask the unmodified Linux driver for a sector
+/// and look at what comes back.
+#[cfg(nk_linux)]
+fn read_a_sector() {
+    // Prefilled rather than zeroed. A read that never reaches the buffer
+    // leaves it exactly as it was, and zeroes would be indistinguishable from
+    // a disk full of zeroes -- which is precisely the case that looked like a
+    // working read for a while.
+    let mut buf = alloc::vec![0xAAu8; 512];
+    println!();
+    println!("  reading sector 0 through the Linux driver...");
+    match linux::read(0, &mut buf) {
+        Ok(()) => {
+            hexdump(&buf[..96], 0);
+            // Printed as text as well: the disk built by the test carries a
+            // readable marker, so a correct read is legible rather than
+            // something to verify byte by byte.
+            crate::print!("  as text: \"");
+            for &b in &buf[..32] {
+                crate::print!("{}", if (0x20..0x7f).contains(&b) { b as char } else { '.' });
+            }
+            println!("\"");
+        }
+        Err(e) => println!("  read failed: {}", e),
+    }
+}
+
+/// A hex dump written without `core::fmt`.
+///
+/// Deliberately raw, and this is not premature caution. The formatted version
+/// of this function -- `print!("{:08x}", ...)` in a loop -- printed its first
+/// lines correctly and then stopped the kernel dead: no fault, no panic, the
+/// CPU idle in wfi, every later print lost, in the Linux-linked build only.
+/// The same `print!` calls work everywhere else in the kernel, including
+/// immediately after this function. It is not the UART -- removing flow
+/// control entirely changed nothing -- and it is not a fault, because the
+/// exception path now writes a raw marker before it formats anything.
+///
+/// **That is an open bug, not a solved one**, and it is recorded in
+/// docs/KERNEL.md rather than papered over. This version avoids it, and is
+/// the better thing for a kernel to have regardless: the one routine used to
+/// inspect memory when something is wrong should not itself depend on the
+/// largest piece of machinery in the binary.
+#[cfg(nk_linux)]
+fn hexdump(bytes: &[u8], base: usize) {
+    let u = uart::console();
+    let _ = base;
+    let hex = |n: u8| if n < 10 { b'0' + n } else { b'a' + n - 10 };
+    for (i, b) in bytes.iter().enumerate() {
+        if i % 16 == 0 {
+            u.put(b'\r');
+            u.put(b'\n');
+            u.put(b' ');
+            u.put(b' ');
+        }
+        u.put(hex(b >> 4));
+        u.put(hex(b & 15));
+        u.put(b' ');
+    }
+    u.put(b'\r');
+    u.put(b'\n');
+}
+
+/// Two of these run when no Linux port is linked, to show that preemption
+/// works and that each thread keeps its own stack and registers across a
+/// switch it never asked for.
+#[cfg(not(nk_linux))]
 extern "C" fn worker(id: usize) {
     let names = ["ping", "pong"];
     let mut n = 0u64;

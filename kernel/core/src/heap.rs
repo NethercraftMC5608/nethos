@@ -90,6 +90,32 @@ pub fn stats() -> (usize, usize) {
     }
 }
 
+/// Allocate without a Layout, for the Linux shim.
+///
+/// `kmalloc` has no alignment argument and `kfree` has no size argument, so
+/// the C side cannot produce a Layout for either. This heap already stores
+/// what it needs in a header before every allocation, so the shape Linux
+/// expects is the natural one here and the Rust one is the special case.
+///
+/// # Safety
+/// `align` must be a power of two.
+pub unsafe fn alloc_raw(size: usize, align: usize) -> *mut u8 {
+    let Ok(layout) = Layout::from_size_align(size.max(1), align) else {
+        return ptr::null_mut();
+    };
+    ALLOCATOR.alloc(layout)
+}
+
+/// # Safety
+/// `p` must have come from `alloc_raw` or the global allocator.
+pub unsafe fn free_raw(p: *mut u8) {
+    if !p.is_null() {
+        // The layout is unused: dealloc reads the block and size out of the
+        // header it wrote at allocation time.
+        ALLOCATOR.dealloc(p, Layout::from_size_align_unchecked(1, 1));
+    }
+}
+
 /// How many blocks the free list holds. The only externally visible evidence
 /// that coalescing works: allocate a spread of blocks, free them all, and if
 /// this does not come back to one, free() is leaving the arena in pieces.

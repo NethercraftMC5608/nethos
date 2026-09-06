@@ -6,6 +6,7 @@ ldk — the Linux Driver Kit. What nk owes an unmodified Linux driver.
     ldk build   <port>        compile the port's drivers, unmodified
     ldk syms    <port>        what they need that nk does not provide
     ldk stubs   <port>        write a stub for every one of those
+    ldk shim    <port>        compile the shim and archive it with the drivers
     ldk report                coverage, across every port
     ldk ports                 what ports exist
 
@@ -45,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -68,15 +70,32 @@ IMAGE = "nethos-ldk"
 SRC_VOLUME = "nethos-ldk-src"
 DEFAULT_VERSION = "7.2"
 
-# Symbols every object references that are the toolchain's business rather
-# than the kernel's. Stubbing these would be actively wrong.
+# Symbols the toolchain provides, not the kernel. Stubbing these would be
+# actively wrong -- a generated __stack_chk_fail that returned would defeat
+# the check it exists to make.
+#
+# Only genuinely toolchain-supplied things belong here. The string functions
+# were in this list once, on the assumption that something would provide them;
+# nothing did, and the link failed on strcmp and strcpy. They are implemented
+# in emul/string.c now and counted like everything else, because a list of
+# "somebody else's problem" that is wrong is worse than no list.
 TOOLCHAIN = {
+    # Rust's compiler_builtins supplies these for a bare-metal target.
+    "memcpy", "memmove", "memset", "memcmp",
+    # -fstack-protector-strong; emul/glue.c handles the failure path, and the
+    # canary itself comes from SP_EL0 rather than a symbol -- see the
+    # -mstack-protector-guard=sysreg flags kbuild passes on arm64.
     "__stack_chk_guard",
     "__stack_chk_fail",
-    "memcpy", "memmove", "memset", "memcmp",
-    "strlen", "strcmp", "strncmp", "strcpy", "strncpy",
     "__aeabi_unwind_cpp_pr0", "__aeabi_unwind_cpp_pr1",
 }
+
+# Everything nk itself exports to the shim is named nk_*, and the prefix is
+# the boundary rather than a convention: a symbol with it is answered by the
+# Rust side and must never be stubbed here. Without this rule the shim's own
+# calls into nk get a generated stub each, and every one collides with the
+# real thing at link time.
+NK_PREFIX = "nk_"
 
 
 def say(msg):
@@ -100,8 +119,14 @@ def docker(args, mounts=None, check=True, capture=False):
     for host, guest in (mounts or []):
         cmd += ["-v", f"{host}:{guest}"]
     cmd += [IMAGE, "sh", "-c", args]
-    return subprocess.run(cmd, check=check, text=True,
-                          capture_output=capture)
+    try:
+        return subprocess.run(cmd, check=check, text=True, capture_output=capture)
+    except subprocess.CalledProcessError:
+        # The compiler has already said what is wrong, in its own words and
+        # above this line. A Python traceback on top of it buries the errors
+        # under the entire command line, which for a kbuild invocation is
+        # about a hundred flags.
+        die("the container step failed -- see the output above")
 
 
 def load_port(name: str) -> dict:
@@ -243,19 +268,74 @@ def analyse(port: dict) -> dict:
         defined |= d
         undefined |= u
 
+    # The shim's own undefined symbols count too, and missing this was a real
+    # bug: implementing the platform bus introduced a call to
+    # platform_get_resource, which is a genuine Linux function and not an
+    # inline. Nothing generated a stub for it, because stubs were generated
+    # from the drivers alone, and the link failed on a symbol no report
+    # mentioned. Implementing part of Linux pulls in more of Linux, and the
+    # accounting has to say so.
+    shim_def: set[str] = set()
+    shim_undef: set[str] = set()
+    for obj in sorted((BUILD / "_shim").glob("*.o")):
+        d, u = npkg_elf.symbols(str(obj))
+        shim_def |= d
+        shim_undef |= u
+
+    # Which of them are *data*, not functions.
+    #
+    # An undefined ELF symbol carries no type, so the symbol table cannot say
+    # whether virtio_check_mem_acc_cb is a function or a pointer to one. The
+    # relocations can: a symbol reached by CALL26 is called, one with an
+    # LDST_ABS_LO12 against it is read from, and one that is only ever read
+    # from is data.
+    #
+    # This matters because getting it wrong is not a link error. Define a
+    # function where a function pointer was wanted and the caller loads your
+    # first eight bytes of machine code and jumps to them -- which is exactly
+    # what happened, and the resulting fault address was instruction encoding
+    # with nothing pointing back at the cause.
+    called: set[str] = set()
+    loaded: set[str] = set()
+    for obj in objs + sorted((BUILD / "_shim").glob("*.o")):
+        c, l = npkg_elf.references(str(obj))
+        called |= c
+        loaded |= l
+
     # A symbol one file in the port defines and another uses is internal to
     # the port and nobody's responsibility but its own.
-    external = undefined - defined - TOOLCHAIN
-    implemented = external & shim_symbols()
+    external = {s for s in (undefined | shim_undef) - defined - TOOLCHAIN
+                if not s.startswith(NK_PREFIX)}
+    implemented = external & shim_def
     stubbed = (external - implemented) & stubbed_symbols(port["name"])
     missing = external - implemented - stubbed
+    # Never called => treat as data.
+    #
+    # Stricter than "read from with an LDST relocation", and deliberately so:
+    # a character lookup table is reached by adrp+add and then indexed with a
+    # register, which is the same relocation pattern as taking a function's
+    # address. hex_asc_upper slipped through the narrower rule and every %x
+    # and negative %d in the kernel log printed rubbish.
+    #
+    # The wider rule is safe in both directions. A data stub is a pointer to a
+    # panicking function: if the symbol really is a function pointer, calling
+    # through it names the symbol; if it is plain data, the value is
+    # meaningless but nothing jumps into it. A *function* stub for a data
+    # symbol is the case that cannot be recovered from -- the caller loads
+    # eight bytes of machine code and branches to them.
+    data = external - called
+    read_from = external & loaded
     return {
+        "data": data,
+        "read_from": read_from,
         "objects": [o.name for o in objs],
         "defined": defined,
         "external": external,
         "implemented": implemented,
         "stubbed": stubbed,
         "missing": missing,
+        # What the shim asked for that the drivers never did.
+        "shim_pulled": (shim_undef - undefined) - defined - TOOLCHAIN - shim_def,
     }
 
 
@@ -267,9 +347,20 @@ def cmd_syms(args):
     print(f"  {len(a['objects'])} objects, {len(a['defined'])} symbols defined")
     print()
     print(f"  needs {len(a['external'])} symbols from the kernel underneath it")
+    if a["shim_pulled"]:
+        print(f"    ({len(a['shim_pulled'])} of them asked for by the shim, not the drivers)")
     print(f"    implemented   {len(a['implemented'])}")
     print(f"    stubbed       {len(a['stubbed'])}")
     print(f"    not yet       {len(a['missing'])}")
+    if a["data"]:
+        print()
+        print(f"  {len(a['data'])} are never called -- data, or a pointer to a function:")
+        for sym in sorted(a["data"]):
+            where = "implemented" if sym in a["implemented"] else "stubbed"
+            read = ", read from" if sym in a["read_from"] else ""
+            print(f"    {sym}  ({where}{read})")
+        print("    Defining one of these as a function is not a link error: the")
+        print("    caller loads its first eight bytes of code and jumps to them.")
     print()
     if args.all:
         for group in ("implemented", "stubbed", "missing"):
@@ -313,6 +404,19 @@ long {sym}(void);
 long {sym}(void) {{ nk_stub_called("{sym}"); return 0; }}
 """
 
+# A data symbol, which the relocations say is read from rather than called.
+# Emitted as a pointer to a panicking function rather than as zero: almost
+# every such symbol in a kernel is a function pointer, and this way calling
+# through it names the symbol instead of faulting at address zero. For a
+# symbol that really is plain data the value is meaningless but harmless --
+# and it is still not a jump into the middle of some unrelated function,
+# which is what defining it as a function would give.
+STUB_DATA = """\
+/* @stub {sym} */
+static long stub_{sym}(void) {{ nk_stub_called("{sym}"); return 0; }}
+void *{sym} = (void *)stub_{sym};
+"""
+
 
 def cmd_stubs(args):
     port = load_port(args.port)
@@ -322,7 +426,9 @@ def cmd_stubs(args):
 
     want = sorted(a["missing"] | a["stubbed"])
     body = STUB_HEADER.format(name=port["name"])
-    body += "\n".join(STUB_ONE.format(sym=s) for s in want)
+    body += "\n".join(
+        (STUB_DATA if s in a["data"] else STUB_ONE).format(sym=s) for s in want
+    )
     path.write_text(body)
 
     say(f"{len(want)} stubs -> {path.relative_to(ROOT)}")
@@ -332,6 +438,118 @@ def cmd_stubs(args):
     print("  Every one of these panics when called. Boot the driver and")
     print("  implement whichever it actually reaches -- which is far fewer")
     print("  than are declared here, and is the whole point.")
+
+
+# ----------------------------------------------------------------- shim --
+
+# kbuild writes the exact command it used beside every object it builds. Taking
+# the flags from there rather than writing them out here means the shim is
+# compiled *identically* to the driver it has to link with -- same struct
+# layouts, same calling convention, same everything -- and that they cannot
+# drift apart later when the kernel version changes.
+FLAG_SOURCE = "drivers/virtio/.virtio_mmio.o.cmd"
+
+
+def kbuild_flags(version: str) -> list[str]:
+    """The exact compiler line kbuild used, with the input and output removed.
+
+    The recorded line ends in `-c <source> -o <object>`; those are the two
+    things that differ per file. Everything before them -- and there are
+    around a hundred flags, several of which change struct layouts -- is what
+    has to be identical between the shim and the driver it links with.
+    """
+    out = docker(f"cat /src/build-arm64/{FLAG_SOURCE}", capture=True)
+    line = out.stdout.split("\n", 1)[0]
+    # kbuild writes `savedcmd_<path> := gcc ...`; take everything after the
+    # first assignment. Splitting on the first '=' alone would cut a flag such
+    # as -DKASAN_SHADOW_SCALE_SHIFT= in half.
+    for sep in (" := ", " = "):
+        if sep in line:
+            line = line.split(sep, 1)[1]
+            break
+    words = shlex.split(line)
+    flags, skip = [], False
+    for i, w in enumerate(words):
+        if skip:
+            skip = False
+            continue
+        if w in ("-o", "-c"):
+            skip = w == "-o"
+            continue
+        if w.endswith(".c") and i > 0:
+            continue
+        flags.append(w)
+    return flags
+
+
+def cmd_shim(args):
+    """Compile the shim against Linux's own headers and archive everything.
+
+    Compiling the shim with Linux's headers in scope is not incidental. It
+    means `struct request`, `struct virtio_device` and every other layout is
+    the driver's own, byte for byte -- and, just as valuable, that the
+    compiler checks each function we write against Linux's own declaration of
+    it. A shim function with the wrong signature is a compile error here
+    rather than a corrupted stack three stages later.
+    """
+    port = load_port(args.port)
+    out = BUILD / port["name"]
+    if not list(out.glob("*.o")):
+        die(f"nothing built for {port['name']} -- run: ldk build {port['name']}")
+
+    emul = sorted(EMUL.glob("*.c"))
+    stub = STUBS / f"{port['name']}.c"
+    if not stub.exists():
+        die(f"no stubs for {port['name']} -- run: ldk stubs {port['name']}")
+
+    flags = " ".join(shlex.quote(f) for f in kbuild_flags(port.get("linux", DEFAULT_VERSION)))
+
+    # emul/ first, and on its own, because the stub file cannot be generated
+    # correctly until we know what emul defines -- otherwise every function
+    # the shim already implements gets a stub too, and the two collide at link
+    # time as a duplicate symbol. Ordering this inside one command is the only
+    # way the two stay consistent without anyone having to remember.
+    shim_out = BUILD / "_shim"
+    shim_out.mkdir(parents=True, exist_ok=True)
+    say(f"Compiling {len(emul)} shim files with kbuild's own flags")
+    _compile(flags, [f"/shim/emul/{p.name}" for p in emul], shim_out)
+
+    say("Regenerating stubs against what the shim now implements")
+    cmd_stubs(argparse.Namespace(port=args.port))
+
+    say(f"Compiling {stub.name}")
+    _compile(flags, [f"/shim/stubs/{stub.name}"], out / "stub")
+
+    say("Archiving drivers, shim and stubs")
+    script = """
+set -e
+cd /out
+rm -f libnklinux.a
+ar rcs libnklinux.a *.o stub/*.o /shimobj/*.o
+echo "  $(ar t libnklinux.a | wc -l | tr -d ' ') members"
+"""
+    docker(script, mounts=[(str(out), "/out"), (str(shim_out), "/shimobj")])
+    say(f"{(out / 'libnklinux.a').relative_to(ROOT)}")
+
+
+def _compile(flags: str, sources: list[str], out: Path):
+    out.mkdir(parents=True, exist_ok=True)
+    script = f"""
+set -e
+cd /src/build-arm64
+rm -f /out/*.o
+fail=0
+for src in {' '.join(sources)}; do
+  base=$(basename "$src" .c)
+  if {flags} -c "$src" -o "/out/$base.o"; then
+    echo "  ok    $base.c"
+  else
+    echo "  FAIL  $base.c"; fail=1
+  fi
+done
+[ "$fail" = 0 ]
+"""
+    docker(script, mounts=[(str(out), "/out"), (str(KERNEL / "linux"), "/shim")])
 
 
 # --------------------------------------------------------------- report --
@@ -392,6 +610,10 @@ def main():
     p = sub.add_parser("stubs", help="write a panicking stub for each missing symbol")
     p.add_argument("port")
     p.set_defaults(func=cmd_stubs)
+
+    p = sub.add_parser("shim", help="compile the shim and archive it with the drivers")
+    p.add_argument("port")
+    p.set_defaults(func=cmd_shim)
 
     p = sub.add_parser("report", help="coverage across every port")
     p.set_defaults(func=cmd_report)

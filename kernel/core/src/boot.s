@@ -118,6 +118,8 @@ park:
     mrs     x1, esr_el1
     mrs     x2, far_el1
     mrs     x3, elr_el1
+    mov     x4, x30                 // the link register: who called the code that faulted
+    mov     x5, sp
     b       rust_exception
 .endm
 

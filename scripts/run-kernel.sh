@@ -7,6 +7,7 @@
 #   scripts/run-kernel.sh --disk FILE      attach FILE as virtio-blk  (stage 3)
 #   scripts/run-kernel.sh --net            attach virtio-net, user mode (stage 4)
 #   scripts/run-kernel.sh --smp N          more CPUs than the one boot.s uses
+#   scripts/run-kernel.sh --port NAME      link an ldk port's Linux drivers in
 #   scripts/run-kernel.sh --tcg            emulate instead of using HVF
 #   scripts/run-kernel.sh --gdb            wait for gdb on :1234
 #   scripts/run-kernel.sh --timeout N      kill after N seconds (for tests)
@@ -28,6 +29,7 @@ DISK=""
 NET=0
 GDB=0
 TCG=0
+PORT=""
 TIMEOUT=0
 
 while [ $# -gt 0 ]; do
@@ -39,6 +41,7 @@ while [ $# -gt 0 ]; do
         --net)       NET=1; shift ;;
         --smp)       SMP="${2:?--smp needs a count}"; shift 2 ;;
         --mem)       MEM="${2:?--mem needs MB}"; shift 2 ;;
+        --port)      PORT="${2:?--port needs a name, e.g. virtio-blk}"; shift 2 ;;
         --tcg)       TCG=1; shift ;;
         --gdb)       GDB=1; shift ;;
         --timeout)   TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
@@ -54,6 +57,16 @@ say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 # default PATH and `cargo` is simply missing in a fresh shell. Add both the
 # keg and the cargo home rather than telling everyone to edit their profile.
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+
+# --port links an ldk port's Linux drivers into the image. Without it nk builds
+# exactly as it did before Stage 3, which keeps it buildable and testable on a
+# machine with no docker and no Linux tree.
+if [ -n "$PORT" ]; then
+    LIB="$ROOT/kernel/ldk/build/$PORT/libnklinux.a"
+    [ -f "$LIB" ] || die "no archive for $PORT.  cd kernel/ldk && python3 ldk.py build $PORT && python3 ldk.py shim $PORT"
+    export NK_LINUX_LIB="$LIB"
+    say "Linking $PORT ($(du -h "$LIB" | cut -f1))"
+fi
 
 if [ "$BUILD" -eq 1 ]; then
     command -v cargo >/dev/null || die "cargo is missing.  brew install rustup && rustup default stable"

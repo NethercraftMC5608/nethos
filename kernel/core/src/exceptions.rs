@@ -36,12 +36,42 @@ fn ec_name(ec: u64) -> &'static str {
 }
 
 #[no_mangle]
-pub extern "C" fn rust_exception(id: u64, esr: u64, far: u64, elr: u64) -> ! {
+pub extern "C" fn rust_exception(id: u64, esr: u64, far: u64, elr: u64, lr: u64, sp: u64) -> ! {
+    // Raw bytes first, before any formatting.
+    //
+    // core::fmt is a large amount of machinery to require of a kernel that
+    // has just faulted, and if it is what faulted, the report never appears
+    // and the machine looks like it simply stopped. Five characters through
+    // the smallest path there is cost nothing and remove that failure mode.
+    let u = crate::uart::console();
+    for b in b"\r\n!!EXC " {
+        u.put(*b);
+    }
+    for shift in (0..64).step_by(4).rev() {
+        let n = ((esr >> shift) & 0xf) as u8;
+        u.put(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+    }
+    u.put(b'\r');
+    u.put(b'\n');
+
     let ec = (esr >> 26) & 0x3f;
     println!();
     println!("!! exception: {}", NAMES[(id & 15) as usize]);
     println!("   esr {:#018x}  ec {:#04b}_{:04b} ({})", esr, ec >> 4, ec & 15, ec_name(ec));
     println!("   far {:#018x}   elr {:#018x}", far, elr);
+    // The link register is usually the only useful thing here. When a call
+    // goes through a bad function pointer, ELR is the garbage that was
+    // jumped to and says nothing; LR still points just after the call that
+    // did it, which names the caller exactly.
+    println!("   lr  {:#018x}   sp  {:#018x}", lr, sp);
+    if elr < 0x4000_0000 || elr > 0x6000_0000 {
+        println!("   (elr is not in RAM: this is a jump through a bad pointer,");
+        println!("    so look at lr, not elr)");
+    }
+    // Power off rather than spin. A kernel that halts after a fault and a
+    // kernel that hung look identical from outside -- both end with the
+    // watchdog -- and telling them apart mattered more than once.
+    crate::psci::poweroff();
     crate::halt();
 }
 
@@ -71,6 +101,17 @@ pub extern "C" fn rust_irq() {
         return;
     }
 
-    println!("!! unexpected interrupt {}", intid);
+    // Anything else belongs to a Linux driver. EOI after the handler, not
+    // before: a level-triggered device interrupt stays asserted until the
+    // driver quiets the device, and acknowledging it first means the GIC
+    // immediately offers it again.
+    #[cfg(nk_linux)]
+    let handled = unsafe { crate::linux::nk_linux_irq(intid) };
+    #[cfg(not(nk_linux))]
+    let handled = 0;
+
     crate::gic::eoi(intid);
+    if handled == 0 {
+        println!("!! unexpected interrupt {}", intid);
+    }
 }

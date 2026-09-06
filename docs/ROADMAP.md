@@ -271,8 +271,15 @@ The shim is discovered, not designed.
       compiling, so Linux's own flags are used rather than reconstructed.
       `pkg/npkg_elf.py` gained a section-table reader for it -- a .o has no
       program headers, which is what everything in that file used before.
-- [ ] **Stage 3.** Unmodified `virtio_mmio` + `virtio_blk`. Forces most of the
-      shim that will ever exist. Done when nk reads a sector.
+- [x] **Stage 3.** Unmodified `virtio_mmio` + `virtio_blk` read a sector off a
+      QEMU disk. 113 of 154 symbols implemented, 41 stubs never reached --
+      the "implement only what it reaches" claim, measured. Cost four bugs
+      worth keeping, all in docs/KERNEL.md: a data symbol defined as a
+      function (unrecoverable, and `ldk` now detects it from relocations); a
+      callback whose name means the opposite of what it looks like; arm64's
+      `virt_to_page` not using `virt_to_pfn`, which produced a read the device
+      reported as successful and never delivered; and a console whose only
+      failure mode was looking like a hang.
 - [ ] **Stage 4.** `virtio_net`, then `e1000` -- a real vendor driver that does
       not cooperate. Done when nk answers an ARP request.
 - [ ] **Stage 5.** Decide against `ldk report`'s numbers whether USB, DRM or

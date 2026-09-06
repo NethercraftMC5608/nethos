@@ -25,7 +25,7 @@ HAVE = bool(CARGO) and bool(shutil.which('qemu-system-aarch64'))
 
 def boot(*args, timeout=60):
     out = subprocess.run(
-        ['bash', str(RUN), '--timeout', '10', *args],
+        ['bash', str(RUN), '--timeout', '12', *args],
         capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
     )
     return out.stdout + out.stderr
@@ -100,6 +100,9 @@ class Stage1(unittest.TestCase):
         self.assertIn('gic:    v3 up', self.out)
         self.assertRegex(self.out, r'timer:  100 Hz on PPI 27')
 
+    def test_it_powers_off_rather_than_being_killed(self):
+        self.assertIn('nk: done.', self.out)
+
     def test_two_threads_alternate_under_preemption(self):
         # The whole point of Stage 1. Neither worker yields: each spins until
         # the tick count moves, so every switch between them is involuntary.
@@ -162,6 +165,81 @@ class ImageHeader(unittest.TestCase):
         # it is larger than the file: BSS and the 64KB boot stack occupy no
         # bytes on disk and every byte of them in RAM.
         self.assertGreater(self.image_size, len(BIN.read_bytes()))
+
+
+PORT_LIB = ROOT / 'kernel/ldk/build/virtio-blk/libnklinux.a'
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+@unittest.skipUnless(PORT_LIB.exists(), 'virtio-blk port not built (cd kernel/ldk && ldk shim virtio-blk)')
+class Stage3(unittest.TestCase):
+    """An unmodified Linux driver, reading a real disk."""
+
+    DISK = '/tmp/nk-test.img'
+    MARKER = b'NETHOS nk: read by an unmodified Linux virtio_blk driver.\n'
+
+    @classmethod
+    def setUpClass(cls):
+        # 4MiB, with a readable marker in sector 0. Written here rather than
+        # committed: it is four megabytes of mostly zeroes and trivially
+        # reproducible.
+        img = bytearray(4 * 1024 * 1024)
+        img[:len(cls.MARKER)] = cls.MARKER
+        with open(cls.DISK, 'wb') as fh:
+            fh.write(img)
+        cls.out = boot('--port', 'virtio-blk', '--disk', cls.DISK, timeout=120)
+
+    def test_the_drivers_initcalls_run(self):
+        # module_init on a built-in driver is an entry in a .initcallN.init
+        # section, gathered in level order by linker.ld. Zero here means the
+        # sections were dropped and no driver ever registered.
+        m = re.search(r'linux:\s+(\d+) initcalls ran', self.out)
+        self.assertIsNotNone(m, f'no initcall line:\n{self.out}')
+        self.assertGreaterEqual(int(m.group(1)), 3)
+
+    def test_printk_formats_correctly(self):
+        # %u worked and %x did not for a while, because hex_asc_upper -- a
+        # lookup table -- had been stubbed as a function. Every driver
+        # message was unreadable at exactly the point they were the only
+        # diagnostic available.
+        self.assertIn('printk check: u=42 d=-7 x=0xabcd s=ok', self.out)
+
+    def test_the_driver_probes_the_device(self):
+        # Printed by virtio_blk itself, not by nk: proof the unmodified
+        # driver negotiated features and read the device's config space.
+        self.assertRegex(self.out, r'\[linux\] virtio\d+: \[vd\w+\] \d+ 512-byte logical blocks')
+
+    def test_capacity_matches_the_real_disk(self):
+        m = re.search(r'virtio-blk is up -- (\d+) sectors', self.out)
+        self.assertIsNotNone(m, f'no block device appeared:\n{self.out}')
+        self.assertEqual(int(m.group(1)), 4 * 1024 * 1024 // 512)
+
+    def test_it_powers_the_machine_off_cleanly(self):
+        # A kernel killed by the watchdog and one that finished look identical
+        # from outside -- both end with a signal after N seconds -- and that
+        # ambiguity cost real time on one silent hang.
+        self.assertIn('nk: done.', self.out)
+        self.assertNotIn('terminating on signal', self.out)
+
+    def test_it_reads_the_actual_bytes_off_the_disk(self):
+        # The whole of Stage 3. Everything between the request and this data
+        # is the real driver: the virtio header, the descriptor chain, the
+        # notify register, its own interrupt handler, the used ring.
+        self.assertIn('NETHOS nk: read by an unmodified', self.out)
+        # And the hexdump agrees with the text, so the buffer really holds it
+        # rather than the marker being echoed from somewhere else.
+        self.assertIn('4e 45 54 48 4f 53', self.out)
+
+    def test_the_buffer_was_actually_written(self):
+        # It is prefilled with 0xAA. A read that never reaches the buffer
+        # leaves it that way -- which is what happened while sg_phys was
+        # wrong, and reported success the whole time.
+        self.assertNotIn('aa aa aa aa aa aa aa aa', self.out)
+
+    def test_no_stub_was_reached(self):
+        self.assertNotIn('unimplemented Linux API', self.out)
+        self.assertNotIn('!! exception', self.out)
+        self.assertNotIn('!! kernel panic', self.out)
 
 
 if __name__ == '__main__':

@@ -19,6 +19,10 @@ use crate::println;
 
 // Distributor
 const GICD_CTLR: usize = 0x0000;
+const GICD_IGROUPR: usize = 0x0080;
+const GICD_ISENABLER: usize = 0x0100;
+const GICD_IPRIORITYR: usize = 0x0400;
+const GICD_IROUTER: usize = 0x6000;
 
 // Redistributor, RD_base frame
 const GICR_WAKER: usize = 0x0014;
@@ -108,6 +112,37 @@ pub unsafe fn enable_ppi(intid: u32) {
     writeb(gicr + GICR_IPRIORITYR + intid as usize, PRIORITY);
 
     w32(gicr + GICR_ISENABLER0, 1 << intid);
+}
+
+/// Enable a shared interrupt (INTID >= 32) and route it to this CPU.
+///
+/// Shared interrupts live in the *distributor*, not the redistributor: they
+/// can be delivered to any CPU, so somebody has to say which. Every virtio
+/// device has one; nothing at Stage 1 did, which is why this arrived late.
+///
+/// # Safety
+/// `init` must have run.
+pub unsafe fn enable_spi(intid: u32) {
+    assert!((32..1020).contains(&intid), "not a shared interrupt: {intid}");
+    let gicd = (*(&raw const GIC)).gicd;
+    let i = intid as usize;
+
+    // Group 1, or a non-secure EL1 never sees it.
+    let reg = gicd + GICD_IGROUPR + (i / 32) * 4;
+    w32(reg, r32(reg) | (1 << (i % 32)));
+
+    writeb(gicd + GICD_IPRIORITYR + i, PRIORITY);
+
+    // Route to this CPU by affinity. Mode bit 31 clear means "this specific
+    // PE", not "any"; with one CPU running the distinction does not matter
+    // yet, and getting it wrong later means an interrupt delivered to a core
+    // that is parked in boot.s and will never acknowledge it.
+    let mpidr: u64;
+    core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack));
+    let aff = mpidr & 0x00ff_ffff_ff00_ffff;
+    core::ptr::write_volatile((gicd + GICD_IROUTER + i * 8) as *mut u64, aff);
+
+    w32(gicd + GICD_ISENABLER + (i / 32) * 4, 1 << (i % 32));
 }
 
 /// Acknowledge the interrupt the CPU is being offered, and take ownership of

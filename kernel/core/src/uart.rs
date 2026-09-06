@@ -28,10 +28,21 @@ impl Uart {
 
     pub fn put(&self, byte: u8) {
         unsafe {
-            // Spin while the FIFO is full. Unbounded on purpose: there is
-            // nothing useful to do on a timeout, and a hang here is a far
-            // clearer symptom than silently dropped output.
-            while crate::mmio::readl(self.base + FR) & (1 << 5) != 0 {}
+            // Wait for room, but bounded, and write anyway when the wait runs
+            // out.
+            //
+            // An unbounded spin gives the console exactly one failure mode --
+            // the machine stops mid-line with no message -- which is
+            // indistinguishable from every other kind of hang, in the one
+            // device that reports all the others. The bound is small on
+            // purpose: under a hypervisor each of these reads is a trap out
+            // to the emulator, so a large one turns a stuck FIFO into a
+            // kernel that appears to hang anyway, just more slowly. That was
+            // measured, at 100000 spins a character.
+            let mut spins = 0;
+            while crate::mmio::readl(self.base + FR) & (1 << 5) != 0 && spins < 1000 {
+                spins += 1;
+            }
             crate::mmio::writel(self.base + DR, byte as u32);
         }
     }

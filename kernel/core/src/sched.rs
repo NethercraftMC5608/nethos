@@ -32,6 +32,22 @@ pub enum State {
 pub struct Task {
     pub sp: usize,
     pub stack: usize,
+    /// What SP_EL0 points at while this task runs.
+    ///
+    /// On arm64 Linux, SP_EL0 in kernel mode holds the current task_struct --
+    /// `current` is literally a read of it -- and kbuild compiles every driver
+    /// with `-mstack-protector-guard=sysreg -mstack-protector-guard-reg=sp_el0
+    /// -mstack-protector-guard-offset=1344`, so the stack canary is read from
+    /// SP_EL0 + 1344 on entry to almost every function. With SP_EL0 left at
+    /// zero, the first Linux function called dereferences address 1344.
+    ///
+    /// So each task gets a page. nk does not have task_structs and the page is
+    /// zeroed, which makes the canary a consistent zero -- weaker than Linux's
+    /// per-task random value, and still catches the linear overflow the canary
+    /// exists for. A driver that follows `current` into it reads zeroes, which
+    /// is a real limitation and will need a proper shadow task_struct the
+    /// first time one does.
+    pub shadow: usize,
     pub state: State,
     pub name: &'static str,
     pub slices: u64,
@@ -40,6 +56,7 @@ pub struct Task {
 static mut TASKS: [Task; MAX_TASKS] = [Task {
     sp: 0,
     stack: 0,
+    shadow: 0,
     state: State::Unused,
     name: "",
     slices: 0,
@@ -62,8 +79,17 @@ pub fn init() {
         let t = &mut (*(&raw mut TASKS))[0];
         t.state = State::Running;
         t.name = "boot";
+        t.shadow = frames::alloc().expect("no memory for the boot task shadow") as usize;
         CURRENT = 0;
+        set_shadow(t.shadow);
     }
+}
+
+/// Point SP_EL0 at this task's shadow page. Must happen before any Linux code
+/// runs on the task, and before every switch to it.
+#[inline]
+fn set_shadow(addr: usize) {
+    unsafe { core::arch::asm!("msr sp_el0, {}", in(reg) addr, options(nomem, nostack)) };
 }
 
 /// Create a task. `entry` is called with `arg`, and falling off the end of it
@@ -94,7 +120,9 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
         f.add(10).write(0); // x29, the frame pointer: a task has no caller
         f.add(11).write(task_start as *const () as usize); // x30
 
-        tasks[slot] = Task { sp, stack: stack as usize, state: State::Ready, name, slices: 0 };
+        let shadow = frames::alloc().expect("no memory for a task shadow") as usize;
+        tasks[slot] =
+            Task { sp, stack: stack as usize, shadow, state: State::Ready, name, slices: 0 };
         slot
     }
 }
@@ -124,6 +152,11 @@ pub fn schedule() {
         tasks[next].state = State::Running;
         tasks[next].slices += 1;
         CURRENT = next;
+
+        // Before the switch, not after: cpu_switch does not return here, it
+        // returns into the incoming task, which may be Linux code that reads
+        // its stack canary through SP_EL0 in its very first instruction.
+        set_shadow(tasks[next].shadow);
 
         let prev_sp: *mut usize = &raw mut tasks[cur].sp;
         cpu_switch(prev_sp, tasks[next].sp);

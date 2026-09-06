@@ -36,8 +36,21 @@ PT_LOAD, PT_DYNAMIC = 1, 2
 DT_NULL, DT_NEEDED, DT_STRTAB, DT_SONAME, DT_STRSZ = 0, 1, 5, 14, 10
 
 SHT_SYMTAB = 2
+SHT_RELA = 4
 SHN_UNDEF = 0
 STB_LOCAL = 0
+
+# aarch64 relocation types. Only the two questions worth asking: is this
+# symbol *called*, or is a value *loaded from* it?
+R_AARCH64_JUMP26 = 282
+R_AARCH64_CALL26 = 283
+# LDST<n>_ABS_LO12_NC: the low half of "load from this symbol's address",
+# one per access width. All of them, and 278 in particular: a *byte* load is
+# how a character lookup table is read, and leaving it out let hex_asc_upper
+# through as a function stub, which made every %x and every negative %d in the
+# kernel log print rubbish.
+R_AARCH64_LDST8_ABS_LO12_NC = 278
+R_AARCH64_LDST_ABS = (278, 284, 285, 286, 287, 299)
 
 
 class ElfError(Exception):
@@ -212,6 +225,62 @@ class Elf:
                 })
         return out
 
+    def _symbol_names(self, symtab: dict, secs: list[dict]) -> list[str]:
+        """Names by symbol-table index, for resolving relocations."""
+        if symtab["link"] >= len(secs):
+            return []
+        strtab = secs[symtab["link"]]
+        strings = self._at(strtab["offset"], strtab["size"])
+        blob = self._at(symtab["offset"], symtab["size"])
+        step = symtab["entsize"] or 24
+        out = []
+        for pos in range(0, len(blob) - step + 1, step):
+            name_off = self._int(pos, 4, blob, 0)
+            end = strings.find(b"\x00", name_off)
+            out.append(strings[name_off:end if end >= 0 else None].decode("utf-8", "replace"))
+        return out
+
+    def references(self) -> tuple[set[str], set[str]]:
+        """Symbols this object calls, and symbols it loads a value from.
+
+        The distinction matters more than it sounds. An undefined ELF symbol
+        carries no type, so nothing in the symbol table says whether
+        `virtio_check_mem_acc_cb` is a function or a pointer *to* one. Getting
+        it wrong is not a link error: define a function where a function
+        pointer was wanted and the caller loads your first eight bytes of
+        machine code and jumps to them. The fault address is then instruction
+        encoding rather than an address, and nothing points back at the cause.
+
+        The relocations do say. A symbol reached by CALL26 is called; one with
+        an LDST_ABS_LO12 against it is read from. A symbol that is only ever
+        read from, never called, is data.
+        """
+        called: set[str] = set()
+        loaded: set[str] = set()
+        secs = self.sections()
+        names_by_symtab: dict[int, list[str]] = {}
+        for sec in secs:
+            if sec["type"] != SHT_RELA or not sec["entsize"]:
+                continue
+            link = sec["link"]
+            if link >= len(secs):
+                continue
+            if link not in names_by_symtab:
+                names_by_symtab[link] = self._symbol_names(secs[link], secs)
+            names = names_by_symtab[link]
+            blob = self._at(sec["offset"], sec["size"])
+            step = sec["entsize"]
+            for pos in range(0, len(blob) - step + 1, step):
+                info = self._int(pos + 8, 8, blob, 0)
+                sym, rtype = info >> 32, info & 0xFFFFFFFF
+                if sym >= len(names) or not names[sym]:
+                    continue
+                if rtype in (R_AARCH64_CALL26, R_AARCH64_JUMP26):
+                    called.add(names[sym])
+                elif rtype in R_AARCH64_LDST_ABS:
+                    loaded.add(names[sym])
+        return called, loaded
+
     def symbols(self) -> tuple[set[str], set[str]]:
         """Global symbols this object defines, and the ones it does not.
 
@@ -297,6 +366,17 @@ def symbols(path: str) -> tuple[set[str], set[str]]:
         return set(), set()
     try:
         return elf.symbols()
+    finally:
+        elf.fh.close()
+
+
+def references(path: str) -> tuple[set[str], set[str]]:
+    """(called, loaded-from) symbols of an object file. See Elf.references."""
+    elf = _load(path)
+    if elf is None:
+        return set(), set()
+    try:
+        return elf.references()
     finally:
         elf.fh.close()
 
