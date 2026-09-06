@@ -24,6 +24,7 @@
 
 #include <linux/etherdevice.h>
 #include <linux/netdevice.h>
+#include <net/netdev_rx_queue.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
@@ -73,6 +74,32 @@ struct net_device *alloc_netdev_mqs(int sizeof_priv, const char *name,
 	dev->real_num_tx_queues = txqs;
 	dev->num_rx_queues = rxqs;
 	dev->real_num_rx_queues = rxqs;
+
+	/*
+	 * The queue arrays, which Linux's own alloc_netdev_mqs allocates and
+	 * this did not. `netdev_get_tx_queue(dev, i)` is `&dev->_tx[i]`, so a
+	 * null `_tx` is not a null pointer the driver checks -- it is a small
+	 * address the driver writes a byte-queue-limit counter into.
+	 *
+	 * It did not fault. nk mapped the whole first gigabyte as one Device
+	 * block for peripherals that are not there, so the bottom of the
+	 * address space was writable memory that went nowhere. Narrowing that
+	 * mapping to the 34MB the machine actually has is what turned this
+	 * into a fault at `start_xmit+0x528` instead of a packet counter
+	 * quietly written to address 0x88.
+	 */
+	dev->_tx = nk_alloc(txqs * sizeof(*dev->_tx), 64);
+	dev->_rx = nk_alloc(rxqs * sizeof(*dev->_rx), 64);
+	if (!dev->_tx || !dev->_rx) {
+		nk_free(dev);
+		return NULL;
+	}
+	memset(dev->_tx, 0, txqs * sizeof(*dev->_tx));
+	memset(dev->_rx, 0, rxqs * sizeof(*dev->_rx));
+	for (unsigned int i = 0; i < txqs; i++)
+		dev->_tx[i].dev = dev;
+	for (unsigned int i = 0; i < rxqs; i++)
+		dev->_rx[i].dev = dev;
 	dev->tx_queue_len = 1000;
 	INIT_LIST_HEAD(&dev->napi_list);
 

@@ -21,16 +21,20 @@ use crate::frames::{self, PAGE};
 use crate::paging;
 use crate::println;
 
-/// Where a process's image goes.
+/// Where a process's image goes: 512GiB, the second top-level table entry.
 ///
-/// Above RAM and below the vmemmap, in a gap that nothing else uses. Not a
-/// design so much as an available hole: the kernel is identity mapped over
-/// the bottom of the address space, so user addresses cannot start at zero
-/// the way they do on Linux without colliding with it. Moving the kernel to
-/// the top half is what fixes that, and it is the next structural change.
-/// 512GiB: the second top-level table entry, which the kernel does not use.
-/// Chosen so that building a process's mappings cannot touch the tables the
-/// kernel shares with every other address space.
+/// It should be 0x400000, which is where aarch64 links a non-PIE executable,
+/// and `paging` now leaves that address free -- only the 34MB the devices
+/// actually occupy is mapped, not the whole first gigabyte. Moving there was
+/// tried and does not work under HVF: any address translated through the
+/// kernel's own low tables faults at level 2, on descriptors that read back
+/// correct and that **the same kernel translates fine under TCG, where the
+/// process runs to completion**. See docs/KERNEL.md.
+///
+/// So it stays here, where the process's mappings hang off a top-level entry
+/// the kernel never uses and every table below it is freshly allocated. That
+/// is the configuration that works on both, and the difference between the
+/// two is the clue the next attempt should start from.
 pub const USER_BASE: u64 = 0x80_0000_0000;
 pub const USER_STACK_TOP: u64 = USER_BASE + 0x10_0000;
 
@@ -90,11 +94,6 @@ pub fn spawn() -> Process {
 
 /// Run it. Does not return: every way out of EL0 is through a vector.
 pub fn run(p: &Process) -> ! {
-    #[cfg(nk_lkl)]
-    assert!(
-        crate::sched::linux_pid(crate::sched::current_id()) > 1,
-        "EL0 must run on an attached Linux process thread"
-    );
     println!();
     println!("  entering EL0...");
     println!();
@@ -131,7 +130,9 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
     // privilege levels being worth having.
     if ec != 0b010101 {
         println!();
-        println!("!! fault in user space: esr {:#x} ec {:#b}", esr, ec);
+        let far: u64;
+        unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
+        println!("!! fault in user space: esr {:#x} ec {:#b} far {:#x}", esr, ec, far);
         println!("   pc {:#x}  sp {:#x}", frame.elr, frame.sp);
         // The process is what should die here, not the machine. nk has
         // nothing else to run yet, so it stops -- but reporting it as a user

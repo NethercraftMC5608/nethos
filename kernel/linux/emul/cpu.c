@@ -19,6 +19,7 @@
 #include <linux/cpuhotplug.h>
 #include <linux/cpumask.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/workqueue.h>
 
 #include "nk.h"
@@ -84,21 +85,35 @@ int __cpuhp_state_remove_instance(enum cpuhp_state state,
 }
 
 /*
- * A cpumask is one word here, so "allocate" is a lie that costs nothing --
- * CPUMASK_OFFSTACK is not set for a mask this small and the caller's variable
- * already is the mask.
+ * A real allocation, because CONFIG_CPUMASK_OFFSTACK is set and
+ * `cpumask_var_t` is therefore a *pointer*: the caller's variable is
+ * uninitialised until this fills it in.
+ *
+ * This returned true without writing anything, on the reasoning that a mask
+ * of one CPU is small enough to live in the caller's variable. That is what
+ * happens when OFFSTACK is *off*, and it is not. So `virtnet_set_affinity`
+ * took the null it was handed and did an atomic read-modify-write through it.
+ *
+ * It did not fault. nk mapped the whole first gigabyte as one Device block
+ * for peripherals that are not there, so address zero was writable memory
+ * that went nowhere -- and the bug sat quiet until the device mapping was
+ * narrowed to the 34MB the machine actually has. Mapping what is not there
+ * costs more than the page tables it saves.
  */
 bool alloc_cpumask_var_node(cpumask_var_t *mask, gfp_t flags, int node)
 {
-	(void)mask;
 	(void)flags;
 	(void)node;
+	*mask = nk_alloc(sizeof(struct cpumask), 8);
+	if (!*mask)
+		return false;
+	memset(*mask, 0, sizeof(struct cpumask));
 	return true;
 }
 
 void free_cpumask_var(cpumask_var_t mask)
 {
-	(void)mask;
+	nk_free(mask);
 }
 
 /* The workqueue drivers reach for when they have no reason to want their

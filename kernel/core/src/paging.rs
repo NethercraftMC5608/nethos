@@ -25,6 +25,28 @@ const L1_SHIFT: u64 = 30;
 const L2_SHIFT: u64 = 21;
 const BLOCK_2MB: u64 = 1 << L2_SHIFT;
 
+/// What is added to a physical address to reach it through TTBR1.
+///
+/// The whole point of the high half, and it costs one register. With T1SZ 16
+/// the top translation regime covers addresses whose top sixteen bits are all
+/// ones, and it translates bits [47:0] of them -- which for `PA +
+/// 0xFFFF_0000_0000_0000` are exactly the physical address. So TTBR1 pointed
+/// at nk's *existing* identity tables produces a complete high alias of the
+/// kernel, with no second set of page tables and no extra memory.
+///
+/// That alias is what makes a per-process TTBR0 possible. An exception from
+/// EL0 does not change TTBR0, so today every address space has to carry a
+/// copy of the kernel's mappings or the handler faults before it can report
+/// why. A kernel running from the high half needs none of that, and the low
+/// half becomes the process's alone -- which is where real binaries are
+/// linked.
+pub const KERNEL_VA_BASE: u64 = 0xFFFF_0000_0000_0000;
+
+/// The high alias of a physical address.
+pub const fn to_high(pa: u64) -> u64 {
+    pa | KERNEL_VA_BASE
+}
+
 /// A page-table entry. Only the bits nk sets are named.
 mod pte {
     pub const VALID: u64 = 1 << 0;
@@ -58,6 +80,17 @@ const ATTR_NORMAL: u64 = 1;
 
 const GB: u64 = 1 << 30;
 
+/// What nk maps as Device memory, rounded outwards to 2MB blocks.
+///
+/// From the machine rather than from a guess would be better, and the device
+/// tree has the answer -- but paging runs before anything has parsed it, and
+/// the console has to work before that. On QEMU's `virt` the GIC starts at
+/// 0x8000000 and the last virtio transport ends below 0xa200000. A device
+/// outside this range reads as all-ones and writes nowhere, which presents as
+/// hardware that is not there.
+const DEVICE_START: u64 = 0x0800_0000;
+const DEVICE_END: u64 = 0x0a20_0000;
+
 #[repr(align(4096))]
 struct Table([u64; 512]);
 
@@ -65,6 +98,17 @@ struct Table([u64; 512]);
 // non-zero entry here is a valid mapping to somewhere arbitrary.
 static mut L0: Table = Table([0; 512]);
 static mut L1: Table = Table([0; 512]);
+
+/// The first gigabyte, in 2MB blocks instead of one 1GB block.
+///
+/// It was one block, covering 0-1GB as Device memory, and that is why user
+/// space lived at 512GiB: the addresses a real binary is linked for --
+/// 0x400000 and up -- were inside a block the kernel had claimed for
+/// peripherals that are not there. On this machine the devices occupy
+/// 0x8000000 to about 0xa004000 and nothing else below 1GB exists.
+///
+/// So only those are mapped, and the 128MB below them is free for a process.
+static mut L2_LOW: Table = Table([0; 512]);
 
 /// Follow a table entry, creating the next-level table if it is not there.
 ///
@@ -125,7 +169,7 @@ pub unsafe fn map_normal(va: u64, pa: u64, size: u64) {
 
     core::arch::asm!(
         "dsb ishst",
-        "tlbi vmalle1",
+        "tlbi vmalle1is",
         "dsb ish",
         "isb",
         options(nostack)
@@ -148,11 +192,28 @@ const L3_SHIFT: u64 = 12;
 /// mappings and `USER_BASE` sits in a top-level slot the kernel does not use,
 /// so that adding to one address space cannot alter another.
 pub fn new_address_space() -> u64 {
-    let table = crate::frames::alloc().expect("no memory for an address space") as *mut u64;
     unsafe {
-        core::ptr::copy_nonoverlapping(&raw const L0 as *const Table as *const u64, table, 512);
+        let l0 = crate::frames::alloc().expect("no memory for an address space") as *mut u64;
+        let l1 = crate::frames::alloc().expect("no memory for an address space") as *mut u64;
+        let l2 = crate::frames::alloc().expect("no memory for an address space") as *mut u64;
+
+        // Three levels copied, not one, and the reason is that user space now
+        // lives in the *same* gigabyte as the devices. A shallow copy of L0
+        // shares the kernel's L1 and its low L2, so mapping a process at
+        // 0x400000 would map it into every address space at once.
+        //
+        // The kernel's own mappings are still present in every process,
+        // because an exception from EL0 does not change TTBR0 and the handler
+        // is fetched through whatever is installed. A kernel in TTBR1's half
+        // would need none of this; TTBR1 is enabled now and the move is the
+        // next structural change.
+        core::ptr::copy_nonoverlapping(&raw const L0 as *const Table as *const u64, l0, 512);
+        core::ptr::copy_nonoverlapping(&raw const L1 as *const Table as *const u64, l1, 512);
+        core::ptr::copy_nonoverlapping(&raw const L2_LOW as *const Table as *const u64, l2, 512);
+        *l0 = (l1 as u64) | pte::VALID | pte::TABLE;
+        *l1 = (l2 as u64) | pte::VALID | pte::TABLE;
+        l0 as u64
     }
-    table as u64
 }
 
 /// Map user-accessible pages into `ttbr0`, in 4KB pages.
@@ -191,7 +252,28 @@ pub unsafe fn map_user_permissions(ttbr0: u64, va: u64, pa: u64, size: u64, exec
             | perms;
         off += 4096;
     }
-    core::arch::asm!("dsb ishst", "tlbi vmalle1", "dsb ish", "isb", options(nostack));
+    core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
+}
+
+/// PROBE: walk a table by hand and print every descriptor.
+pub fn dump_walk(ttbr0: u64, va: u64) {
+    unsafe {
+        let l0 = ttbr0 as *const u64;
+        let e0 = *l0.add(((va >> L0_SHIFT) & 511) as usize);
+        crate::println!("    L0[{}] = {:#018x}", (va >> L0_SHIFT) & 511, e0);
+        if e0 & pte::VALID == 0 { return; }
+        let l1 = (e0 & 0x0000_ffff_ffff_f000) as *const u64;
+        let e1 = *l1.add(((va >> L1_SHIFT) & 511) as usize);
+        crate::println!("    L1[{}] = {:#018x}", (va >> L1_SHIFT) & 511, e1);
+        if e1 & pte::VALID == 0 || e1 & pte::TABLE == 0 { return; }
+        let l2 = (e1 & 0x0000_ffff_ffff_f000) as *const u64;
+        let e2 = *l2.add(((va >> L2_SHIFT) & 511) as usize);
+        crate::println!("    L2[{}] = {:#018x}", (va >> L2_SHIFT) & 511, e2);
+        if e2 & pte::VALID == 0 || e2 & pte::TABLE == 0 { return; }
+        let l3 = (e2 & 0x0000_ffff_ffff_f000) as *const u64;
+        let e3 = *l3.add(((va >> L3_SHIFT) & 511) as usize);
+        crate::println!("    L3[{}] = {:#018x}", (va >> L3_SHIFT) & 511, e3);
+    }
 }
 
 /// Translate a user virtual address, exactly as EL0 would see it.
@@ -266,13 +348,18 @@ pub unsafe fn init(ram_base: u64, ram_size: u64) {
     // The low 512GB of the address space, which is all nk maps.
     (*(&raw mut L0)).0[0] = l1_ptr | pte::VALID | pte::TABLE;
 
-    // [0, 1GB): peripherals. Never executable -- nothing should ever branch
-    // into a register window, and if it does, the fault should say so.
-    (*(&raw mut L1)).0[0] = pte::VALID
-        | pte::AF
-        | pte::attr(ATTR_DEVICE)
-        | pte::UXN
-        | pte::PXN;
+    // The first gigabyte, through a table of 2MB blocks rather than one
+    // block, so that only the addresses devices actually occupy are taken.
+    // Never executable: nothing should branch into a register window, and if
+    // it does the fault should say so.
+    let l2_low = &raw mut L2_LOW as *mut Table as u64;
+    (*(&raw mut L1)).0[0] = l2_low | pte::VALID | pte::TABLE;
+    let mut dev = DEVICE_START;
+    while dev < DEVICE_END {
+        (*(&raw mut L2_LOW)).0[(dev >> L2_SHIFT) as usize & 511] =
+            dev | pte::VALID | pte::AF | pte::attr(ATTR_DEVICE) | pte::UXN | pte::PXN;
+        dev += BLOCK_2MB;
+    }
 
     // RAM, in 1GB blocks, from the device tree rather than assumed. Rounded
     // up: a machine with 512MB still needs its whole block mapped, and the
@@ -284,9 +371,11 @@ pub unsafe fn init(ram_base: u64, ram_size: u64) {
             (gb * GB) | pte::VALID | pte::AF | pte::SH_INNER | pte::attr(ATTR_NORMAL);
     }
     println!(
-        "  mmu:    identity, {} device GB + {} normal GB, 1GB blocks",
-        1,
-        last - first
+        "  mmu:    identity, devices {:#x}..{:#x}, {} GB of RAM, {} MiB free below them",
+        DEVICE_START,
+        DEVICE_END,
+        last - first,
+        DEVICE_START / (1024 * 1024)
     );
 
     let l0_ptr = &raw mut L0 as *mut Table as u64;
@@ -311,19 +400,25 @@ pub unsafe fn init(ram_base: u64, ram_size: u64) {
         | (3 << 12)            // SH0   = inner shareable
         | (0 << 14)            // TG0   = 4KB
         | (ips << 32)          // IPS
-        // TTBR1 is not set up, so disable walks through it outright. Left
-        // enabled, any stray high address becomes a walk through a zero table
-        // rather than an immediate, obvious fault.
-        | (1 << 23); // EPD1
+        // TTBR1, over the same tables. See KERNEL_VA_BASE.
+        | (16 << 16)           // T1SZ  = 48-bit
+        | (1 << 24)            // IRGN1 = WBWA
+        | (1 << 26)            // ORGN1 = WBWA
+        | (3 << 28)            // SH1   = inner shareable
+        // TG1 is not TG0: 4KB is 0b10 here and 0b00 there. Encoding one as
+        // the other gives a granule the tables were not built for, and the
+        // fault is a translation fault on an address that is plainly mapped.
+        | (2 << 30); // TG1 = 4KB
 
     core::arch::asm!(
         "msr mair_el1, {mair}",
         "msr tcr_el1,  {tcr}",
         "msr ttbr0_el1,{ttbr}",
+        "msr ttbr1_el1,{ttbr}",
         // The tables were just written with the MMU off, so they went straight
         // to memory; the TLB and the instruction cache, however, may hold
         // stale entries from before. Clear both before anything can use them.
-        "tlbi vmalle1",
+        "tlbi vmalle1is",
         "ic  iallu",
         "dsb nsh",
         "isb",
@@ -368,6 +463,15 @@ pub unsafe fn init(ram_base: u64, ram_size: u64) {
         (check >> 12) & 1
     );
     assert!(check & 1 == 1, "the MMU did not come on");
+
+    // Prove the high alias rather than assume it. The kernel image starts
+    // with the arm64 boot header, whose magic is at offset 56; reading it
+    // through TTBR1 has to give the same word as reading it directly.
+    let low = 0x4008_0000u64 + 56;
+    let a = core::ptr::read_volatile(low as *const u32);
+    let b = core::ptr::read_volatile(to_high(low) as *const u32);
+    assert_eq!(a, b, "TTBR1 does not alias the kernel");
+    println!("          ttbr1 on: {:#x} aliases {:#x} (magic {:#x})", to_high(low), low, b);
 }
 
 /// Kernel threads always use the kernel root, never a process's mappings.

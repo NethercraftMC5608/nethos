@@ -108,6 +108,19 @@ struct sk_buff *build_skb(void *data, unsigned int frag_size)
 	skb->end = skb->tail + size;
 	skb->truesize = SKB_TRUESIZE(size);
 	refcount_set(&skb->users, 1);
+	/*
+	 * The buffer belongs to the caller, not to this skb -- that is what
+	 * build_skb *is*, and Linux records it in `head_frag` so that freeing
+	 * the skb does not free memory somebody else still owns. free_skb
+	 * called nk_free on it regardless, which handed the allocator a
+	 * pointer it never issued and made it write a free-list link through
+	 * a header that was not there.
+	 *
+	 * The write landed at address zero and did nothing, because nk mapped
+	 * the whole first gigabyte as one Device block. It became a fault the
+	 * moment that mapping was narrowed to the memory the machine has.
+	 */
+	skb->head_frag = 1;
 	memset(skb_shinfo(skb), 0, sizeof(struct skb_shared_info));
 	return skb;
 }
@@ -178,7 +191,9 @@ static void free_skb(struct sk_buff *skb)
 		return;
 	if (!refcount_dec_and_test(&skb->users))
 		return;
-	nk_free(skb->head);
+	/* Only a head this skb allocated. See build_skb. */
+	if (!skb->head_frag)
+		nk_free(skb->head);
 	nk_free(skb);
 }
 
