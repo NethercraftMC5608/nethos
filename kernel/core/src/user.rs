@@ -906,8 +906,19 @@ pub fn unpack_initrd(archive: &[u8]) -> Result<usize, &'static str> {
             crate::lkl::mkdir(c, e.perms() as i64).is_ok()
         } else if e.is_file() {
             crate::lkl::write_file_mode(c, e.data, e.perms() as i64).is_ok()
+        } else if e.is_symlink() {
+            // newc stores the target without a NUL. Keep it relative so a
+            // bin/cat -> busybox applet resolves beside bin/busybox.
+            if e.data.contains(&0) || e.data.is_empty() {
+                false
+            } else {
+                let mut target = e.data.to_vec();
+                target.push(0);
+                crate::lkl::syscall(36, [target.as_ptr() as i64, -100,
+                    c.as_ptr() as i64, 0, 0, 0]) == 0 // symlinkat
+            }
         } else {
-            // Symlinks, devices and fifos. Nothing needs them yet and
+            // Devices and fifos. Nothing needs them yet and
             // pretending to create one by making an empty file would be
             // worse than leaving it out visibly.
             false

@@ -26,6 +26,9 @@ impl Entry<'_> {
     pub fn is_file(&self) -> bool {
         self.mode & 0o170000 == 0o100000
     }
+    pub fn is_symlink(&self) -> bool {
+        self.mode & 0o170000 == 0o120000
+    }
     /// The permission bits, without the type.
     pub fn perms(&self) -> u32 {
         self.mode & 0o7777
