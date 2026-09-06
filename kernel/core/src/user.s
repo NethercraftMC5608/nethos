@@ -519,19 +519,27 @@ __user_blob_start:
     cmp     x20, #14
     b.ne    9f
 
-    // A call nk has no descriptor for must not reach LKL.
+    // A *forwarded* call whose pointer names kernel memory must be refused.
     //
-    // This asserted that of `openat` until openat grew a descriptor, at which
-    // point the program was asserting the absence of the feature that had
-    // just been added. `mount` stands in now: it takes four pointers, nk does
-    // not describe it, and forwarding it unmarshalled would hand Linux user
-    // addresses it cannot safely hold. When mount is described, this line
-    // moves to whatever is still undescribed -- the check is the rule, not
-    // the number.
-    mov     x8, #40                 // __NR_mount
+    // This used to assert that an undescribed syscall never reached Linux,
+    // because nk described each call's arguments and bounced its buffers.
+    // Linux does its own user access now, through nk (see useraccess.rs), so
+    // the rule that needs guarding is this one: openat's path is read by
+    // Linux itself, and 0x40080000 is the kernel image. It has to come back
+    // EFAULT rather than as a path.
+    mov     x0, #-100               // AT_FDCWD
+    movz    x1, #0x4008, lsl #16
+    mov     x2, #0                  // O_RDONLY
+    mov     x3, #0
+    mov     x8, #56                 // __NR_openat
     svc     #0
+    cmn     x0, #14                 // -EFAULT: Linux refused the pointer
+    b.eq    19f
+    // The standalone build has no Linux to forward to and refuses the call
+    // outright. That is a refusal too, and the fixture is one program.
     cmn     x0, #38                 // -ENOSYS
     b.ne    9f
+19:
 
     // The ELF file ends before this word; PT_LOAD's memory tail must be zero.
     adr     x1, __user_blob_start

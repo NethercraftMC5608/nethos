@@ -89,6 +89,15 @@ pub struct Task {
     /// records -- Linux knows about its tasks but nk owns the address spaces
     /// and the exit statuses, so the relation has to live where those do.
     pub parent: usize,
+    /// Whether this task is inside a system call made *from EL0*.
+    ///
+    /// Linux asks nk to copy user memory for it, and the same code path
+    /// serves two callers that must be treated differently: a program at EL0,
+    /// whose pointers have to be translated with its own permissions and
+    /// refused if they name kernel memory, and nk itself, which calls into
+    /// Linux with kernel buffers to seed the rootfs and load an ELF. The flag
+    /// says which, and it is per task because both can be happening at once.
+    pub user_syscall: bool,
     /// The process's thread pointer, `TPIDR_EL0`.
     ///
     /// nk never reads it, which is exactly why it has to be saved here: it
@@ -117,6 +126,7 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     brk_min: 0,
     mmap_next: 0,
     parent: 0,
+    user_syscall: false,
     tpidr: 0,
 }; MAX_TASKS];
 
@@ -201,6 +211,7 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             brk_min: 0,
             mmap_next: 0,
             parent: 0,
+            user_syscall: false,
             tpidr: 0,
         };
         tasks[slot].ttbr0 = crate::paging::kernel_address_space();
@@ -263,6 +274,21 @@ pub fn set_user_brk(v: u64) {
 
 pub fn set_user_mmap_next(v: u64) {
     unsafe { TASKS[CURRENT].mmap_next = v }
+}
+
+/// Mark the running task as being inside a system call from EL0, and return
+/// what the flag was, so it can be put back. Nested is possible: `execve`
+/// reads a file through Linux while itself serving a user syscall.
+pub fn set_user_syscall(on: bool) -> bool {
+    unsafe {
+        let was = TASKS[CURRENT].user_syscall;
+        TASKS[CURRENT].user_syscall = on;
+        was
+    }
+}
+
+pub fn in_user_syscall() -> bool {
+    unsafe { TASKS[CURRENT].user_syscall }
 }
 
 /// Record who forked whom, and answer questions about it.

@@ -340,12 +340,17 @@ the one below it.
       TLB entries that poisoned the process, visible only under HVF -- and
       address-space teardown rewritten, since it would otherwise have
       followed a copied 1GB RAM block as though it were a table.
-- [x] **Marshalled syscall arguments.** A table describes each forwarded
-      call's arguments; buffers are copied in and out with `AT S1E0R`/`S1E0W`
-      rather than passed, because LKL is a flat address space and Linux
-      blocks inside syscalls. An undescribed call is refused, not passed
-      through. Nested pointers are walked for `readv`/`writev`'s iovecs;
-      `sendmsg`'s control messages are the same shape and still to come.
+- [x] **Every system call, without describing any of them.** `arch/lkl`
+      assumed kernel and user share one address space, so nk carried a table
+      of which arguments were pointers and bounced their buffers -- a list of
+      every call a program might make. `ldk lkl` patches `arch/lkl` to ask the
+      host for `copy_from_user` instead, and nk answers it by translating with
+      EL0's own permissions. Three functions replaced the table, and
+      `busybox ls -l /` runs with nothing left to enumerate.
+- [x] **arm64's ABI constants in the LKL build.** arm64 overrides four open
+      flags that asm-generic defines, so a program opening a directory was
+      asking for direct I/O and getting EINVAL. Fixed in the kernel's headers
+      rather than translated per call.
 - [ ] **The kernel into TTBR1's half.** No longer a prerequisite for low
       addresses, but it removes the copy of the kernel's tables that every
       address space carries. TTBR1 is enabled and aliases the kernel already.

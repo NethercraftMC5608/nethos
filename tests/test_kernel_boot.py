@@ -420,12 +420,12 @@ class LinuxOnNk(unittest.TestCase):
         # process's own executable, read back out of Linux's rootfs.
         self.assertIn('opened and read from EL0 through Linux, begins: ELF', self.out)
 
-    def test_an_undescribed_syscall_is_refused_and_named(self):
-        # 40 is mount: four pointers, no descriptor. Forwarding it
-        # unmarshalled would hand Linux user addresses it cannot safely hold.
-        # Naming the number is how the list of what to describe next gets
-        # written by a real binary rather than guessed at.
-        self.assertIn('syscall 40 has no descriptor yet', self.out)
+    def test_linux_refuses_a_kernel_pointer_from_el0(self):
+        # openat's path is read by Linux itself now, through nk's translation,
+        # so this goes all the way down Linux's own strncpy_from_user and back
+        # out through useraccess.rs. The fixture asks it to open the kernel
+        # image and exits 99 if the answer is anything but EFAULT.
+        self.assertNotIn('the process exited with status 99', self.out)
 
     def test_nested_pointers_are_walked_not_passed(self):
         # readv fills two disjoint user buffers from one flat kernel buffer,
@@ -486,6 +486,62 @@ def make_cpio(root, name):
     if cpio.returncode != 0:
         raise unittest.SkipTest(f'cpio failed: {cpio.stderr.decode()[:200]}')
     return archive
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class Busybox(unittest.TestCase):
+    """A program nobody wrote for nk, doing something real.
+
+    busybox is the useful test precisely because it is indifferent to us: a
+    widely used, statically linked Linux binary that will make whatever calls
+    it needs and report an errno when one is missing. `ls -l /` reaches the
+    filesystem, the directory reader, stat, and the terminal ioctls, and
+    prints something a person can check.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            bb = subprocess.run(
+                ['docker', 'run', '--rm', '-v', f'{ROOT}/kernel/ldk/build:/out',
+                 'nethos-ldk', 'sh', '-c',
+                 'apt-get update -qq >/dev/null 2>&1;'
+                 ' apt-get install -y -qq busybox-static >/dev/null 2>&1;'
+                 ' cp /bin/busybox /out/busybox'],
+                capture_output=True, text=True, timeout=600)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            raise unittest.SkipTest(f'no ldk container: {e}')
+        if bb.returncode != 0:
+            raise unittest.SkipTest(f'no busybox: {bb.stderr.strip()[:200]}')
+
+        root = ROOT / 'kernel/ldk/build/busybox-root'
+        shutil.rmtree(root, ignore_errors=True)
+        (root / 'bin').mkdir(parents=True)
+        shutil.copy(build_c('busybox-init', 'bbinit'), root / 'nk-init')
+        shutil.copy(ROOT / 'kernel/ldk/build/busybox', root / 'bin/busybox')
+        cls.out = boot('--lkl', '--initrd', str(make_cpio(root, 'busybox.cpio')),
+                       timeout=240, watchdog=120)
+
+    def test_execve_starts_it(self):
+        self.assertIn('execve: replaced this process', self.out)
+
+    def test_it_lists_the_filesystem(self):
+        # Its own output, in its own format, from Linux's rootfs.
+        self.assertRegex(self.out, r'drwxr-xr-x +\d+ +0 +0 .* bin')
+        self.assertRegex(self.out, r'-rwxr-xr-x +\d+ +0 +0 +\d+ .* nk-init')
+
+    def test_it_exits_successfully(self):
+        self.assertIn('the process exited with status 0', self.out)
+
+    def test_no_syscall_was_refused(self):
+        # With Linux doing its own user access there is no table to be missing
+        # an entry from, so a real program should not meet a wall at all.
+        self.assertNotIn('no descriptor', self.out)
+        self.assertNotIn('is not implemented', self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('fault in user space', self.out)
+        self.assertNotIn('kernel panic', self.out)
 
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')

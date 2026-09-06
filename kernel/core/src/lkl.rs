@@ -118,13 +118,34 @@ fn write_all(fd: i64, bytes: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
+/// The largest file nk will read into its own heap in one piece. Generous
+/// enough for a real init -- busybox is two megabytes and a static glibc
+/// program not much less -- and bounded because this is nk's heap, not a
+/// mapping, and a program is under no obligation to be a sensible size.
+const MAX_FILE: i64 = 16 * 1024 * 1024;
+
 pub fn read_file(path: &core::ffi::CStr) -> Result<alloc::vec::Vec<u8>, i64> {
     let fd = syscall(56, [-100, path.as_ptr() as i64, 0, 0, 0, 0]);
     if fd < 0 {
         return Err(fd);
     }
     let result = (|| {
-        let mut bytes = alloc::vec::Vec::new();
+        // Ask how big it is rather than growing into it. A Vec that doubles
+        // its way to two megabytes holds three of them at the moment it
+        // reallocates, and nk's heap is not large enough to be careless about
+        // that -- which is how a 1MB ceiling ended up here, and why busybox
+        // would not start.
+        let mut st = [0u8; 128];
+        let rc = syscall(80, [fd, st.as_mut_ptr() as i64, 0, 0, 0, 0]);
+        if rc < 0 {
+            return Err(rc);
+        }
+        let size = i64::from_le_bytes(st[48..56].try_into().unwrap());
+        if !(0..MAX_FILE).contains(&size) {
+            return Err(-27); // -EFBIG
+        }
+
+        let mut bytes = alloc::vec::Vec::with_capacity(size as usize);
         let mut chunk = [0u8; 4096];
         loop {
             let n = syscall(
@@ -137,7 +158,10 @@ pub fn read_file(path: &core::ffi::CStr) -> Result<alloc::vec::Vec<u8>, i64> {
             if n == 0 {
                 return Ok(bytes);
             }
-            if bytes.len() + n as usize > 1024 * 1024 {
+            // The file can still grow under us between the fstat and the
+            // read, and a Vec past its capacity reallocates rather than
+            // failing, so the ceiling is checked here as well.
+            if bytes.len() + n as usize > MAX_FILE as usize {
                 return Err(-27);
             }
             bytes.extend_from_slice(&chunk[..n as usize]);

@@ -37,3 +37,7 @@ kernel/target-*
 kernel/ldk/build/fork-root/
 kernel/ldk/build/fork.cpio
 kernel/ldk/build/nk-fork
+kernel/ldk/build/busybox
+kernel/ldk/build/busybox-root/
+kernel/ldk/build/busybox.cpio
+kernel/ldk/build/bbinit

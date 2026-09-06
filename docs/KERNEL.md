@@ -322,320 +322,103 @@ opens `/nk-init` by path and reads its own ELF magic back, checks that a
 syscall nk has not described returns ENOSYS, prints via nk's checked console
 write, and exits with Linux's getpid.
 
-### Marshalling, and why a pointer cannot simply be passed
+### Linux does its own user access, and there is no table
 
-**Linux, under LKL, believes it is in a single flat address space.** Its
-`copy_from_user` is a `memcpy`. Handing it an EL0 pointer would therefore
-bypass every protection nk has -- and would not work anyway, because nk
-switches `TTBR0` and Linux *blocks inside syscalls*: the address space the
-pointer belonged to can be gone by the time Linux dereferences it.
+`arch/lkl` selects `UACCESS_MEMCPY`: it assumes kernel and user share one flat
+address space, so `copy_from_user` is a `memcpy`. That is true of every host
+LKL was written for and false of one that runs its processes at EL0 with their
+own translation tables.
 
-So arguments are copied, not passed. `syscall.rs` holds a table describing
-each forwarded call's six arguments:
+nk's first answer was a table. For each system call it forwarded, it recorded
+which arguments were pointers, which direction the data travelled and how long
+it was, then copied each buffer across itself. It worked, and it was the wrong
+shape: a list of every system call a program might ever make, which is the
+thing this project exists to avoid writing. A call with no entry was refused,
+so the list of what to add next was written by whatever binary ran and hit a
+wall.
 
-```rust
-enum Arg { Scalar, Path, In(usize), Out(usize), Struct(usize) }
+**Linux already knows which arguments are user pointers.** It marks them
+`__user` and reaches them through `copy_from_user`, on every architecture, for
+all four hundred and fifty of them. `ldk lkl` patches `arch/lkl` to ask the
+host rather than assume:
+
+```c
+unsigned long lkl_copy_from_user(void *to, const void *from, unsigned long n);
+unsigned long lkl_copy_to_user(void *to, const void *from, unsigned long n);
+unsigned long lkl_clear_user(void *to, unsigned long n);
 ```
 
-`In` is copied EL0→kernel before the call, `Out` kernel→EL0 after it, `Struct`
-both ways, `Path` is a NUL-terminated string bounded at `PATH_MAX`, and the
-length that sizes `In`/`Out` is named by *argument index* because that is how
-the calls themselves are shaped -- `read`'s count is argument 2. A call with
-no description returns `None` and the caller reports the number rather than
-guessing; **a missing entry is a refusal, never a passthrough.**
+`useraccess.rs` answers them: `AT S1E0R` and `AT S1E0W` to translate with
+EL0's permissions, a page at a time, refusing anything that names kernel
+memory. Three functions, and every system call works for the same reason it
+works on real hardware. `syscall.rs` is now a pass-through and has nothing to
+keep up to date.
 
-`uaccess.rs` does the copying, a page at a time, with `AT S1E0R` for reads and
-`AT S1E0W` for writes -- two instructions, because read and write permission
-are different questions and asking the wrong one lets a read-only page be
-written. Transfers are bounded at 64KB.
+Three things this depends on, in order of how much they cost to get wrong:
 
-**Nested pointers are walked.** `readv` and `writev` take an array of
-`struct iovec`, each entry a pointer into user memory, so the argument is a
-pointer to pointers and every one of them has to be followed. nk copies the
-array, sums the lengths -- refusing the whole call rather than truncating one
-entry, because a short `writev` is a legitimate result and would hide the
-refusal -- and copies everything the entries point at into **one flat
-buffer**, handing Linux an iovec array whose entries point into it at
-offsets. Linux does not care that they are contiguous, and it makes the copy
-back a walk over offsets rather than a second set of allocations. The fixture
-checks the distribution rather than only the total: a `readv` with iovecs of
-length 1 and 3 must put the ELF magic's `0x7f` in the first buffer and "ELF"
-in the second, and gets there through Linux's real `readv`.
+**The live `TTBR0` is the calling process's.** Linux runs a system call on the
+thread that made it, and nk restores each task's `TTBR0` when it schedules it,
+so whenever this code runs on a process's behalf that process's tables are
+installed -- including in the middle of a call that blocked and came back.
+The exception is Linux touching user memory from some *other* task, a
+workqueue finishing asynchronous work say; that fails with EFAULT rather than
+reading the wrong process, because `AT S1E0R` against the wrong tables does
+not find the address. Nothing a program has run here has needed it.
 
-`sendmsg`'s control messages are the same shape and still to come.
-`execve`'s argv and envp are not -- they belong to nk's own loader, since LKL
-has no user space to exec into.
+**The same three functions serve two callers.** A program at EL0, whose
+pointers must be checked; and nk itself, which calls into Linux with kernel
+buffers to seed the rootfs and read an ELF. A per-task flag says which, set
+only around a forwarded call, and it has to be saved and restored rather than
+just set -- `execve` reads a file through Linux while itself serving a user
+syscall.
 
-### A program gcc compiled, running on nk
+**`clear_user` is on the ordinary path, not an edge case.** Linux uses it to
+zero the tail of a partially read page and the unwritten part of a structure.
 
-`kernel/init/hello.c` is ordinary C. It is built with `gcc -static -O2`
-against ordinary glibc, by a compiler that has never heard of nk, and it is
-not modified in any way:
+The fixture guards the boundary that matters: it asks `openat` to open the
+kernel image and requires EFAULT, which goes down Linux's own
+`strncpy_from_user` and back out through `useraccess.rs`.
 
-```
-$ docker run --rm -v "$PWD:/w" -w /w nethos-ldk \
-      gcc -static -O2 -o kernel/ldk/build/nk-hello kernel/init/hello.c
-$ scripts/run-kernel.sh --lkl --init kernel/ldk/build/nk-hello
-  ...
-  hello from a real compiled binary, on nk.
-    argv[0] is /nk-init, argc is 1, and the heap works too.
-  and its destructor ran on the way out.
-  the process exited with status 7
-```
+### The other half of the ABI: whose constants?
 
-`printf` with arguments, `malloc`, `argv` read off the stack nk built, a
-destructor, and a return from `main` through glibc's `exit`.
+Getting Linux to read the pointer is not the same as agreeing what it means.
 
-That is the thing the whole project is for. Everything before it ran code
-written for nk; this ran a Linux binary because nk answers Linux's numbers
-with Linux's meanings. `--init FILE` embeds the binary in the kernel image --
-the rootfs is memory-backed and there is no disk to read one from yet.
+`busybox ls /` failed with "can't open '/': Invalid argument" and nothing
+anywhere mentioned a flag. arm64 **overrides** four of the open flags that
+`asm-generic` defines -- `O_DIRECTORY` is `1 << 14` on arm64 and `1 << 14` is
+`O_DIRECT` in `asm-generic` -- and `arch/lkl` uses the generic ones. So a
+program opening a directory was asking LKL for direct I/O, on a filesystem
+that has none, and getting EINVAL.
 
-Getting there needed, in the order the binary asked for them:
+The fix belongs in the kernel, not in nk. Translating constants per system
+call is a table that has to be right for every call that ever takes a flag --
+the same shape of mistake as the marshalling table. `ldk lkl` copies arm64's
+`uapi/asm/fcntl.h` into `arch/lkl` so the kernel's ABI *is* the one the
+binaries were compiled against, once, for all of them. A real `arch/lkl` for
+aarch64 would do exactly this.
 
-- **PT_TLS accepted, not refused.** The loader rejected it as unsupported,
-  which rejected every static binary gcc produces. It should never have been
-  on that list: a static glibc sets its own thread pointer from its own
-  program headers, so the loader's whole part in TLS is to map the segment --
-  which PT_LOAD already covers -- and report AT_PHDR correctly.
-- **A stack measured in pages, not one page.** A libc sets up TLS, tunables,
-  locale and stdio before it reaches `main`; 256KB, mapped up front, because
-  nk has no fault handler that could yet tell a growing stack from a wild
-  pointer.
-- **`mprotect`.** A libc makes its relocated GOT read-only at startup --
-  GNU_RELRO -- and without this the binary stops with glibc's own message:
-  "cannot apply additional memory protection after relocation".
-- **`set_tid_address`, `prlimit64`.** Answered by nk. The first because its
-  argument is a user address Linux would store flat and later write through;
-  what the caller uses is the *return*, and that is the real tid. The second
-  because telling a libc the truth about the stack it was given beats
-  -ENOSYS, which makes it assume a default it will not get.
-- **`set_robust_list` and `rseq` refused.** Both are optimisations a libc
-  asks for and does without. -ENOSYS is honest; pretending to have registered
-  a robust list nk would never walk is not.
-- **`brk` returning what was asked for.** It was returning the page it
-  rounded up to. Linux tracks the break at byte granularity even though it
-  maps whole pages, and a libc told it got more than it asked for hands the
-  difference out twice.
-- **`TPIDR_EL0` saved across a context switch.** nk never reads the thread
-  pointer, which is exactly why it was missed: it belongs entirely to EL0, so
-  nothing in the kernel notices it being wrong. A libc puts `errno`, the
-  malloc tcache and the locale behind it, so leaving one process's value in
-  place while another runs gives the second process the first one's heap
-  bookkeeping -- and the crash lands in malloc, some distance from the switch.
+Only that file. arm64's other `uapi/asm` headers describe structures LKL
+defines for itself -- `ptrace`, `sigcontext` -- and copying those would
+replace working definitions with ones for hardware LKL does not have.
 
-### The register that was not zero
-
-For a while a real binary could run `main` but not return from it. Returning
-sent glibc into `exit` and control arrived back at `_start`, where the program
-re-entered itself and died writing `__libc_stack_end` -- read-only by then,
-because RELRO had been applied on the first pass.
-
-**`x0` at process entry is `rtld_fini`.** The aarch64 ABI says so: a function
-the dynamic loader wants run at exit, and zero when there is none. Linux
-clears every register on `execve` for exactly this reason. nk's `enter_user`
-took the entry address in `x0` and never cleared it, so glibc read `_start`
-out of `x0`, registered it with `__cxa_atexit`, and called it on the way out.
-The program was doing precisely what it was told.
-
-Nothing in the failure pointed at the entry path. What found it was
-`run-kernel.sh --trace`, which is worth keeping for the next one: `-d
-exec,nochain` with `-dfilter` bounded to the binary's own address range logs
-every basic block executed **at EL0 and nothing else**, which is the one thing
-a kernel cannot see into by itself. Adding `cpu` to the log gives the register
-file before each block, and the value `0x400600` sitting in `x27` at the
-`blr` inside `__run_exit_handlers` -- one instruction after glibc's
-`PTR_DEMANGLE` -- named the bug in a line.
-
-Two notes on the tool. QEMU's own documentation offers `-dfilter start-last`;
-this build rejects it with "Invalid range" and wants `start+size`. And the log
-file is created lazily on the first matching write, so a filter that matches
-nothing is indistinguishable from a filter that is not being passed at all --
-which cost a run to notice, because the `--trace` block had been placed above
-the line that *creates* the argument array it appends to.
-
-Every register is cleared now, not just `x0`. The rest are kernel state, and
-handing them to EL0 is a leak whether or not anything reads them.
-
-### A userland that is not part of the kernel
-
-`--init FILE` embeds a binary in `nk.bin`, which is fine for one program and
-useless for a userland: a real one is many files. `--initrd FILE` is the
-answer, and it is the ordinary Linux one.
-
-A cpio archive is what an initial ramdisk is, because cpio is the format you
-can unpack without already having a filesystem: a flat stream of (header,
-name, data), no index, no compression, no seeking. QEMU's `-initrd` leaves it
-in RAM and names the range in `/chosen/linux,initrd-start` and `-end`, which
-nk already had a device-tree parser for. `kernel/core/src/cpio.rs` reads it
-and `user::unpack_initrd` writes it into Linux's rootfs through the same VFS
-syscalls everything else uses -- open, write, mkdir. No new filesystem, no new
-driver.
+### busybox
 
 ```
-$ (cd root && find . | cpio -o -H newc > ../initrd.cpio)
-$ scripts/run-kernel.sh --lkl --initrd initrd.cpio
-  initrd: 0x48000000..0x480ac600 (689 KiB)
-  ...
-  initrd: 3 entries unpacked into Linux's rootfs
-  rootfs: /nk-init came from the initrd (705456 bytes)
-  hello from a real compiled binary, on nk.
-    argv[0] is /nk-init, argc is 1, and the heap works too.
-    and /etc/nk-greeting says: a userland that is not part of the kernel image
+$ scripts/run-kernel.sh --lkl --initrd busybox.cpio
+  execve: replaced this process with 1975064 bytes at 0x400680
+total 692
+drwxr-xr-x    2 0        0                0 Jan  1 00:00 bin
+drwxr-xr-x    2 0        0                0 Jan  1 00:00 dev
+drwxr-xr-x    2 0        0                0 Jan  1 00:00 etc
+-rwxr-xr-x    1 0        0           705024 Jan  1 00:00 nk-init
+  the process exited with status 0
 ```
 
-Three things this had to get right, none of them obvious:
-
-- **The initrd's pages must be reserved.** It sits in RAM like everything
-  else and nothing else knows it is there. Handing them to the frame
-  allocator does not fail anywhere near the initrd -- it fails later, in
-  whatever was given the page, with the archive's bytes in it.
-- **The `/chosen` properties are not a fixed width.** They carry as many
-  bytes as the address needs, so both four and eight are ordinary; a parser
-  that assumes one works on one machine and reads rubbish on the next.
-- **Parents are created as they are met, not assumed.** A cpio archive
-  usually lists a directory before its contents and is not required to, so
-  `mkdir` treats "already there" as success -- which it will be, constantly.
-
-An initrd's `/nk-init` wins over the built-in fixture. That also made
-"is this nk's own test program?" a *runtime* question rather than a build-time
-one, which it always was: the self-checks that follow a run -- that a process
-exits with its own Linux pid, that it spun long enough to be preempted -- are
-claims about the fixture and not about an arbitrary binary.
-
-### execve, and why the order is the whole difficulty
-
-`execve` is nk's, not Linux's. LKL has no user space to exec into --
-forwarding it would ask Linux to replace an address space it does not have --
-so nk reads the file through Linux's VFS and does the replacing itself.
-
-Two orderings have to be right, and neither is arbitrary:
-
-**argv and envp are copied before anything is built.** They live in the
-address space being replaced: an array of pointers, each into user memory,
-with no length anywhere -- the array ends at a NULL and each string at a NUL.
-This is the shape the marshalling table cannot describe, so it is walked, one
-`copy_from_user` per pointer and one per string, bounded at 64 entries and
-16KB because a process that asks for a million arguments should be told no
-rather than answered.
-
-**The old address space is freed only once `TTBR0` points at the new one.**
-The kernel is mapped through the same tables as the process -- that is what
-`new_address_space` copying three levels is for -- so a process that frees its
-own address space before leaving it does not survive to report the mistake.
-
-The consequence of building first is the thing execve actually promises: a
-failed one leaves the caller with everything it had. `exec-parent.c` checks
-that by execing a path that does not exist, confirming `ENOENT`, and carrying
-on to exec the one that does.
-
-The kernel stack is wound back before the new program starts. `execve` is
-called from inside a syscall and never returns through it, so the exception
-frame, the handler and the loader beneath it are all dead the moment the new
-image runs; leaving them there leaks the stack for the life of the task, which
-one exec would not notice and a shell would. `enter_user_fresh` is
-`enter_user` with `mov sp, x3` in front of it.
-
-`TPIDR_EL0` is cleared too. It belonged to the program that is gone, and the
-memory it pointed at has just been freed.
-
-### fork, and wait4
-
-`fork` is nk's because the address space is, and `wait4` is nk's because the
-exit status is -- a process's status is recorded when it calls `exit`, and
-Linux's own task is torn down with `do_exit(0)` underneath.
-
-The child is a copy of the parent **at the instruction it forked on**, so it
-is entered by restoring a saved exception frame rather than by jumping to an
-entry point: `resume_user` is `el0_sync_entry`'s exit path with the frame
-passed in rather than found on the stack, and `x0` set to zero, which is what
-`fork` returns in the child.
-
-Three things worth writing down:
-
-**The copy is a real copy.** Copy-on-write is the obvious improvement and it
-needs a fault handler that can tell a write to a shared page from a wild
-pointer, which nk does not have -- and getting that wrong turns a bug in one
-process into silent corruption in another. Permissions are copied with the
-pages, so the child's text stays executable and its RELRO stays read-only.
-Only the process's own pages: the first gigabyte is shared with the devices,
-and those level-2 entries are *blocks*, so following one as though it were a
-table turns a fork into freeing the kernel's memory one entry at a time.
-
-**`fork` returns the child's pid, and only the child can obtain one.**
-Attaching to Linux binds the task to the host thread doing the attaching, so
-the parent blocks on a semaphore until the child has published its pid. That
-is a real serialisation and it is the honest one: the alternative is inventing
-a pid before Linux has agreed to it.
-
-**`clone` is a menu and nk implements one column of it.** Sharing memory makes
-a thread and sharing nothing makes a process; anything asking for `CLONE_VM`,
-`CLONE_FILES` or `CLONE_THREAD` is refused with ENOSYS rather than quietly
-given its own memory, which would look like it worked until two threads
-disagreed about a variable.
-
-A wait status is not an exit code: the low byte says how the process died and
-the second says with what, so a normal exit is the code shifted up by eight.
-A libc's `WEXITSTATUS` undoes exactly that and gets nonsense from a plain code.
-
-**What fork does not yet do is inherit the parent's descriptors.** The child
-gets a fresh Linux task with its own filesystem context and its own empty
-descriptor table, because that is what `attach_process` builds. Real fork
-copies the table, and a shell needs it to -- redirection is a `dup2` in the
-child of an fd the parent opened. That is the next piece.
-
-### What a real binary still cannot do
-
-Threads, signals, and any `mmap` of a file. A forked child does not inherit
-its parent's open descriptors. The rootfs is
-memory-backed and `/nk-init` is seeded from the kernel image, so the binary
-travels inside `nk.bin` rather than being read from a disk.
-
-### The process image: a stack, a heap, and mappings
-
-**The initial stack is an interface nothing declares.** A libc's `_start`
-takes no arguments; it reads argc, argv, envp and the auxiliary vector off the
-stack at a layout the kernel is simply expected to have built. Get it wrong
-and the program does not fail at a syscall nk could name -- it dereferences
-whatever happened to be there. nk builds the real thing now: the strings, then
-sixteen bytes for AT_RANDOM, then a sixteen-byte-aligned vector carrying
-AT_PHDR (worked out from whichever segment contains the program headers),
-AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, the four ids, AT_HWCAP,
-AT_CLKTCK, AT_SECURE, AT_RANDOM and AT_NULL.
-
-AT_HWCAP says nothing. Claiming no optional CPU feature is always safe;
-claiming one nk has not enabled at EL0 -- FP, SVE -- is a trap the libc
-springs on itself at its first instruction that uses it.
-
-AT_RANDOM comes from Linux's generator with **GRND_INSECURE, and that is not
-optional**: plain `getrandom` blocks until the CRNG is seeded, and on a
-machine whose only entropy is a virtual timer it may never be. The first
-attempt deadlocked the boot thread inside Linux with every other task idle,
-which is precisely what the watchdog was built to report. GRND_INSECURE is
-Linux's own answer -- bytes now, from a pool that says it is not trustworthy
-yet.
-
-**`brk`, `mmap` and `munmap` are nk's, not Linux's.** LKL is one flat region
-with no user half at all, so forwarding them would move Linux's own break and
-hand back an address the process cannot reach. The heap grows up from the
-first page past the loaded image; anonymous mappings grow down from 16MB below
-the stack. The two run out of room by *meeting*, which nk detects and refuses,
-rather than by one silently landing on the other. File-backed `mmap` is
-refused rather than faked: it would make the page cache nk's problem as well
-as Linux's, and returning memory that does not contain the file is worse than
-returning nothing.
-
-`brk` reports failure the way Linux does -- by returning the old break, never
-an errno -- because a libc that receives an errno here will not recognise it.
-`munmap` over a hole succeeds, which is what makes it safe for a libc to call
-over a range it is unsure of; the addresses are not reused, so a freed region
-stays free while something might still hold a pointer into it. That wastes
-address space rather than memory: the pages themselves go back.
-
-The fixture checks all of it from EL0 -- walks its own argv and auxv, grows
-the break and stores through it, maps a page and confirms it is zeroed, and
-unmaps it -- so a wrong layout exits with a failure code rather than printing
-a line that says it worked.
+Debian's `busybox-static`, unmodified, started by nk's `execve`, listing
+Linux's rootfs. It is the useful test precisely because it is indifferent to
+us: it makes whatever calls it needs and reports an errno when one is
+missing. With the table gone it does not meet a wall at all -- `prctl` and
+`ioctl`, which had been printing "no descriptor yet", simply work.
 
 ### The low half, and the global mapping that was blocking it
 

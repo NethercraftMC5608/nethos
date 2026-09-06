@@ -234,13 +234,7 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
 fn forward(nr: u64, args: &[u64; 6]) -> i64 {
     match crate::syscall::forward(nr, args) {
         Some(ret) => ret,
-        None => {
-            // Named, not merely refused. The list of what to describe next is
-            // written by whatever real binary runs here, which is a better
-            // order than guessing at it.
-            println!("  syscall {} has no descriptor yet", nr);
-            -38 // -ENOSYS
-        }
+        None => -38, // -ENOSYS: no Linux to forward to
     }
 }
 
@@ -684,8 +678,14 @@ fn sys_execve(path: u64, argv: u64, envp: u64) -> i64 {
     let Ok(cpath) = core::ffi::CStr::from_bytes_with_nul(&name) else {
         return -22; // -EINVAL: an embedded NUL is not a path
     };
-    let Ok(bytes) = crate::lkl::read_file(cpath) else {
-        return -2; // -ENOENT
+    let bytes = match crate::lkl::read_file(cpath) {
+        Ok(b) => b,
+        Err(e) => {
+            // Named, because "execve returned an errno" is the least useful
+            // thing a kernel can say when a program will not start.
+            println!("  execve: cannot read {:?}: {}", cpath, e);
+            return e;
+        }
     };
 
     // Borrowed views, because the loader wants slices and the owners are the

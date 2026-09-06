@@ -39,6 +39,8 @@ pub mod sync;
 #[cfg(nk_lkl)]
 pub mod syscall;
 pub mod uaccess;
+#[cfg(nk_lkl)]
+pub mod useraccess;
 pub mod user;
 pub mod timer;
 pub mod uart;
@@ -110,7 +112,11 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
 
     unsafe { claim_memory(&fdt, ram_base as usize, (ram_base + ram_size) as usize) };
     frames::report();
-    heap::init(16);
+    // 64MB, not 16. nk's heap holds whatever a program is while it is being
+    // loaded -- a real init is a couple of megabytes and an ELF is read whole
+    // before any of it is mapped -- as well as every bounce buffer a syscall
+    // needs. Sixteen was chosen when the largest thing on it was a page table.
+    heap::init(64);
     selftest::run();
 
     let gic = fdt.find_compatible("arm,gic-v3").expect("no GICv3 in the device tree");
