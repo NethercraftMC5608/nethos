@@ -5,13 +5,17 @@
     "Stage 4. A different class of device on the same transport, which is",
     "what shows whether the shim generalised or was quietly shaped around",
     "one driver. Forces sk_buff, netdev registration, NAPI and softirqs --",
-    "none of which virtio-blk touches."
+    "none of which virtio-blk touches.",
+    "net/ethernet/eth.c is Linux's own: eth_type_trans decides what",
+    "protocol a received frame is and how much header to pull off, and",
+    "getting that subtly wrong gives packets that look almost right."
   ],
   "linux": "7.2",
   "sources": [
     "drivers/virtio/virtio.c",
     "drivers/virtio/virtio_ring.c",
     "drivers/virtio/virtio_mmio.c",
-    "drivers/net/virtio_net.c"
+    "drivers/net/virtio_net.c",
+    "net/ethernet/eth.c"
   ]
 }

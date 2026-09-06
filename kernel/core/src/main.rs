@@ -125,23 +125,38 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
         // thread and needs the CPU. Yielding until the capacity arrives is
         // what waiting for a device to appear looks like with no completion
         // to wait on.
-        let deadline = timer::ticks() + timer::HZ * 3;
-        while linux::capacity() == 0 && timer::ticks() < deadline {
+        // Yield a bounded number of times rather than waiting a number of
+        // seconds.
+        //
+        // Probing is not synchronous: virtio_blk defers part of its own to a
+        // workqueue, which runs on the kworker thread and needs the CPU. But
+        // a *time* limit is the wrong shape here -- under TCG the virtual
+        // timer counts guest cycles rather than following the host clock, so
+        // a three-second deadline is around seven hundred real ones, and the
+        // wait is indistinguishable from a hang. Yields are the thing
+        // actually being waited for, so count those.
+        for _ in 0..2000 {
+            if linux::capacity() != 0 {
+                break;
+            }
             sched::yield_now();
         }
 
         println!();
-        if linux::capacity() == 0 {
-            println!("Stage 3: no block device appeared.");
+        if linux::capacity() != 0 {
+            println!(
+                "Stage 3: virtio-blk is up -- {} sectors, {} MiB",
+                linux::capacity(),
+                linux::capacity() * 512 / (1024 * 1024)
+            );
+            read_a_sector();
             stop();
         }
-        println!(
-            "Stage 3: virtio-blk is up -- {} sectors, {} MiB",
-            linux::capacity(),
-            linux::capacity() * 512 / (1024 * 1024)
-        );
-
-        read_a_sector();
+        if let Some(mac) = linux::net_up() {
+            arp_exchange(mac);
+            stop();
+        }
+        println!("No device appeared.");
         stop();
     }
 
@@ -172,6 +187,69 @@ fn stop() -> ! {
     println!("nk: done.");
     psci::poweroff();
     halt()
+}
+
+/// Stage 4: send an Ethernet frame through the unmodified driver and read the
+/// answer that comes back.
+///
+/// An ARP request, sent *by* nk rather than waiting for one. QEMU's user-mode
+/// network only ARPs a guest when it has traffic for it, so waiting is a test
+/// that depends on the host deciding to speak first. Asking for the gateway's
+/// address exercises the same two paths -- transmit and receive -- and does
+/// so on nk's own initiative.
+#[cfg(nk_linux)]
+fn arp_exchange(mac: [u8; 6]) {
+    const OURS: [u8; 4] = [10, 0, 2, 15]; // what QEMU's DHCP would hand out
+    const GATEWAY: [u8; 4] = [10, 0, 2, 2];
+
+    println!(
+        "Stage 4: virtio-net is up -- {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+
+    let mut f = [0u8; 42];
+    f[0..6].fill(0xff); // broadcast
+    f[6..12].copy_from_slice(&mac);
+    f[12..14].copy_from_slice(&0x0806u16.to_be_bytes()); // ARP
+    f[14..16].copy_from_slice(&1u16.to_be_bytes()); // over Ethernet
+    f[16..18].copy_from_slice(&0x0800u16.to_be_bytes()); // resolving IPv4
+    f[18] = 6;
+    f[19] = 4;
+    f[20..22].copy_from_slice(&1u16.to_be_bytes()); // request
+    f[22..28].copy_from_slice(&mac);
+    f[28..32].copy_from_slice(&OURS);
+    // target hardware address left zero: that is the question
+    f[38..42].copy_from_slice(&GATEWAY);
+
+    println!();
+    println!("  who has 10.0.2.2? asking as 10.0.2.15");
+    if let Err(e) = linux::net_xmit(&f) {
+        println!("  transmit failed: {}", e);
+        return;
+    }
+
+    let mut buf = [0u8; 1600];
+    let deadline = timer::ticks() + timer::HZ * 3;
+    while timer::ticks() < deadline {
+        let n = linux::net_recv(&mut buf);
+        if n == 0 {
+            sched::yield_now();
+            continue;
+        }
+        // The driver hands frames up with the Ethernet header still on.
+        if n >= 42 && buf[12] == 0x08 && buf[13] == 0x06 && buf[21] == 2 {
+            println!(
+                "  reply: 10.0.2.2 is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                buf[22], buf[23], buf[24], buf[25], buf[26], buf[27]
+            );
+            println!();
+            println!("  the frame, as the driver delivered it:");
+            hexdump(&buf[..n.min(64)], 0);
+            return;
+        }
+        println!("  {} bytes, not the ARP reply -- still waiting", n);
+    }
+    println!("  no reply in 3 seconds");
 }
 
 /// The whole point of Stage 3: ask the unmodified Linux driver for a sector

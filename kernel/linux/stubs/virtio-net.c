@@ -16,201 +16,57 @@
 
 void nk_stub_called(const char *name);
 
-/* @stub __alloc_skb */
-long __alloc_skb(void);
-long __alloc_skb(void) { nk_stub_called("__alloc_skb"); return 0; }
+/* @stub __bitmap_complement */
+long __bitmap_complement(void);
+long __bitmap_complement(void) { nk_stub_called("__bitmap_complement"); return 0; }
 
-/* @stub __cpu_online_mask */
-long __cpu_online_mask(void);
-long __cpu_online_mask(void) { nk_stub_called("__cpu_online_mask"); return 0; }
+/* @stub __bitmap_weight */
+long __bitmap_weight(void);
+long __bitmap_weight(void) { nk_stub_called("__bitmap_weight"); return 0; }
 
-/* @stub __cpuhp_remove_state */
-long __cpuhp_remove_state(void);
-long __cpuhp_remove_state(void) { nk_stub_called("__cpuhp_remove_state"); return 0; }
+/* @stub __clk_get_name */
+long __clk_get_name(void);
+long __clk_get_name(void) { nk_stub_called("__clk_get_name"); return 0; }
 
-/* @stub __cpuhp_setup_state */
-long __cpuhp_setup_state(void);
-long __cpuhp_setup_state(void) { nk_stub_called("__cpuhp_setup_state"); return 0; }
+/* @stub __dev_fwnode */
+long __dev_fwnode(void);
+long __dev_fwnode(void) { nk_stub_called("__dev_fwnode"); return 0; }
 
-/* @stub __cpuhp_state_add_instance */
-long __cpuhp_state_add_instance(void);
-long __cpuhp_state_add_instance(void) { nk_stub_called("__cpuhp_state_add_instance"); return 0; }
-
-/* @stub __cpuhp_state_remove_instance */
-long __cpuhp_state_remove_instance(void);
-long __cpuhp_state_remove_instance(void) { nk_stub_called("__cpuhp_state_remove_instance"); return 0; }
-
-/* @stub __dma_need_sync */
-long __dma_need_sync(void);
-long __dma_need_sync(void) { nk_stub_called("__dma_need_sync"); return 0; }
-
-/* @stub __dma_sync_single_for_cpu */
-long __dma_sync_single_for_cpu(void);
-long __dma_sync_single_for_cpu(void) { nk_stub_called("__dma_sync_single_for_cpu"); return 0; }
-
-/* @stub __dma_sync_single_for_device */
-long __dma_sync_single_for_device(void);
-long __dma_sync_single_for_device(void) { nk_stub_called("__dma_sync_single_for_device"); return 0; }
-
-/* @stub __folio_put */
-long __folio_put(void);
-long __folio_put(void) { nk_stub_called("__folio_put"); return 0; }
-
-/* @stub __free_pages */
-long __free_pages(void);
-long __free_pages(void) { nk_stub_called("__free_pages"); return 0; }
-
-/* @stub __kmalloc_cache_noprof */
-long __kmalloc_cache_noprof(void);
-long __kmalloc_cache_noprof(void) { nk_stub_called("__kmalloc_cache_noprof"); return 0; }
-
-/* @stub __kmalloc_noprof */
-long __kmalloc_noprof(void);
-long __kmalloc_noprof(void) { nk_stub_called("__kmalloc_noprof"); return 0; }
-
-/* @stub __kvmalloc_node_noprof */
-long __kvmalloc_node_noprof(void);
-long __kvmalloc_node_noprof(void) { nk_stub_called("__kvmalloc_node_noprof"); return 0; }
-
-/* @stub __local_bh_enable_ip */
-long __local_bh_enable_ip(void);
-long __local_bh_enable_ip(void) { nk_stub_called("__local_bh_enable_ip"); return 0; }
-
-/* @stub __napi_schedule */
-long __napi_schedule(void);
-long __napi_schedule(void) { nk_stub_called("__napi_schedule"); return 0; }
-
-/* @stub __netif_napi_del_locked */
-long __netif_napi_del_locked(void);
-long __netif_napi_del_locked(void) { nk_stub_called("__netif_napi_del_locked"); return 0; }
-
-/* @stub __netif_set_xps_queue */
-long __netif_set_xps_queue(void);
-long __netif_set_xps_queue(void) { nk_stub_called("__netif_set_xps_queue"); return 0; }
-
-/* @stub __num_online_cpus */
-long __num_online_cpus(void);
-long __num_online_cpus(void) { nk_stub_called("__num_online_cpus"); return 0; }
-
-/* @stub __platform_driver_register */
-long __platform_driver_register(void);
-long __platform_driver_register(void) { nk_stub_called("__platform_driver_register"); return 0; }
-
-/* @stub __pskb_pull_tail */
-long __pskb_pull_tail(void);
-long __pskb_pull_tail(void) { nk_stub_called("__pskb_pull_tail"); return 0; }
-
-/* @stub __rcu_read_lock */
-long __rcu_read_lock(void);
-long __rcu_read_lock(void) { nk_stub_called("__rcu_read_lock"); return 0; }
-
-/* @stub __rcu_read_unlock */
-long __rcu_read_unlock(void);
-long __rcu_read_unlock(void) { nk_stub_called("__rcu_read_unlock"); return 0; }
+/* @stub __get_random_u32_below */
+long __get_random_u32_below(void);
+long __get_random_u32_below(void) { nk_stub_called("__get_random_u32_below"); return 0; }
 
 /* @stub __skb_flow_dissect */
 long __skb_flow_dissect(void);
 long __skb_flow_dissect(void) { nk_stub_called("__skb_flow_dissect"); return 0; }
 
-/* @stub __warn_printk */
-long __warn_printk(void);
-long __warn_printk(void) { nk_stub_called("__warn_printk"); return 0; }
+/* @stub __skb_get_poff */
+long __skb_get_poff(void);
+long __skb_get_poff(void) { nk_stub_called("__skb_get_poff"); return 0; }
 
-/* @stub __xdp_rxq_info_reg */
-long __xdp_rxq_info_reg(void);
-long __xdp_rxq_info_reg(void) { nk_stub_called("__xdp_rxq_info_reg"); return 0; }
+/* @stub __sw_hweight64 */
+long __sw_hweight64(void);
+long __sw_hweight64(void) { nk_stub_called("__sw_hweight64"); return 0; }
 
-/* @stub _dev_err */
-long _dev_err(void);
-long _dev_err(void) { nk_stub_called("_dev_err"); return 0; }
+/* @stub _parse_integer_fixup_radix */
+long _parse_integer_fixup_radix(void);
+long _parse_integer_fixup_radix(void) { nk_stub_called("_parse_integer_fixup_radix"); return 0; }
 
-/* @stub _dev_info */
-long _dev_info(void);
-long _dev_info(void) { nk_stub_called("_dev_info"); return 0; }
-
-/* @stub _dev_warn */
-long _dev_warn(void);
-long _dev_warn(void) { nk_stub_called("_dev_warn"); return 0; }
-
-/* @stub _find_first_bit */
-long _find_first_bit(void);
-long _find_first_bit(void) { nk_stub_called("_find_first_bit"); return 0; }
-
-/* @stub _find_next_bit */
-long _find_next_bit(void);
-long _find_next_bit(void) { nk_stub_called("_find_next_bit"); return 0; }
-
-/* @stub _printk */
-long _printk(void);
-long _printk(void) { nk_stub_called("_printk"); return 0; }
-
-/* @stub _raw_spin_lock */
-long _raw_spin_lock(void);
-long _raw_spin_lock(void) { nk_stub_called("_raw_spin_lock"); return 0; }
-
-/* @stub _raw_spin_lock_bh */
-long _raw_spin_lock_bh(void);
-long _raw_spin_lock_bh(void) { nk_stub_called("_raw_spin_lock_bh"); return 0; }
-
-/* @stub _raw_spin_lock_irq */
-long _raw_spin_lock_irq(void);
-long _raw_spin_lock_irq(void) { nk_stub_called("_raw_spin_lock_irq"); return 0; }
-
-/* @stub _raw_spin_lock_irqsave */
-long _raw_spin_lock_irqsave(void);
-long _raw_spin_lock_irqsave(void) { nk_stub_called("_raw_spin_lock_irqsave"); return 0; }
-
-/* @stub _raw_spin_trylock */
-long _raw_spin_trylock(void);
-long _raw_spin_trylock(void) { nk_stub_called("_raw_spin_trylock"); return 0; }
-
-/* @stub _raw_spin_unlock */
-long _raw_spin_unlock(void);
-long _raw_spin_unlock(void) { nk_stub_called("_raw_spin_unlock"); return 0; }
-
-/* @stub _raw_spin_unlock_bh */
-long _raw_spin_unlock_bh(void);
-long _raw_spin_unlock_bh(void) { nk_stub_called("_raw_spin_unlock_bh"); return 0; }
-
-/* @stub _raw_spin_unlock_irq */
-long _raw_spin_unlock_irq(void);
-long _raw_spin_unlock_irq(void) { nk_stub_called("_raw_spin_unlock_irq"); return 0; }
-
-/* @stub _raw_spin_unlock_irqrestore */
-long _raw_spin_unlock_irqrestore(void);
-long _raw_spin_unlock_irqrestore(void) { nk_stub_called("_raw_spin_unlock_irqrestore"); return 0; }
-
-/* @stub add_uevent_var */
-long add_uevent_var(void);
-long add_uevent_var(void) { nk_stub_called("add_uevent_var"); return 0; }
-
-/* @stub alloc_cpumask_var_node */
-long alloc_cpumask_var_node(void);
-long alloc_cpumask_var_node(void) { nk_stub_called("alloc_cpumask_var_node"); return 0; }
-
-/* @stub alloc_etherdev_mqs */
-long alloc_etherdev_mqs(void);
-long alloc_etherdev_mqs(void) { nk_stub_called("alloc_etherdev_mqs"); return 0; }
-
-/* @stub alloc_pages_exact_noprof */
-long alloc_pages_exact_noprof(void);
-long alloc_pages_exact_noprof(void) { nk_stub_called("alloc_pages_exact_noprof"); return 0; }
-
-/* @stub alloc_pages_noprof */
-long alloc_pages_noprof(void);
-long alloc_pages_noprof(void) { nk_stub_called("alloc_pages_noprof"); return 0; }
+/* @stub _parse_integer_limit */
+long _parse_integer_limit(void);
+long _parse_integer_limit(void) { nk_stub_called("_parse_integer_limit"); return 0; }
 
 /* @stub alt_cb_patch_nops */
-long alt_cb_patch_nops(void);
-long alt_cb_patch_nops(void) { nk_stub_called("alt_cb_patch_nops"); return 0; }
+static long stub_alt_cb_patch_nops(void) { nk_stub_called("alt_cb_patch_nops"); return 0; }
+void *alt_cb_patch_nops = (void *)stub_alt_cb_patch_nops;
 
 /* @stub bpf_dispatcher_xdp_func */
 long bpf_dispatcher_xdp_func(void);
 long bpf_dispatcher_xdp_func(void) { nk_stub_called("bpf_dispatcher_xdp_func"); return 0; }
 
 /* @stub bpf_master_redirect_enabled_key */
-long bpf_master_redirect_enabled_key(void);
-long bpf_master_redirect_enabled_key(void) { nk_stub_called("bpf_master_redirect_enabled_key"); return 0; }
+static long stub_bpf_master_redirect_enabled_key(void) { nk_stub_called("bpf_master_redirect_enabled_key"); return 0; }
+void *bpf_master_redirect_enabled_key = (void *)stub_bpf_master_redirect_enabled_key;
 
 /* @stub bpf_prog_add */
 long bpf_prog_add(void);
@@ -225,304 +81,96 @@ long bpf_prog_sub(void);
 long bpf_prog_sub(void) { nk_stub_called("bpf_prog_sub"); return 0; }
 
 /* @stub bpf_stats_enabled_key */
-long bpf_stats_enabled_key(void);
-long bpf_stats_enabled_key(void) { nk_stub_called("bpf_stats_enabled_key"); return 0; }
+static long stub_bpf_stats_enabled_key(void) { nk_stub_called("bpf_stats_enabled_key"); return 0; }
+void *bpf_stats_enabled_key = (void *)stub_bpf_stats_enabled_key;
 
 /* @stub bpf_warn_invalid_xdp_action */
 long bpf_warn_invalid_xdp_action(void);
 long bpf_warn_invalid_xdp_action(void) { nk_stub_called("bpf_warn_invalid_xdp_action"); return 0; }
 
-/* @stub build_skb */
-long build_skb(void);
-long build_skb(void) { nk_stub_called("build_skb"); return 0; }
-
-/* @stub bus_register */
-long bus_register(void);
-long bus_register(void) { nk_stub_called("bus_register"); return 0; }
-
-/* @stub bus_unregister */
-long bus_unregister(void);
-long bus_unregister(void) { nk_stub_called("bus_unregister"); return 0; }
-
 /* @stub cancel_work_sync */
 long cancel_work_sync(void);
 long cancel_work_sync(void) { nk_stub_called("cancel_work_sync"); return 0; }
 
-/* @stub cpus_read_lock */
-long cpus_read_lock(void);
-long cpus_read_lock(void) { nk_stub_called("cpus_read_lock"); return 0; }
-
-/* @stub cpus_read_unlock */
-long cpus_read_unlock(void);
-long cpus_read_unlock(void) { nk_stub_called("cpus_read_unlock"); return 0; }
-
-/* @stub dev_addr_mod */
-long dev_addr_mod(void);
-long dev_addr_mod(void) { nk_stub_called("dev_addr_mod"); return 0; }
-
-/* @stub dev_driver_string */
-long dev_driver_string(void);
-long dev_driver_string(void) { nk_stub_called("dev_driver_string"); return 0; }
-
-/* @stub dev_kfree_skb_any_reason */
-long dev_kfree_skb_any_reason(void);
-long dev_kfree_skb_any_reason(void) { nk_stub_called("dev_kfree_skb_any_reason"); return 0; }
-
-/* @stub dev_set_name */
-long dev_set_name(void);
-long dev_set_name(void) { nk_stub_called("dev_set_name"); return 0; }
-
-/* @stub device_add */
-long device_add(void);
-long device_add(void) { nk_stub_called("device_add"); return 0; }
-
-/* @stub device_initialize */
-long device_initialize(void);
-long device_initialize(void) { nk_stub_called("device_initialize"); return 0; }
-
-/* @stub device_unregister */
-long device_unregister(void);
-long device_unregister(void) { nk_stub_called("device_unregister"); return 0; }
-
-/* @stub devm_kfree */
-long devm_kfree(void);
-long devm_kfree(void) { nk_stub_called("devm_kfree"); return 0; }
-
-/* @stub devm_kmalloc */
-long devm_kmalloc(void);
-long devm_kmalloc(void) { nk_stub_called("devm_kmalloc"); return 0; }
-
-/* @stub devm_platform_ioremap_resource */
-long devm_platform_ioremap_resource(void);
-long devm_platform_ioremap_resource(void) { nk_stub_called("devm_platform_ioremap_resource"); return 0; }
-
-/* @stub dma_alloc_attrs */
-long dma_alloc_attrs(void);
-long dma_alloc_attrs(void) { nk_stub_called("dma_alloc_attrs"); return 0; }
-
-/* @stub dma_free_attrs */
-long dma_free_attrs(void);
-long dma_free_attrs(void) { nk_stub_called("dma_free_attrs"); return 0; }
-
-/* @stub dma_map_page_attrs */
-long dma_map_page_attrs(void);
-long dma_map_page_attrs(void) { nk_stub_called("dma_map_page_attrs"); return 0; }
-
-/* @stub dma_max_mapping_size */
-long dma_max_mapping_size(void);
-long dma_max_mapping_size(void) { nk_stub_called("dma_max_mapping_size"); return 0; }
-
-/* @stub dma_set_coherent_mask */
-long dma_set_coherent_mask(void);
-long dma_set_coherent_mask(void) { nk_stub_called("dma_set_coherent_mask"); return 0; }
-
-/* @stub dma_set_mask */
-long dma_set_mask(void);
-long dma_set_mask(void) { nk_stub_called("dma_set_mask"); return 0; }
-
-/* @stub dma_unmap_page_attrs */
-long dma_unmap_page_attrs(void);
-long dma_unmap_page_attrs(void) { nk_stub_called("dma_unmap_page_attrs"); return 0; }
+/* @stub csum_partial */
+long csum_partial(void);
+long csum_partial(void) { nk_stub_called("csum_partial"); return 0; }
 
 /* @stub do_trace_netlink_extack */
 long do_trace_netlink_extack(void);
 long do_trace_netlink_extack(void) { nk_stub_called("do_trace_netlink_extack"); return 0; }
 
-/* @stub dql_completed */
-long dql_completed(void);
-long dql_completed(void) { nk_stub_called("dql_completed"); return 0; }
-
-/* @stub dql_reset */
-long dql_reset(void);
-long dql_reset(void) { nk_stub_called("dql_reset"); return 0; }
-
-/* @stub driver_register */
-long driver_register(void);
-long driver_register(void) { nk_stub_called("driver_register"); return 0; }
-
-/* @stub driver_unregister */
-long driver_unregister(void);
-long driver_unregister(void) { nk_stub_called("driver_unregister"); return 0; }
-
 /* @stub dst_release */
 long dst_release(void);
 long dst_release(void) { nk_stub_called("dst_release"); return 0; }
 
-/* @stub eth_commit_mac_addr_change */
-long eth_commit_mac_addr_change(void);
-long eth_commit_mac_addr_change(void) { nk_stub_called("eth_commit_mac_addr_change"); return 0; }
-
-/* @stub eth_prepare_mac_addr_change */
-long eth_prepare_mac_addr_change(void);
-long eth_prepare_mac_addr_change(void) { nk_stub_called("eth_prepare_mac_addr_change"); return 0; }
-
-/* @stub eth_type_trans */
-long eth_type_trans(void);
-long eth_type_trans(void) { nk_stub_called("eth_type_trans"); return 0; }
-
-/* @stub eth_validate_addr */
-long eth_validate_addr(void);
-long eth_validate_addr(void) { nk_stub_called("eth_validate_addr"); return 0; }
-
-/* @stub ethtool_op_get_link */
-long ethtool_op_get_link(void);
-long ethtool_op_get_link(void) { nk_stub_called("ethtool_op_get_link"); return 0; }
-
-/* @stub ethtool_op_get_ts_info */
-long ethtool_op_get_ts_info(void);
-long ethtool_op_get_ts_info(void) { nk_stub_called("ethtool_op_get_ts_info"); return 0; }
-
-/* @stub ethtool_sprintf */
-long ethtool_sprintf(void);
-long ethtool_sprintf(void) { nk_stub_called("ethtool_sprintf"); return 0; }
-
-/* @stub ethtool_virtdev_set_link_ksettings */
-long ethtool_virtdev_set_link_ksettings(void);
-long ethtool_virtdev_set_link_ksettings(void) { nk_stub_called("ethtool_virtdev_set_link_ksettings"); return 0; }
+/* @stub errname */
+long errname(void);
+long errname(void) { nk_stub_called("errname"); return 0; }
 
 /* @stub flow_keys_basic_dissector */
-long flow_keys_basic_dissector(void);
-long flow_keys_basic_dissector(void) { nk_stub_called("flow_keys_basic_dissector"); return 0; }
+static long stub_flow_keys_basic_dissector(void) { nk_stub_called("flow_keys_basic_dissector"); return 0; }
+void *flow_keys_basic_dissector = (void *)stub_flow_keys_basic_dissector;
 
-/* @stub flush_work */
-long flush_work(void);
-long flush_work(void) { nk_stub_called("flush_work"); return 0; }
+/* @stub fwnode_count_parents */
+long fwnode_count_parents(void);
+long fwnode_count_parents(void) { nk_stub_called("fwnode_count_parents"); return 0; }
 
-/* @stub free_cpumask_var */
-long free_cpumask_var(void);
-long free_cpumask_var(void) { nk_stub_called("free_cpumask_var"); return 0; }
+/* @stub fwnode_get_name */
+long fwnode_get_name(void);
+long fwnode_get_name(void) { nk_stub_called("fwnode_get_name"); return 0; }
 
-/* @stub free_irq */
-long free_irq(void);
-long free_irq(void) { nk_stub_called("free_irq"); return 0; }
+/* @stub fwnode_get_name_prefix */
+long fwnode_get_name_prefix(void);
+long fwnode_get_name_prefix(void) { nk_stub_called("fwnode_get_name_prefix"); return 0; }
 
-/* @stub free_netdev */
-long free_netdev(void);
-long free_netdev(void) { nk_stub_called("free_netdev"); return 0; }
+/* @stub fwnode_get_nth_parent */
+long fwnode_get_nth_parent(void);
+long fwnode_get_nth_parent(void) { nk_stub_called("fwnode_get_nth_parent"); return 0; }
 
-/* @stub free_pages_exact */
-long free_pages_exact(void);
-long free_pages_exact(void) { nk_stub_called("free_pages_exact"); return 0; }
+/* @stub fwnode_property_read_u8_array */
+long fwnode_property_read_u8_array(void);
+long fwnode_property_read_u8_array(void) { nk_stub_called("fwnode_property_read_u8_array"); return 0; }
 
-/* @stub get_random_bytes */
-long get_random_bytes(void);
-long get_random_bytes(void) { nk_stub_called("get_random_bytes"); return 0; }
+/* @stub gfpflag_names */
+static long stub_gfpflag_names(void) { nk_stub_called("gfpflag_names"); return 0; }
+void *gfpflag_names = (void *)stub_gfpflag_names;
 
-/* @stub gro_receive_skb */
-long gro_receive_skb(void);
-long gro_receive_skb(void) { nk_stub_called("gro_receive_skb"); return 0; }
+/* @stub gro_find_complete_by_type */
+long gro_find_complete_by_type(void);
+long gro_find_complete_by_type(void) { nk_stub_called("gro_find_complete_by_type"); return 0; }
 
-/* @stub ida_alloc_range */
-long ida_alloc_range(void);
-long ida_alloc_range(void) { nk_stub_called("ida_alloc_range"); return 0; }
+/* @stub gro_find_receive_by_type */
+long gro_find_receive_by_type(void);
+long gro_find_receive_by_type(void) { nk_stub_called("gro_find_receive_by_type"); return 0; }
 
-/* @stub ida_destroy */
-long ida_destroy(void);
-long ida_destroy(void) { nk_stub_called("ida_destroy"); return 0; }
+/* @stub guid_index */
+static long stub_guid_index(void) { nk_stub_called("guid_index"); return 0; }
+void *guid_index = (void *)stub_guid_index;
 
-/* @stub ida_free */
-long ida_free(void);
-long ida_free(void) { nk_stub_called("ida_free"); return 0; }
+/* @stub has_capability_noaudit */
+long has_capability_noaudit(void);
+long has_capability_noaudit(void) { nk_stub_called("has_capability_noaudit"); return 0; }
 
-/* @stub irq_set_irq_wake */
-long irq_set_irq_wake(void);
-long irq_set_irq_wake(void) { nk_stub_called("irq_set_irq_wake"); return 0; }
+/* @stub iov_iter_advance */
+long iov_iter_advance(void);
+long iov_iter_advance(void) { nk_stub_called("iov_iter_advance"); return 0; }
 
-/* @stub is_vmalloc_addr */
-long is_vmalloc_addr(void);
-long is_vmalloc_addr(void) { nk_stub_called("is_vmalloc_addr"); return 0; }
+/* @stub iov_iter_extract_pages */
+long iov_iter_extract_pages(void);
+long iov_iter_extract_pages(void) { nk_stub_called("iov_iter_extract_pages"); return 0; }
 
-/* @stub jiffies */
-long jiffies(void);
-long jiffies(void) { nk_stub_called("jiffies"); return 0; }
-
-/* @stub kfree */
-long kfree(void);
-long kfree(void) { nk_stub_called("kfree"); return 0; }
-
-/* @stub kimage_voffset */
-long kimage_voffset(void);
-long kimage_voffset(void) { nk_stub_called("kimage_voffset"); return 0; }
-
-/* @stub kmalloc_caches */
-long kmalloc_caches(void);
-long kmalloc_caches(void) { nk_stub_called("kmalloc_caches"); return 0; }
-
-/* @stub kmemdup_noprof */
-long kmemdup_noprof(void);
-long kmemdup_noprof(void) { nk_stub_called("kmemdup_noprof"); return 0; }
-
-/* @stub ktime_get */
-long ktime_get(void);
-long ktime_get(void) { nk_stub_called("ktime_get"); return 0; }
-
-/* @stub kvfree */
-long kvfree(void);
-long kvfree(void) { nk_stub_called("kvfree"); return 0; }
-
-/* @stub memstart_addr */
-long memstart_addr(void);
-long memstart_addr(void) { nk_stub_called("memstart_addr"); return 0; }
-
-/* @stub mutex_init_generic */
-long mutex_init_generic(void);
-long mutex_init_generic(void) { nk_stub_called("mutex_init_generic"); return 0; }
-
-/* @stub mutex_lock */
-long mutex_lock(void);
-long mutex_lock(void) { nk_stub_called("mutex_lock"); return 0; }
-
-/* @stub mutex_unlock */
-long mutex_unlock(void);
-long mutex_unlock(void) { nk_stub_called("mutex_unlock"); return 0; }
-
-/* @stub napi_alloc_skb */
-long napi_alloc_skb(void);
-long napi_alloc_skb(void) { nk_stub_called("napi_alloc_skb"); return 0; }
-
-/* @stub napi_complete_done */
-long napi_complete_done(void);
-long napi_complete_done(void) { nk_stub_called("napi_complete_done"); return 0; }
-
-/* @stub napi_consume_skb */
-long napi_consume_skb(void);
-long napi_consume_skb(void) { nk_stub_called("napi_consume_skb"); return 0; }
-
-/* @stub napi_disable */
-long napi_disable(void);
-long napi_disable(void) { nk_stub_called("napi_disable"); return 0; }
-
-/* @stub napi_enable */
-long napi_enable(void);
-long napi_enable(void) { nk_stub_called("napi_enable"); return 0; }
-
-/* @stub napi_schedule_prep */
-long napi_schedule_prep(void);
-long napi_schedule_prep(void) { nk_stub_called("napi_schedule_prep"); return 0; }
-
-/* @stub net_dim */
-long net_dim(void);
-long net_dim(void) { nk_stub_called("net_dim"); return 0; }
-
-/* @stub net_dim_free_irq_moder */
-long net_dim_free_irq_moder(void);
-long net_dim_free_irq_moder(void) { nk_stub_called("net_dim_free_irq_moder"); return 0; }
+/* @stub is_vmalloc_or_module_addr */
+long is_vmalloc_or_module_addr(void);
+long is_vmalloc_or_module_addr(void) { nk_stub_called("is_vmalloc_or_module_addr"); return 0; }
 
 /* @stub net_dim_get_rx_irq_moder */
 long net_dim_get_rx_irq_moder(void);
 long net_dim_get_rx_irq_moder(void) { nk_stub_called("net_dim_get_rx_irq_moder"); return 0; }
 
-/* @stub net_dim_init_irq_moder */
-long net_dim_init_irq_moder(void);
-long net_dim_init_irq_moder(void) { nk_stub_called("net_dim_init_irq_moder"); return 0; }
-
 /* @stub net_dim_setting */
 long net_dim_setting(void);
 long net_dim_setting(void) { nk_stub_called("net_dim_setting"); return 0; }
-
-/* @stub net_dim_work_cancel */
-long net_dim_work_cancel(void);
-long net_dim_work_cancel(void) { nk_stub_called("net_dim_work_cancel"); return 0; }
 
 /* @stub net_failover_create */
 long net_failover_create(void);
@@ -532,277 +180,137 @@ long net_failover_create(void) { nk_stub_called("net_failover_create"); return 0
 long net_failover_destroy(void);
 long net_failover_destroy(void) { nk_stub_called("net_failover_destroy"); return 0; }
 
-/* @stub net_ratelimit */
-long net_ratelimit(void);
-long net_ratelimit(void) { nk_stub_called("net_ratelimit"); return 0; }
-
-/* @stub netdev_err */
-long netdev_err(void);
-long netdev_err(void) { nk_stub_called("netdev_err"); return 0; }
-
-/* @stub netdev_notify_peers */
-long netdev_notify_peers(void);
-long netdev_notify_peers(void) { nk_stub_called("netdev_notify_peers"); return 0; }
-
-/* @stub netdev_printk */
-long netdev_printk(void);
-long netdev_printk(void) { nk_stub_called("netdev_printk"); return 0; }
-
-/* @stub netdev_rss_key_fill */
-long netdev_rss_key_fill(void);
-long netdev_rss_key_fill(void) { nk_stub_called("netdev_rss_key_fill"); return 0; }
-
-/* @stub netdev_stat_queue_sum */
-long netdev_stat_queue_sum(void);
-long netdev_stat_queue_sum(void) { nk_stub_called("netdev_stat_queue_sum"); return 0; }
-
-/* @stub netdev_warn */
-long netdev_warn(void);
-long netdev_warn(void) { nk_stub_called("netdev_warn"); return 0; }
-
-/* @stub netif_carrier_off */
-long netif_carrier_off(void);
-long netif_carrier_off(void) { nk_stub_called("netif_carrier_off"); return 0; }
-
-/* @stub netif_carrier_on */
-long netif_carrier_on(void);
-long netif_carrier_on(void) { nk_stub_called("netif_carrier_on"); return 0; }
-
-/* @stub netif_device_attach */
-long netif_device_attach(void);
-long netif_device_attach(void) { nk_stub_called("netif_device_attach"); return 0; }
-
-/* @stub netif_device_detach */
-long netif_device_detach(void);
-long netif_device_detach(void) { nk_stub_called("netif_device_detach"); return 0; }
-
-/* @stub netif_is_rxfh_configured */
-long netif_is_rxfh_configured(void);
-long netif_is_rxfh_configured(void) { nk_stub_called("netif_is_rxfh_configured"); return 0; }
-
-/* @stub netif_napi_add_weight_locked */
-long netif_napi_add_weight_locked(void);
-long netif_napi_add_weight_locked(void) { nk_stub_called("netif_napi_add_weight_locked"); return 0; }
-
-/* @stub netif_queue_set_napi */
-long netif_queue_set_napi(void);
-long netif_queue_set_napi(void) { nk_stub_called("netif_queue_set_napi"); return 0; }
-
-/* @stub netif_schedule_queue */
-long netif_schedule_queue(void);
-long netif_schedule_queue(void) { nk_stub_called("netif_schedule_queue"); return 0; }
-
-/* @stub netif_set_real_num_rx_queues */
-long netif_set_real_num_rx_queues(void);
-long netif_set_real_num_rx_queues(void) { nk_stub_called("netif_set_real_num_rx_queues"); return 0; }
-
-/* @stub netif_set_real_num_tx_queues */
-long netif_set_real_num_tx_queues(void);
-long netif_set_real_num_tx_queues(void) { nk_stub_called("netif_set_real_num_tx_queues"); return 0; }
-
-/* @stub netif_tx_lock */
-long netif_tx_lock(void);
-long netif_tx_lock(void) { nk_stub_called("netif_tx_lock"); return 0; }
-
-/* @stub netif_tx_stop_all_queues */
-long netif_tx_stop_all_queues(void);
-long netif_tx_stop_all_queues(void) { nk_stub_called("netif_tx_stop_all_queues"); return 0; }
-
-/* @stub netif_tx_unlock */
-long netif_tx_unlock(void);
-long netif_tx_unlock(void) { nk_stub_called("netif_tx_unlock"); return 0; }
-
-/* @stub netif_tx_wake_queue */
-long netif_tx_wake_queue(void);
-long netif_tx_wake_queue(void) { nk_stub_called("netif_tx_wake_queue"); return 0; }
-
 /* @stub nf_conntrack_destroy */
 long nf_conntrack_destroy(void);
 long nf_conntrack_destroy(void) { nk_stub_called("nf_conntrack_destroy"); return 0; }
 
-/* @stub nr_cpu_ids */
-long nr_cpu_ids(void);
-long nr_cpu_ids(void) { nk_stub_called("nr_cpu_ids"); return 0; }
+/* @stub nvmem_cell_get */
+long nvmem_cell_get(void);
+long nvmem_cell_get(void) { nk_stub_called("nvmem_cell_get"); return 0; }
 
-/* @stub of_device_is_compatible */
-long of_device_is_compatible(void);
-long of_device_is_compatible(void) { nk_stub_called("of_device_is_compatible"); return 0; }
+/* @stub nvmem_cell_put */
+long nvmem_cell_put(void);
+long nvmem_cell_put(void) { nk_stub_called("nvmem_cell_put"); return 0; }
 
-/* @stub of_get_next_available_child */
-long of_get_next_available_child(void);
-long of_get_next_available_child(void) { nk_stub_called("of_get_next_available_child"); return 0; }
+/* @stub nvmem_cell_read */
+long nvmem_cell_read(void);
+long nvmem_cell_read(void) { nk_stub_called("nvmem_cell_read"); return 0; }
 
-/* @stub of_node_put */
-long of_node_put(void);
-long of_node_put(void) { nk_stub_called("of_node_put"); return 0; }
+/* @stub of_find_property */
+long of_find_property(void);
+long of_find_property(void) { nk_stub_called("of_find_property"); return 0; }
 
-/* @stub of_property_read_bool */
-long of_property_read_bool(void);
-long of_property_read_bool(void) { nk_stub_called("of_property_read_bool"); return 0; }
+/* @stub of_get_mac_address */
+long of_get_mac_address(void);
+long of_get_mac_address(void) { nk_stub_called("of_get_mac_address"); return 0; }
 
-/* @stub page_pool_alloc_frag_netmem */
-long page_pool_alloc_frag_netmem(void);
-long page_pool_alloc_frag_netmem(void) { nk_stub_called("page_pool_alloc_frag_netmem"); return 0; }
+/* @stub of_prop_next_string */
+long of_prop_next_string(void);
+long of_prop_next_string(void) { nk_stub_called("of_prop_next_string"); return 0; }
 
-/* @stub page_pool_alloc_netmems */
-long page_pool_alloc_netmems(void);
-long page_pool_alloc_netmems(void) { nk_stub_called("page_pool_alloc_netmems"); return 0; }
+/* @stub of_property_read_string */
+long of_property_read_string(void);
+long of_property_read_string(void) { nk_stub_called("of_property_read_string"); return 0; }
 
-/* @stub page_pool_alloc_pages */
-long page_pool_alloc_pages(void);
-long page_pool_alloc_pages(void) { nk_stub_called("page_pool_alloc_pages"); return 0; }
-
-/* @stub page_pool_create */
-long page_pool_create(void);
-long page_pool_create(void) { nk_stub_called("page_pool_create"); return 0; }
-
-/* @stub page_pool_destroy */
-long page_pool_destroy(void);
-long page_pool_destroy(void) { nk_stub_called("page_pool_destroy"); return 0; }
-
-/* @stub page_pool_put_unrefed_netmem */
-long page_pool_put_unrefed_netmem(void);
-long page_pool_put_unrefed_netmem(void) { nk_stub_called("page_pool_put_unrefed_netmem"); return 0; }
+/* @stub pageflag_names */
+static long stub_pageflag_names(void) { nk_stub_called("pageflag_names"); return 0; }
+void *pageflag_names = (void *)stub_pageflag_names;
 
 /* @stub panic */
 long panic(void);
 long panic(void) { nk_stub_called("panic"); return 0; }
 
 /* @stub param_ops_bool */
-long param_ops_bool(void);
-long param_ops_bool(void) { nk_stub_called("param_ops_bool"); return 0; }
+static long stub_param_ops_bool(void) { nk_stub_called("param_ops_bool"); return 0; }
+void *param_ops_bool = (void *)stub_param_ops_bool;
 
 /* @stub param_ops_int */
-long param_ops_int(void);
-long param_ops_int(void) { nk_stub_called("param_ops_int"); return 0; }
+static long stub_param_ops_int(void) { nk_stub_called("param_ops_int"); return 0; }
+void *param_ops_int = (void *)stub_param_ops_int;
 
-/* @stub platform_driver_unregister */
-long platform_driver_unregister(void);
-long platform_driver_unregister(void) { nk_stub_called("platform_driver_unregister"); return 0; }
-
-/* @stub platform_get_irq */
-long platform_get_irq(void);
-long platform_get_irq(void) { nk_stub_called("platform_get_irq"); return 0; }
-
-/* @stub put_device */
-long put_device(void);
-long put_device(void) { nk_stub_called("put_device"); return 0; }
-
-/* @stub queue_work_on */
-long queue_work_on(void);
-long queue_work_on(void) { nk_stub_called("queue_work_on"); return 0; }
-
-/* @stub refcount_warn_saturate */
-long refcount_warn_saturate(void);
-long refcount_warn_saturate(void) { nk_stub_called("refcount_warn_saturate"); return 0; }
-
-/* @stub register_netdevice */
-long register_netdevice(void);
-long register_netdevice(void) { nk_stub_called("register_netdevice"); return 0; }
-
-/* @stub request_threaded_irq */
-long request_threaded_irq(void);
-long request_threaded_irq(void) { nk_stub_called("request_threaded_irq"); return 0; }
-
-/* @stub rtnl_lock */
-long rtnl_lock(void);
-long rtnl_lock(void) { nk_stub_called("rtnl_lock"); return 0; }
-
-/* @stub rtnl_unlock */
-long rtnl_unlock(void);
-long rtnl_unlock(void) { nk_stub_called("rtnl_unlock"); return 0; }
-
-/* @stub sched_clock */
-long sched_clock(void);
-long sched_clock(void) { nk_stub_called("sched_clock"); return 0; }
-
-/* @stub sg_init_one */
-long sg_init_one(void);
-long sg_init_one(void) { nk_stub_called("sg_init_one"); return 0; }
-
-/* @stub sg_init_table */
-long sg_init_table(void);
-long sg_init_table(void) { nk_stub_called("sg_init_table"); return 0; }
+/* @stub siphash_1u64 */
+long siphash_1u64(void);
+long siphash_1u64(void) { nk_stub_called("siphash_1u64"); return 0; }
 
 /* @stub sized_strscpy */
 long sized_strscpy(void);
 long sized_strscpy(void) { nk_stub_called("sized_strscpy"); return 0; }
 
-/* @stub sk_skb_reason_drop */
-long sk_skb_reason_drop(void);
-long sk_skb_reason_drop(void) { nk_stub_called("sk_skb_reason_drop"); return 0; }
-
 /* @stub skb_coalesce_rx_frag */
 long skb_coalesce_rx_frag(void);
 long skb_coalesce_rx_frag(void) { nk_stub_called("skb_coalesce_rx_frag"); return 0; }
 
-/* @stub skb_partial_csum_set */
-long skb_partial_csum_set(void);
-long skb_partial_csum_set(void) { nk_stub_called("skb_partial_csum_set"); return 0; }
-
-/* @stub skb_put */
-long skb_put(void);
-long skb_put(void) { nk_stub_called("skb_put"); return 0; }
-
-/* @stub skb_to_sgvec */
-long skb_to_sgvec(void);
-long skb_to_sgvec(void) { nk_stub_called("skb_to_sgvec"); return 0; }
+/* @stub skb_copy_bits */
+long skb_copy_bits(void);
+long skb_copy_bits(void) { nk_stub_called("skb_copy_bits"); return 0; }
 
 /* @stub skb_tstamp_tx */
 long skb_tstamp_tx(void);
 long skb_tstamp_tx(void) { nk_stub_called("skb_tstamp_tx"); return 0; }
 
-/* @stub snprintf */
-long snprintf(void);
-long snprintf(void) { nk_stub_called("snprintf"); return 0; }
+/* @stub skip_spaces */
+long skip_spaces(void);
+long skip_spaces(void) { nk_stub_called("skip_spaces"); return 0; }
 
 /* @stub softnet_data */
-long softnet_data(void);
-long softnet_data(void) { nk_stub_called("softnet_data"); return 0; }
+static long stub_softnet_data(void) { nk_stub_called("softnet_data"); return 0; }
+void *softnet_data = (void *)stub_softnet_data;
 
-/* @stub sprintf */
-long sprintf(void);
-long sprintf(void) { nk_stub_called("sprintf"); return 0; }
+/* @stub sprint_backtrace */
+long sprint_backtrace(void);
+long sprint_backtrace(void) { nk_stub_called("sprint_backtrace"); return 0; }
 
-/* @stub synchronize_irq */
-long synchronize_irq(void);
-long synchronize_irq(void) { nk_stub_called("synchronize_irq"); return 0; }
+/* @stub sprint_backtrace_build_id */
+long sprint_backtrace_build_id(void);
+long sprint_backtrace_build_id(void) { nk_stub_called("sprint_backtrace_build_id"); return 0; }
 
-/* @stub synchronize_net */
-long synchronize_net(void);
-long synchronize_net(void) { nk_stub_called("synchronize_net"); return 0; }
+/* @stub sprint_symbol */
+long sprint_symbol(void);
+long sprint_symbol(void) { nk_stub_called("sprint_symbol"); return 0; }
 
-/* @stub synchronize_rcu */
-long synchronize_rcu(void);
-long synchronize_rcu(void) { nk_stub_called("synchronize_rcu"); return 0; }
+/* @stub sprint_symbol_build_id */
+long sprint_symbol_build_id(void);
+long sprint_symbol_build_id(void) { nk_stub_called("sprint_symbol_build_id"); return 0; }
 
-/* @stub sysfs_emit */
-long sysfs_emit(void);
-long sysfs_emit(void) { nk_stub_called("sysfs_emit"); return 0; }
+/* @stub sprint_symbol_no_offset */
+long sprint_symbol_no_offset(void);
+long sprint_symbol_no_offset(void) { nk_stub_called("sprint_symbol_no_offset"); return 0; }
 
-/* @stub sysfs_emit_at */
-long sysfs_emit_at(void);
-long sysfs_emit_at(void) { nk_stub_called("sysfs_emit_at"); return 0; }
+/* @stub strchrnul */
+long strchrnul(void);
+long strchrnul(void) { nk_stub_called("strchrnul"); return 0; }
 
-/* @stub system_percpu_wq */
-long system_percpu_wq(void);
-long system_percpu_wq(void) { nk_stub_called("system_percpu_wq"); return 0; }
+/* @stub string_escape_mem */
+long string_escape_mem(void);
+long string_escape_mem(void) { nk_stub_called("string_escape_mem"); return 0; }
 
-/* @stub unregister_netdev */
-long unregister_netdev(void);
-long unregister_netdev(void) { nk_stub_called("unregister_netdev"); return 0; }
+/* @stub time64_to_tm */
+long time64_to_tm(void);
+long time64_to_tm(void) { nk_stub_called("time64_to_tm"); return 0; }
 
-/* @stub virtio_check_mem_acc_cb */
-long virtio_check_mem_acc_cb(void);
-long virtio_check_mem_acc_cb(void) { nk_stub_called("virtio_check_mem_acc_cb"); return 0; }
+/* @stub unpin_user_page */
+long unpin_user_page(void);
+long unpin_user_page(void) { nk_stub_called("unpin_user_page"); return 0; }
+
+/* @stub uuid_index */
+static long stub_uuid_index(void) { nk_stub_called("uuid_index"); return 0; }
+void *uuid_index = (void *)stub_uuid_index;
+
+/* @stub vmaflag_names */
+static long stub_vmaflag_names(void) { nk_stub_called("vmaflag_names"); return 0; }
+void *vmaflag_names = (void *)stub_vmaflag_names;
+
+/* @stub vmalloc_to_page */
+long vmalloc_to_page(void);
+long vmalloc_to_page(void) { nk_stub_called("vmalloc_to_page"); return 0; }
+
+/* @stub xas_find */
+long xas_find(void);
+long xas_find(void) { nk_stub_called("xas_find"); return 0; }
 
 /* @stub xdp_convert_zc_to_xdp_frame */
 long xdp_convert_zc_to_xdp_frame(void);
 long xdp_convert_zc_to_xdp_frame(void) { nk_stub_called("xdp_convert_zc_to_xdp_frame"); return 0; }
-
-/* @stub xdp_do_flush */
-long xdp_do_flush(void);
-long xdp_do_flush(void) { nk_stub_called("xdp_do_flush"); return 0; }
 
 /* @stub xdp_do_redirect */
 long xdp_do_redirect(void);
@@ -819,27 +327,3 @@ long xdp_features_set_redirect_target(void) { nk_stub_called("xdp_features_set_r
 /* @stub xdp_master_redirect */
 long xdp_master_redirect(void);
 long xdp_master_redirect(void) { nk_stub_called("xdp_master_redirect"); return 0; }
-
-/* @stub xdp_return_frame */
-long xdp_return_frame(void);
-long xdp_return_frame(void) { nk_stub_called("xdp_return_frame"); return 0; }
-
-/* @stub xdp_return_frame_rx_napi */
-long xdp_return_frame_rx_napi(void);
-long xdp_return_frame_rx_napi(void) { nk_stub_called("xdp_return_frame_rx_napi"); return 0; }
-
-/* @stub xdp_rxq_info_reg_mem_model */
-long xdp_rxq_info_reg_mem_model(void);
-long xdp_rxq_info_reg_mem_model(void) { nk_stub_called("xdp_rxq_info_reg_mem_model"); return 0; }
-
-/* @stub xdp_rxq_info_unreg */
-long xdp_rxq_info_unreg(void);
-long xdp_rxq_info_unreg(void) { nk_stub_called("xdp_rxq_info_unreg"); return 0; }
-
-/* @stub xdp_warn */
-long xdp_warn(void);
-long xdp_warn(void) { nk_stub_called("xdp_warn"); return 0; }
-
-/* @stub xen_domain_type */
-long xen_domain_type(void);
-long xen_domain_type(void) { nk_stub_called("xen_domain_type"); return 0; }

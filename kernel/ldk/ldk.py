@@ -97,6 +97,26 @@ TOOLCHAIN = {
 # real thing at link time.
 NK_PREFIX = "nk_"
 
+# Provided by linker.ld, not by Linux and not by the shim. Stubbing these
+# replaces the bounds of the initcall table with a function, so nk_linux_init
+# walks from one piece of code to another and calls whatever it finds.
+LINKER = {"__initcall_start", "__initcall_end", "__image_end", "__bss_start",
+          "__bss_end", "__stack_top", "__vectors"}
+
+# Linux source every port needs, whatever device it is for.
+#
+# Named once here rather than repeated in each manifest, because the list is a
+# property of the shim -- printk needs vsprintf, vsprintf needs hexdump's
+# tables -- and not of any particular driver. A port's own `sources` is then
+# only the driver, which is what a reader wants it to be.
+BASE_SOURCES = [
+    "lib/vsprintf.c",     # %pS, %pOF and every other kernel-specific specifier
+    "lib/hexdump.c",      # hex_asc_upper, which every %x in the log reads
+    "lib/scatterlist.c",  # sg_init_table and friends, with the real edge cases
+    "lib/ctype.c",        # _ctype, the table every isalpha() in the tree reads
+    "lib/find_bit.c",     # _find_next_bit and friends, over cpumasks and more
+]
+
 
 def say(msg):
     print(f"\033[1;36m==>\033[0m {msg}", flush=True)
@@ -195,8 +215,17 @@ echo "ready: $(ls /src/build-arm64/include/generated/autoconf.h)"
 
 # ---------------------------------------------------------------- build --
 
+def sources_of(port: dict) -> list[str]:
+    """The port's own drivers, plus the Linux library every port needs."""
+    out = list(port["sources"])
+    for src in BASE_SOURCES:
+        if src not in out:
+            out.append(src)
+    return out
+
+
 def objects_of(port: dict) -> list[str]:
-    return [s[:-2] + ".o" for s in port["sources"]]
+    return [s[:-2] + ".o" for s in sources_of(port)]
 
 
 def cmd_build(args):
@@ -304,7 +333,7 @@ def analyse(port: dict) -> dict:
 
     # A symbol one file in the port defines and another uses is internal to
     # the port and nobody's responsibility but its own.
-    external = {s for s in (undefined | shim_undef) - defined - TOOLCHAIN
+    external = {s for s in (undefined | shim_undef) - defined - TOOLCHAIN - LINKER
                 if not s.startswith(NK_PREFIX)}
     implemented = external & shim_def
     stubbed = (external - implemented) & stubbed_symbols(port["name"])
@@ -530,6 +559,15 @@ echo "  $(ar t libnklinux.a | wc -l | tr -d ' ') members"
 """
     docker(script, mounts=[(str(out), "/out"), (str(shim_out), "/shimobj")])
     say(f"{(out / 'libnklinux.a').relative_to(ROOT)}")
+    others = [p.name for p in BUILD.iterdir()
+              if p.is_dir() and p.name not in ("_shim", port["name"])
+              and (p / "libnklinux.a").exists()]
+    if others:
+        # emul/ is shared, so building it for one port leaves every other
+        # port's archive holding the previous version of it. Said rather than
+        # silently left, because the symptom is a port that was working a
+        # minute ago failing in a way that has nothing to do with what changed.
+        say(f"other ports now stale: {', '.join(others)}  (ldk shim <port> to refresh)")
 
 
 def _compile(flags: str, sources: list[str], out: Path):

@@ -137,7 +137,16 @@ extern "C" {
     fn nk_linux_init() -> i32;
     fn nk_add_virtio_mmio(base: u64, size: u64, irq: u32) -> i32;
     fn nk_work_drain();
+    /// Advances Linux's `jiffies`. Not optional: drivers read the variable
+    /// directly and loop until it changes, so a jiffies that never moves
+    /// turns every timeout in every driver into an infinite one -- which
+    /// presents as a device that never answers.
+    pub fn nk_tick();
     fn nk_blk_read(sector: u64, buf: *mut u8, len: u32) -> i32;
+    fn nk_net_up(mac: *mut u8) -> i32;
+    fn nk_net_xmit(frame: *const u8, len: u32) -> i32;
+    fn nk_net_poll();
+    fn nk_net_recv(out: *mut u8, max: u32) -> u32;
     /// Called from the IRQ path for anything that is not nk's own timer.
     pub fn nk_linux_irq(intid: u32) -> i32;
 }
@@ -181,6 +190,30 @@ pub fn init() {
     println!("  linux:  running initcalls");
     let n = unsafe { nk_linux_init() };
     println!("  linux:  {} initcalls ran", n);
+}
+
+/// Bring the network interface up and report its MAC address.
+///
+/// `register_netdevice` does not open a device -- in Linux that is `ip link
+/// set up`, from userspace, and nk is the userspace.
+pub fn net_up() -> Option<[u8; 6]> {
+    let mut mac = [0u8; 6];
+    (unsafe { nk_net_up(mac.as_mut_ptr()) } == 0).then_some(mac)
+}
+
+pub fn net_xmit(frame: &[u8]) -> Result<(), i32> {
+    let rc = unsafe { nk_net_xmit(frame.as_ptr(), frame.len() as u32) };
+    if rc == 0 { Ok(()) } else { Err(rc) }
+}
+
+/// Run whatever NAPI polling the driver has asked for, then take a frame if
+/// one arrived. Polling here rather than on a thread keeps the whole receive
+/// path on one stack while it is being brought up.
+pub fn net_recv(out: &mut [u8]) -> usize {
+    unsafe {
+        nk_net_poll();
+        nk_net_recv(out.as_mut_ptr(), out.len() as u32) as usize
+    }
 }
 
 /// The thread Linux's workqueues run on.

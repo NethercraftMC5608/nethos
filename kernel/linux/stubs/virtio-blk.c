@@ -24,26 +24,6 @@ long __bitmap_complement(void) { nk_stub_called("__bitmap_complement"); return 0
 long __clk_get_name(void);
 long __clk_get_name(void) { nk_stub_called("__clk_get_name"); return 0; }
 
-/* @stub __free_pages */
-long __free_pages(void);
-long __free_pages(void) { nk_stub_called("__free_pages"); return 0; }
-
-/* @stub __initcall_end */
-static long stub___initcall_end(void) { nk_stub_called("__initcall_end"); return 0; }
-void *__initcall_end = (void *)stub___initcall_end;
-
-/* @stub __initcall_start */
-static long stub___initcall_start(void) { nk_stub_called("__initcall_start"); return 0; }
-void *__initcall_start = (void *)stub___initcall_start;
-
-/* @stub __rcu_read_lock */
-long __rcu_read_lock(void);
-long __rcu_read_lock(void) { nk_stub_called("__rcu_read_lock"); return 0; }
-
-/* @stub __rcu_read_unlock */
-long __rcu_read_unlock(void);
-long __rcu_read_unlock(void) { nk_stub_called("__rcu_read_unlock"); return 0; }
-
 /* @stub _ctype */
 static long stub__ctype(void) { nk_stub_called("_ctype"); return 0; }
 void *_ctype = (void *)stub__ctype;
@@ -64,10 +44,6 @@ long _parse_integer_fixup_radix(void) { nk_stub_called("_parse_integer_fixup_rad
 long _parse_integer_limit(void);
 long _parse_integer_limit(void) { nk_stub_called("_parse_integer_limit"); return 0; }
 
-/* @stub alloc_pages_noprof */
-long alloc_pages_noprof(void);
-long alloc_pages_noprof(void) { nk_stub_called("alloc_pages_noprof"); return 0; }
-
 /* @stub alt_cb_patch_nops */
 static long stub_alt_cb_patch_nops(void) { nk_stub_called("alt_cb_patch_nops"); return 0; }
 void *alt_cb_patch_nops = (void *)stub_alt_cb_patch_nops;
@@ -76,13 +52,9 @@ void *alt_cb_patch_nops = (void *)stub_alt_cb_patch_nops;
 long errname(void);
 long errname(void) { nk_stub_called("errname"); return 0; }
 
-/* @stub flush_dcache_page */
-long flush_dcache_page(void);
-long flush_dcache_page(void) { nk_stub_called("flush_dcache_page"); return 0; }
-
-/* @stub free_pages */
-long free_pages(void);
-long free_pages(void) { nk_stub_called("free_pages"); return 0; }
+/* @stub eth_type_trans */
+long eth_type_trans(void);
+long eth_type_trans(void) { nk_stub_called("eth_type_trans"); return 0; }
 
 /* @stub fwnode_count_parents */
 long fwnode_count_parents(void);
@@ -99,10 +71,6 @@ long fwnode_get_name_prefix(void) { nk_stub_called("fwnode_get_name_prefix"); re
 /* @stub fwnode_get_nth_parent */
 long fwnode_get_nth_parent(void);
 long fwnode_get_nth_parent(void) { nk_stub_called("fwnode_get_nth_parent"); return 0; }
-
-/* @stub get_free_pages_noprof */
-long get_free_pages_noprof(void);
-long get_free_pages_noprof(void) { nk_stub_called("get_free_pages_noprof"); return 0; }
 
 /* @stub gfpflag_names */
 static long stub_gfpflag_names(void) { nk_stub_called("gfpflag_names"); return 0; }
@@ -147,10 +115,6 @@ void *pageflag_names = (void *)stub_pageflag_names;
 /* @stub panic */
 long panic(void);
 long panic(void) { nk_stub_called("panic"); return 0; }
-
-/* @stub preempt_schedule */
-long preempt_schedule(void);
-long preempt_schedule(void) { nk_stub_called("preempt_schedule"); return 0; }
 
 /* @stub siphash_1u64 */
 long siphash_1u64(void);

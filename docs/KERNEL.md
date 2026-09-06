@@ -145,12 +145,52 @@ one boots.
 - **3 — done.** Unmodified `virtio_mmio` + `virtio_blk` read a sector off a
   QEMU disk. 113 of the 154 symbols they ask for are implemented; the other
   41 are stubs that never ran.
-- **4** — `virtio_net`, then `e1000`: a different class of device, and then a
-  real vendor driver that does not cooperate. Forces `sk_buff`, netdev
-  registration, NAPI, streaming DMA.
-  *Done when nk answers an ARP request from the host.*
+- **4 — in progress.** `virtio_net` probes, opens, reports the MAC address it
+  read off the device (`52:54:00:12:34:56`) and transmits. The receive path
+  stops at the `struct page` wall below. `e1000` is untouched.
 - **5** — decide with `ldk report`'s numbers whether USB, DRM or WiFi is worth
   attempting. Genode is funded and staffed and still does not do GPU.
+
+## Where Stage 4 stands, and the wall it found
+
+`virtio_net.c`, unmodified, now registers a `net_device`, is opened, brings up
+its NAPI contexts, reads its MAC address out of the device's configuration
+space -- **52:54:00:12:34:56**, which is QEMU's, so the read is real -- and
+transmits an ARP request through `ndo_start_xmit`. 149 symbols implemented,
+108 stubbed.
+
+Then the receive path faults, in exactly the place `emul/mm.c` predicted in
+writing:
+
+> The limit is exact and worth knowing: the moment something *dereferences* a
+> struct page -- reads a page flag, takes a reference, follows a mapping -- it
+> faults on an address that is not mapped, and that is when the real vmemmap
+> has to be built.
+
+`receive_buf` calls `virt_to_head_page`, which reads `page->compound_head`.
+Every `struct page` nk hands out is a computed address in a vmemmap that was
+never allocated: fine while virtio only converts it back to a physical
+address, which is all virtio-blk ever did, and fatal the moment anyone looks
+inside one.
+
+**The fix is known and is the next piece of work**: allocate a real `struct
+page` array for RAM -- 8MB for this guest -- enable `TTBR1`, and map it at
+`VMEMMAP_START`. `paging.rs` currently disables `TTBR1` outright (`TCR_EL1.
+EPD1`), so this is the first thing nk will map at a high address.
+
+Two other things Stage 4 established:
+
+**HVF cannot run this port.** virtio-net makes an MMIO access QEMU's HVF
+backend refuses to decode -- the same `assert(isv)` as the writeback load in
+`mmio.rs`, from driver code this time rather than nk's. `--tcg` was what
+separated "nk is wrong" from "the hypervisor cannot do this", in one run.
+Development of this port happens under TCG.
+
+**A time-based wait is the wrong shape under TCG.** The virtual timer counts
+guest cycles rather than following the host clock, so a three-second deadline
+is around seven hundred real ones and is indistinguishable from a hang. The
+probe wait counts yields instead, which is the thing actually being waited
+for.
 
 ## What Stage 3 cost
 

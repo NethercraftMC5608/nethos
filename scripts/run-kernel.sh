@@ -143,7 +143,14 @@ if [ -n "$DISK" ]; then
 fi
 
 if [ "$NET" -eq 1 ]; then
-    ARGS+=( -netdev user,id=nknet -device virtio-net-device,netdev=nknet )
+    # mrg_rxbuf=off on purpose. With mergeable receive buffers on -- QEMU's
+    # default -- virtio_net takes a receive path that assembles a frame from
+    # several buffers into a fragmented skb. nk's skbs are linear only (see
+    # emul/skb.c), so this asks the driver for the small-packet path, which
+    # is the one the shim supports. Turning it on is a real piece of work,
+    # not a flag.
+    ARGS+=( -netdev user,id=nknet
+            -device virtio-net-device,netdev=nknet,mrg_rxbuf=off )
 fi
 
 if [ "$GDB" -eq 1 ]; then

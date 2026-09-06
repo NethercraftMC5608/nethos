@@ -90,6 +90,10 @@ pub extern "C" fn rust_irq() {
     if intid == crate::timer::intid() {
         unsafe { crate::timer::rearm() };
         crate::timer::on_tick();
+        #[cfg(nk_linux)]
+        unsafe {
+            crate::linux::nk_tick()
+        };
         // Completion before the switch, not after: cpu_switch does not return
         // here, it returns into some other task, and an un-EOI'd interrupt
         // stays active forever. The symptom is a timer that ticks exactly
