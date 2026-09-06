@@ -269,16 +269,75 @@ class UserSpace(unittest.TestCase):
         # The whole point of two privilege levels. The process asks the kernel
         # to write out eight bytes of the kernel image; user_to_phys
         # translates with EL0's permissions, the translation fails, and write
-        # returns -EFAULT. The process carries that to exit, so the refusal is
-        # observable rather than merely believed.
-        #
-        # 14 is EFAULT. A status of 0 here would mean the kernel had happily
-        # printed its own memory to a process that asked for it.
-        self.assertIn('the process exited with status 14', self.out)
+        # returns -EFAULT. A kernel that printed its own memory to whoever
+        # asked would say nothing here.
+        self.assertIn('refused a user pointer into kernel memory (EFAULT)', self.out)
+
+    def test_an_unimplemented_syscall_names_itself(self):
+        # Without Linux linked in, nk's own table has two entries. The program
+        # asks for getpid first; the answer is -ENOSYS, and the number is
+        # logged -- which is how the list of what to implement next gets
+        # written by a real binary rather than guessed at.
+        self.assertIn('syscall 172 is not implemented', self.out)
+        self.assertIn('the process exited with status -38', self.out)
 
     def test_exit_ends_the_process_cleanly(self):
         self.assertNotIn('fault in user space', self.out)
         self.assertNotIn('!!EXC', self.out)
+        self.assertIn('nk: done.', self.out)
+
+
+LKL_LIB = ROOT / 'kernel/ldk/build/lkl/libnklkl.a'
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+@unittest.skipUnless(LKL_LIB.exists(), 'Linux not built (cd kernel/ldk && ldk lkl)')
+class LinuxOnNk(unittest.TestCase):
+    """The whole Linux kernel, booting on nk, answering system calls."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot('--lkl', timeout=300, watchdog=60)
+
+    def test_linux_boots(self):
+        self.assertRegex(self.out, r'Linux version 6\.\d+')
+
+    def test_it_gets_its_memory_from_nk(self):
+        # Through the host's page_alloc, which is nk's frame allocator. The
+        # range printed is inside nk's RAM.
+        self.assertRegex(self.out, r'Memory: \d+K/\d+K available')
+
+    def test_the_console_is_nks(self):
+        # Every line above and below came through lkl_host_ops.print, which
+        # is nk's UART.
+        self.assertIn('printk: legacy console [lkl_console0] enabled', self.out)
+
+    def test_the_subsystems_that_matter_come_up(self):
+        # These are the ones a desktop needs and nk was never going to write.
+        self.assertIn('NET: Registered PF_INET protocol family', self.out)
+        self.assertIn('io scheduler mq-deadline registered', self.out)
+
+    def test_it_reaches_init(self):
+        # start_kernel completed. There is no filesystem yet, so there is no
+        # /init to run -- but Linux got as far as looking for one.
+        self.assertIn('Run /init as init process', self.out)
+
+    def test_system_calls_are_answered_by_linux(self):
+        # pid 1, because Linux's init task is what called it.
+        self.assertRegex(self.out, r'getpid\(\)\s+-> 1')
+        self.assertRegex(self.out, r'getuid\(\)\s+-> 0')
+
+    def test_a_process_at_el0_reaches_linux(self):
+        # The whole chain: nk boots the machine, Linux boots on nk, a process
+        # runs at EL0 in its own address space, makes an svc, nk catches it,
+        # Linux answers, and the answer comes back out as the exit status.
+        # 1 is the pid -- from Linux's own sys_getpid.
+        self.assertIn('entering EL0', self.out)
+        self.assertIn('the process exited with status 1', self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('!!EXC', self.out)
+        self.assertNotIn('!! kernel panic', self.out)
         self.assertIn('nk: done.', self.out)
 
 

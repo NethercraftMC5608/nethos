@@ -140,7 +140,9 @@ pub extern "C" fn nk_host_panic() -> ! {
 
 #[no_mangle]
 pub extern "C" fn nk_sem_alloc(count: i32) -> *mut Semaphore {
-    Box::into_raw(Box::new(Semaphore::new(count)))
+    let s = Box::into_raw(Box::new(Semaphore::new(count)));
+    unsafe { crate::sync::track(&*s) };
+    s
 }
 
 /// # Safety
@@ -166,7 +168,9 @@ pub unsafe extern "C" fn nk_sem_down(s: *mut Semaphore) {
 
 #[no_mangle]
 pub extern "C" fn nk_mutex_alloc(recursive: i32) -> *mut Mutex {
-    Box::into_raw(Box::new(Mutex::new(recursive != 0)))
+    let m = Box::into_raw(Box::new(Mutex::new(recursive != 0)));
+    unsafe { crate::sync::track_mutex(&*m) };
+    m
 }
 
 /// # Safety
@@ -196,7 +200,8 @@ pub unsafe extern "C" fn nk_mutex_unlock(m: *mut Mutex) {
 /// `extern "C" fn(usize)`. The trampoline exists because the two differ only
 /// in how the argument is typed, and casting a function pointer to a
 /// different signature is undefined behaviour rather than a formality.
-static mut ENTRY: [Option<(unsafe extern "C" fn(*mut u8), *mut u8)>; 16] = [None; 16];
+static mut ENTRY: [Option<(unsafe extern "C" fn(*mut u8), *mut u8)>; sched::MAX_TASKS] =
+    [None; sched::MAX_TASKS];
 
 extern "C" fn trampoline(slot: usize) {
     let entry = unsafe { (*(&raw const ENTRY))[slot] };
@@ -249,7 +254,8 @@ pub extern "C" fn nk_thread_join(id: usize) -> i32 {
 /// tasks, so a fixed table costs a kilobyte and removes an allocator from a
 /// path the scheduler calls into.
 const MAX_KEYS: usize = 8;
-static mut TLS: [[*mut u8; MAX_KEYS]; 16] = [[core::ptr::null_mut(); MAX_KEYS]; 16];
+static mut TLS: [[*mut u8; MAX_KEYS]; sched::MAX_TASKS] =
+    [[core::ptr::null_mut(); MAX_KEYS]; sched::MAX_TASKS];
 static mut KEYS_USED: usize = 0;
 
 #[no_mangle]

@@ -18,7 +18,15 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// path is not shy with stack, and a kernel stack overflow with no guard page
 /// silently corrupts whatever is below it.
 const STACK_PAGES: usize = 4;
-const MAX_TASKS: usize = 16;
+/// Sixty-four, because Linux wants them.
+///
+/// Sixteen was plenty for nk's own threads and is nowhere near enough for a
+/// booting Linux: init, kthreadd, the RCU threads, the per-subsystem
+/// workqueues, kdevtmpfs, kblockd, writeback and the rest are two dozen
+/// before anything useful runs. Sixty-four is also the width of the waiter
+/// bitmask in `sync.rs`, and the two must stay equal -- a task whose slot is
+/// past the end of that mask can be blocked and never woken.
+pub const MAX_TASKS: usize = 64;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum State {
@@ -62,6 +70,9 @@ pub struct Task {
     pub state: State,
     pub name: &'static str,
     pub slices: u64,
+    /// What this task is blocked on, when it is blocked: the id of a
+    /// semaphore or mutex. Zero when it blocked for some other reason.
+    pub waiting_on: u32,
 }
 
 static mut TASKS: [Task; MAX_TASKS] = [Task {
@@ -71,6 +82,7 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     state: State::Unused,
     name: "",
     slices: 0,
+    waiting_on: 0,
 }; MAX_TASKS];
 
 static mut CURRENT: usize = 0;
@@ -138,8 +150,15 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
         f.add(11).write(task_start as *const () as usize); // x30
 
         let shadow = frames::alloc().expect("no memory for a task shadow") as usize;
-        tasks[slot] =
-            Task { sp, stack: stack as usize, shadow, state: State::Ready, name, slices: 0 };
+        tasks[slot] = Task {
+            sp,
+            stack: stack as usize,
+            shadow,
+            state: State::Ready,
+            name,
+            slices: 0,
+            waiting_on: 0,
+        };
         slot
     }
 }
@@ -195,7 +214,13 @@ pub fn current_id() -> usize {
 /// deciding to sleep and sleeping -- the classic lost-wakeup, and the reason
 /// this takes the saved interrupt state rather than masking it itself.
 pub fn block(flags: u64) {
+    block_on(flags, 0)
+}
+
+/// Block, recording what is being waited for so a deadlock names itself.
+pub fn block_on(flags: u64, what: u32) {
     unsafe {
+        (*(&raw mut TASKS))[CURRENT].waiting_on = what;
         (*(&raw mut TASKS))[CURRENT].state = State::Blocked;
         // Interrupts come back on before the switch: the task is already
         // marked blocked, so a wake arriving now sets it Ready again rather
@@ -205,12 +230,26 @@ pub fn block(flags: u64) {
     }
 }
 
+/// A wake aimed at a task that was not blocked.
+///
+/// This is the shape of every lost-wakeup bug: somebody released a resource,
+/// the release was recorded, and the waiter never learned of it. Counted
+/// rather than assumed absent, because a lost wakeup does not fail where it
+/// happens -- it fails later, as a machine where everything is waiting.
+pub static mut LOST_WAKEUPS: u64 = 0;
+
 /// Make a blocked task runnable. Safe from interrupt context.
 pub fn wake(id: usize) {
     unsafe {
         let tasks = &mut *(&raw mut TASKS);
-        if id < MAX_TASKS && tasks[id].state == State::Blocked {
-            tasks[id].state = State::Ready;
+        if id >= MAX_TASKS {
+            return;
+        }
+        match tasks[id].state {
+            State::Blocked => tasks[id].state = State::Ready,
+            // Already runnable: the wake is redundant, not lost.
+            State::Ready | State::Running => {}
+            _ => LOST_WAKEUPS += 1,
         }
     }
 }
@@ -277,7 +316,14 @@ pub fn report() {
                     State::Finished => "finished",
                     State::Unused => "",
                 };
-                println!("          [{}] {:<10} {:<9} {} slices", i, t.name, s, t.slices);
+                if t.state == State::Blocked && t.waiting_on != 0 {
+                    println!(
+                        "          [{}] {:<10} {:<9} {} slices  waiting on {}",
+                        i, t.name, s, t.slices, t.waiting_on
+                    );
+                } else {
+                    println!("          [{}] {:<10} {:<9} {} slices", i, t.name, s, t.slices);
+                }
             }
         }
     }

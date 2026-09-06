@@ -298,16 +298,27 @@ the one below it.
       nk-host.c` is 288 lines and supplies the machine. nk is 14MB with Linux
       inside it, and Linux runs: threads on nk's scheduler, nk's semaphores
       and mutexes, nk's frame allocator, nk's timer.
-- [ ] **Finish the boot.** Linux reaches `rest_init` -- it creates
-      `kernel_init`, `kthreadd` and `idle_host_task` -- and then every thread
-      blocks. No console output because LKL registers its console inside
-      `kernel_init`, which is one of the threads that never runs. Fixed on the
-      way: Linux's sections gathered rather than discarded, FP/SIMD enabled at
-      EL1, timer callbacks moved out of interrupt context, a deadline
-      overflow, LKL's use of thread id 0 as a sentinel, and a semaphore that
-      woke every waiter instead of one. Next: make nk's semaphores record who
-      is waiting, so the watchdog prints the wait graph instead of the fact
-      that there is one.
+- [x] **Linux boots.** Full `start_kernel`, TCP/IP, io schedulers, Btrfs and
+      XFS, on nk's memory, threads, locks, clock and console. The bug that
+      held it was a synchronisation primitive written with `&mut self`:
+      `down` holds a reference across a context switch while another task
+      mutates the same object, which is aliasing UB, and the compiler kept
+      `count` in a register and re-tested the stale value. Atomics and
+      `&self`. Also fixed: LKL's use of thread id 0 as a sentinel, a
+      semaphore waking every waiter instead of one, timer callbacks running
+      in interrupt context, an overflow in the deadline arithmetic, and
+      sixteen task slots where Linux wanted sixty-four.
+- [x] **EL0 `svc` routed to `lkl_syscall`.** A process at EL0, in its own page
+      tables, asks `getpid` and Linux answers 1. The chain from bare aarch64
+      to the Linux ABI is closed. `exit` stays nk's, because nk's process is
+      not a Linux task.
+- [ ] **An ELF loader and a filesystem.** The program is a hundred bytes of
+      assembly in the kernel image; Linux is looking for `/init` and there is
+      nothing to find.
+- [ ] **Back each nk process with a Linux task**, which is what `fork` and
+      `execve` need anyway. Note that LKL believes it is in one flat address
+      space -- its `copy_from_user` is a memcpy -- so every user pointer must
+      be checked on nk's side before it is passed through.
 - [ ] **Route EL0 `svc` to `lkl_syscall`.** nk already runs a process at EL0
       with its own address space; `lkl_syscall` already answers every Linux
       call. Joining them is the ABI.

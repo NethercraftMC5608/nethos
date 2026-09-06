@@ -14,6 +14,52 @@ use crate::println;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+extern "C" {
+    fn nk_setjmp(buf: *mut u64) -> i32;
+    fn nk_longjmp(buf: *mut u64, val: i32) -> !;
+}
+
+/// 128 words, matching LKL's `struct lkl_jmp_buf`.
+static mut JB: [u64; 128] = [0; 128];
+static mut JUMP_WITH: i32 = 0;
+
+#[inline(never)]
+extern "C" fn jump_back() {
+    unsafe { nk_longjmp(&raw mut JB as *mut u64, JUMP_WITH) }
+}
+
+fn setjmp_roundtrip(val: i32) -> i32 {
+    unsafe {
+        JUMP_WITH = val;
+        let r = nk_setjmp(&raw mut JB as *mut u64);
+        if r == 0 {
+            jump_back();
+        }
+        r
+    }
+}
+
+/// The property that actually matters: a value the compiler decided to keep
+/// in a callee-saved register across the `setjmp` call must still be there
+/// after the `longjmp`. That is the entire contract, and it is what a wrong
+/// register list breaks silently.
+#[inline(never)]
+fn callee_saved_survive() -> bool {
+    unsafe {
+        JUMP_WITH = 7;
+        // Enough live values that some must land in x19-x28.
+        let (a, b, c, d) = (0x1111u64, 0x2222u64, 0x3333u64, 0x4444u64);
+        let r = nk_setjmp(&raw mut JB as *mut u64);
+        if r == 0 {
+            jump_back();
+        }
+        core::hint::black_box(a) == 0x1111
+            && core::hint::black_box(b) == 0x2222
+            && core::hint::black_box(c) == 0x3333
+            && core::hint::black_box(d) == 0x4444
+    }
+}
+
 pub fn run() {
     let (used_before, _) = heap::stats();
     let mut failures = 0;
@@ -78,6 +124,22 @@ pub fn run() {
         drop(evens);
     }
 
+    // setjmp and longjmp.
+    //
+    // Written from scratch for LKL, which uses them to hand the CPU between
+    // host threads, and never exercised until now -- nk's own code has no
+    // reason to jump out of a call. Untested assembly that saves the wrong
+    // registers does not fail where it is written; it fails much later, in
+    // whatever was relying on a callee-saved register surviving.
+    {
+        check!(setjmp_roundtrip(42) == 42, "longjmp did not carry its value");
+        // longjmp(buf, 0) must still look like a non-zero return, or the
+        // caller cannot tell the two paths apart. C requires it and it is the
+        // easiest half of the contract to leave out.
+        check!(setjmp_roundtrip(0) == 1, "longjmp(buf, 0) did not return 1");
+        check!(callee_saved_survive(), "a callee-saved register did not survive longjmp");
+    }
+
     let (used_after, _) = heap::stats();
     check!(
         used_after == used_before,
@@ -89,7 +151,7 @@ pub fn run() {
     check!(blocks == 1, "heap did not coalesce: {} free blocks, expected 1", blocks);
 
     if failures == 0 {
-        println!("  check:  heap ok (box, vec, realloc, 4K alignment, coalescing)");
+        println!("  check:  heap ok, setjmp/longjmp ok");
     } else {
         panic!("{} self-test failures", failures);
     }

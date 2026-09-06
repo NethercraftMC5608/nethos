@@ -141,6 +141,13 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             println!("  getpid()  -> {}", lkl::syscall(172, [0; 6]));
             println!("  gettid()  -> {}", lkl::syscall(178, [0; 6]));
             println!("  getuid()  -> {}", lkl::syscall(174, [0; 6]));
+
+            // And from user space, which is the whole point: a process at
+            // EL0 makes an `svc`, nk catches it, and Linux answers.
+            println!();
+            println!("Now the same question from EL0:");
+            let p = user::spawn();
+            user::run(&p);
         }
         stop();
     }
@@ -238,6 +245,12 @@ extern "C" fn watchdog(_: usize) {
             );
         }
         sched::report();
+        sync::report();
+        unsafe {
+            if sched::LOST_WAKEUPS != 0 {
+                println!("          {} lost wakeups", sched::LOST_WAKEUPS);
+            }
+        }
     }
     stop();
 }

@@ -29,7 +29,13 @@ virtio-net asks for 207, of which only 139 are new. See `ldk/README.md`.
 Stages 3 and 4 are done too: unmodified `virtio_blk` reads a sector off a
 disk, and unmodified `virtio_net` sends an ARP request and receives the reply.
 
-And nk now runs **user space** -- a program at EL0, in its own address space,
+**And the whole Linux kernel now boots on nk.** `arch/lkl` is a real Linux
+architecture port whose machine is a struct of function pointers;
+`kernel/lkl/nk-host.c` fills it in with nk's threads, locks, memory, timer and
+console. `run-kernel.sh --lkl` links it. Linux comes up with TCP/IP, io
+schedulers and filesystems, and a process at EL0 asks it `getpid` and gets 1.
+
+nk also runs **user space** -- a program at EL0, in its own address space,
 making Linux system calls, with a `copy_from_user` that refuses a pointer into
 kernel memory. That is the gate for everything above the driver layer,
 including any hope of running the NETHOS desktop on nk rather than on Debian's

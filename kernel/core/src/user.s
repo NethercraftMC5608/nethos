@@ -98,26 +98,32 @@ enter_user:
 .section ".rodata.user", "a"
 .global __user_blob_start
 __user_blob_start:
-    // First, hand the kernel a pointer it must refuse: 0x40080000 is the
-    // kernel's own image. The syscall translates user pointers with EL0's
-    // permissions, so this has to come back -EFAULT rather than printing the
-    // kernel's first instructions. The result is carried to exit, so the
-    // refusal is visible from outside rather than merely believed.
+    // Ask who we are. With Linux linked in this is answered by Linux's own
+    // sys_getpid, on nk. Without it, by nk's two-entry table, which does not
+    // implement 172 and says so.
+    mov     x8, #172                // __NR_getpid
+    svc     #0
+    mov     x19, x0
+
+    // Then something the kernel must refuse: 0x40080000 is the kernel's own
+    // image. Whoever answers, a user pointer into kernel memory has to come
+    // back as an error rather than as the kernel's first instructions.
     mov     x0, #1
     movz    x1, #0x4008, lsl #16
     mov     x2, #8
     mov     x8, #64                 // __NR_write
     svc     #0
-    neg     x19, x0                 // 14 if it was refused with -EFAULT
+    neg     x20, x0
 
-    // Then something it should allow.
+    // And something it should allow.
     mov     x0, #1                  // fd 1
     adr     x1, 1f                  // buf, PC-relative
     mov     x2, 2f - 1f             // len
     mov     x8, #64                 // __NR_write
     svc     #0
 
-    mov     x0, x19                 // status: the errno from the refused write
+    // Exit with the pid, so the answer is visible from outside.
+    mov     x0, x19
     mov     x8, #93                 // __NR_exit
     svc     #0
 

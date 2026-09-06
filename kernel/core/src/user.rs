@@ -128,15 +128,47 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         crate::stop();
     }
 
+    // Process lifetime is nk's, everything else is Linux's.
+    //
+    // `exit` cannot go to Linux: it would end a *Linux* task, and nk's EL0
+    // process is not one -- it is a set of nk page tables and an exception
+    // frame that Linux has never heard of. Passing it through terminates
+    // Linux's init instead and never returns, which is exactly what happened.
+    //
+    // That split is the honest state of things. nk owns processes; Linux owns
+    // everything a process asks for. Joining the two properly means each nk
+    // process being backed by a Linux task, which is what `fork` and `execve`
+    // would need anyway.
+    if matches!(frame.x[8], 93 | 94) {
+        sys_exit(frame.x[0] as i32);
+    }
+
+    // Where the rest joins up.
+    //
+    // With Linux linked in, the process's `svc` is answered by Linux itself --
+    // its own sys_getpid, its own VFS, its own network stack -- rather than by
+    // nk's two-entry table. That is the ABI: the numbers are Linux's because
+    // the binaries were compiled against Linux, and now so are the answers.
+    #[cfg(nk_lkl)]
+    let ret = {
+        let a = &frame.x;
+        crate::lkl::syscall(
+            frame.x[8] as i64,
+            [a[0] as i64, a[1] as i64, a[2] as i64, a[3] as i64, a[4] as i64, a[5] as i64],
+        )
+    };
+    #[cfg(not(nk_lkl))]
     let ret = syscall(frame.x[8], &frame.x[..6]);
+
     frame.x[0] = ret as u64;
 }
 
-/// The syscall table. Two entries, and the numbers are Linux's.
+/// nk's own syscall table, used when Linux is not linked in. Two entries,
+/// and the numbers are Linux's -- see the note at the top of this file.
+#[cfg(not(nk_lkl))]
 fn syscall(nr: u64, args: &[u64]) -> i64 {
     match nr {
         64 => sys_write(args[0], args[1], args[2]),
-        93 => sys_exit(args[0] as i32),
         _ => {
             // Named rather than silently refused: the interesting question
             // from here on is *which* calls a real binary makes, and a log of
@@ -154,6 +186,7 @@ fn syscall(nr: u64, args: &[u64]) -> i64 {
 /// in. So it cannot simply be dereferenced, and the copy has to go through
 /// the process's own translation. That is `copy_from_user`, and this is the
 /// smallest possible version of it.
+#[cfg(not(nk_lkl))]
 fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
     if fd != 1 && fd != 2 {
         return -9; // -EBADF
@@ -162,7 +195,13 @@ fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
     let uart = crate::uart::console();
     while copied < count as usize {
         let Some(pa) = paging::user_to_phys(buf + copied as u64) else {
-            return if copied == 0 { -14 } else { copied as i64 }; // -EFAULT
+            if copied == 0 {
+                // Said out loud, because a refusal that only shows up as an
+                // errno in an exit status is a thing nobody reads.
+                println!("  refused a user pointer into kernel memory (EFAULT)");
+                return -14;
+            }
+            return copied as i64;
         };
         let byte = unsafe { core::ptr::read_volatile(pa as *const u8) };
         if byte == b'\n' {

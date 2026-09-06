@@ -157,131 +157,135 @@ desktop:
 - **User space — started.** A program runs at EL0 in its own address space and
   makes Linux system calls. See below.
 
-## Linux, linked into nk
-
-`ldk lkl` fetches LKL, builds it, and produces one archive. `run-kernel.sh
---lkl` links it:
+## Linux boots on nk, and answers system calls
 
 ```
-  nk with the whole Linux kernel inside it:  14,076,168 bytes
+[    0.000000] Linux version 6.12.0+ (gcc 14.2.0) #10
+[    0.000000] Memory: 62328K/65536K available
+[    0.000000] printk: legacy console [lkl_console0] enabled
+[    0.000000] NET: Registered PF_INET protocol family
+[    0.000000] io scheduler mq-deadline registered
+[    0.000000] Btrfs loaded, zoned=no
+[    0.000000] Run /init as init process
 
-  linux:  handing over the machine
-  linux:  starting the kernel
+Linux is up on nk. Asking it something:
+
+  getpid()  -> 1
+  gettid()  -> 24
+  getuid()  -> 0
+
+Now the same question from EL0:
+  entering EL0...
+
+  the process exited with status 1
 ```
 
-**Linux runs on nk.** It creates threads on nk's scheduler, takes nk's
-semaphores and mutexes, allocates from nk's frame allocator, and drives its
-clock off nk's timer. It does not finish booting yet -- see below -- but every
-primitive nk handed over is being used and works.
+That last number is the whole thing. **A process running at EL0, in its own
+page tables, executed `svc`; nk caught it; nk handed it to Linux; Linux's own
+`sys_getpid` answered; and the answer came back out through the process's exit
+status.** The chain from bare aarch64 to the Linux system-call ABI is closed.
 
-### How small the interface turned out to be
+Linux's memory is nk's frame allocator. Its threads are nk's scheduler. Its
+locks are nk's semaphores and mutexes. Its clock is nk's timer. Its console is
+nk's UART -- every line above arrived through `lkl_host_ops.print`.
+
+### How small the interface is
 
 `arch/lkl` is a real, maintained Linux architecture port. It is **5,168
 lines** -- against 26,636 for `arch/um` and 179,127 for `arch/arm64` --
 because its "hardware" is a struct of function pointers the host fills in.
 Built for aarch64 with `-mno-outline-atomics` it produces `lkl.o`: 19.7MB
-stripped, the entire kernel, with **two** undefined symbols.
+stripped, the entire kernel, with **two** undefined symbols, `lkl_bug` and
+`lkl_printf`.
+
+`kernel/lkl/nk-host.c` is 288 lines and supplies those two plus the struct.
+`kernel/core/src/hostops.rs` is nk's half. For comparison,
+`kernel/linux/emul/` -- the driver shim -- is about two thousand lines and
+grows with every driver ported. **This does not grow at all.**
+
+### The bug that mattered
+
+Everything blocked, forever, with no output. The wait graph -- which is why
+nk's semaphores now carry identities and the watchdog prints them -- showed a
+state the code plainly could not produce:
 
 ```
-  lkl_bug
-  lkl_printf
+sem 6   count 1    waiters 0b00010000
 ```
 
-`kernel/lkl/nk-host.c` is 288 lines and supplies those two plus the struct:
-threads, semaphores, mutexes, thread-local storage, memory, pages, time,
-one-shot timers, ioremap, and setjmp. `kernel/core/src/hostops.rs` is nk's
-half. Combined, what remains unresolved is thirty nk symbols and `memcpy`,
-which is Rust's `compiler_builtins`.
+A semaphore holding a token, with somebody still waiting for it.
 
-That is the whole integration. For comparison, `kernel/linux/emul/` -- the
-driver shim -- is about two thousand lines and grows with every driver
-ported. This does not grow at all.
+`Semaphore::down` blocks in the middle of its own critical section: it holds a
+reference to the semaphore across a context switch while another task mutates
+the same object through a reference of its own. Written with `&mut self` that
+is aliasing undefined behaviour, and **the compiler acts on it** -- it keeps
+`count` in a register across the switch and re-tests the stale value when the
+task resumes. The task then blocks again on a semaphore that was raised while
+it slept.
 
-### What it cost to link
+The fix is `AtomicI32`/`AtomicU64` and `&self`. The lesson is more general
+than the bug: **a synchronisation primitive cannot be written with `&mut`.**
+Exclusive access is exactly the thing it does not have, and Rust is entitled
+to believe the signature.
 
-**Linux's sections are load-bearing.** It does not merely put code in `.text`;
-it builds tables *by section* and refers to their bounds by symbols the linker
-script must define -- `__start_notes`, `__per_cpu_start`, `__start___ex_table`.
-A script that discards one of those does not produce a missing symbol; it
-produces "relocation refers to a symbol in a discarded section", which names
-the section and not the reason. `linker.ld` gathers them now, with the
-boundary symbols Linux's own `vmlinux.lds` defines around each.
+### The others, in the order they were found
 
-**FP and SIMD had to be enabled.** `CPACR_EL1.FPEN` is zero out of reset, and
-nk never needed it -- nk is built `-mgeneral-regs-only`. Linux's generic code
-uses SIMD freely, and a `memcpy` is enough. nk does not save or restore those
-registers across a context switch, which is correct only while nothing holds
-live FP state across one; the moment user space runs floating-point code,
-`cpu_switch` has to grow the other 512 bytes.
-
-**A timer callback must not run in interrupt context.** This is the one that
-cost real time and it is worth stating as a rule. Linux's timer callback goes
-back into Linux, and Linux takes mutexes; a mutex nk cannot grant blocks the
-caller, and blocking inside an interrupt handler marks the *interrupted* task
-blocked and switches away from a stack that is halfway through an exception.
-Nothing reports it -- the machine simply stops making progress, which is
-exactly how it presented. `tick_timers` now records what is due and wakes a
-thread; the thread runs the callbacks, where blocking is allowed.
-
-**Divide before multiplying.** `delta_ns * HZ / 1_000_000_000` overflows a u64
-for a long timeout, and the wrapped deadline lands in the past or the far
-future. Neither fires, and a Linux whose clock has stopped does not report
-anything -- it just stops.
-
-### Where it stops, and what is known about it
-
-Linux reaches `rest_init` -- it creates `kernel_init`, `kthreadd` and
-`idle_host_task`, which is nearly the end of `start_kernel` -- and then every
-thread blocks and nothing moves again:
-
-```
-  watchdog 0 at 100 ticks: armed=1 due=1 fired=1
-          [0] boot       blocked   0 slices
-          [1] timers     blocked   2 slices
-          [2] watchdog   running   3 slices
-          [3] linux      blocked   1 slices     <- lkl_run_kernel
-          [4] linux      blocked   1 slices
-          [5] linux      blocked   1 slices
-          [6] linux      blocked   1 slices
-```
-
-There is no console output because LKL registers its console at
-`early_initcall`, which runs inside `kernel_init` -- and `kernel_init` is one
-of the threads that never runs. `CONFIG_LKL_EARLY_CONSOLE=y` is set and does
-not help for the same reason: it is early relative to `initcalls`, not to
-`start_kernel`.
-
-Three real bugs were found and fixed on the way here, and none of them was
-this one:
-
-**LKL uses thread ID zero as "nobody owns the CPU".** `lkl_cpu_get` tests `if
+**LKL uses thread id zero as "nobody owns the CPU".** `lkl_cpu_get` tests `if
 (cpu.owner && !thread_equal(cpu.owner, self))`. nk numbers tasks from zero, so
-the boot task -- the one that takes the CPU first -- was indistinguishable
-from no owner at all. `nk-host.c` offsets every thread id by one. Nothing
-reports a sentinel collision; it presents as a kernel that stops.
+the boot task -- the first to take the CPU -- was indistinguishable from no
+owner at all. `nk-host.c` offsets every id by one. Nothing reports a sentinel
+collision.
 
-**A counting semaphore must wake exactly one waiter.** nk's woke all of them
-and let the losers re-check, which looks harmless. It is not: a caller that
-counts its own sleepers -- one `up` per sleeper, which is exactly how LKL's
-CPU lock is written -- sees every spurious wakeup re-enter the wait loop and
-increment that count again, until the ups and downs no longer match.
+**A counting semaphore must wake exactly one waiter.** Waking all of them and
+letting the losers re-check looks harmless. It is not: LKL counts its own
+sleepers, one `up` per sleeper, and every spurious wakeup re-enters the wait
+loop and increments that count again.
 
 **A timer callback must not run in interrupt context.** Linux's callback
 re-enters Linux and Linux takes mutexes; a mutex nk cannot grant blocks the
 caller, and blocking inside an interrupt handler marks the *interrupted* task
 blocked and switches away from a stack halfway through an exception.
 
-What is left is a wait graph, not a mystery: every thread is blocked on a
-semaphore and the question is which, and who was supposed to raise it. nk's
-`Semaphore` needs to record its waiters' identities so the watchdog can print
-that graph. Likely candidates in order: LKL switches Linux tasks by
-`sem_up`ing the next task's `sched_sem` and `sem_down`ing its own, so a lost
-wakeup there stops everything; `thread_stack` is a host operation nk does not
-provide; and `jmp_buf_set`/`longjmp`, which `lkl_cpu_put` uses to hand the CPU
-between host threads, is nk's own assembly and has never been exercised.
+**Divide before multiplying.** `delta_ns * HZ / 1_000_000_000` overflows a u64
+for a long timeout and the wrapped deadline lands in the past or the far
+future. Neither fires, and a Linux whose clock has stopped reports nothing.
 
-None of that is the hard part any more. The hard part was whether the whole
-Linux kernel would link into nk at all, and it does.
+**Sixteen task slots is nk's number, not Linux's.** Linux creates two dozen
+kernel threads before anything useful runs. Sixty-four now, and the waiter
+bitmask widened to match -- a task whose slot is past the end of that mask can
+be blocked and never woken.
+
+**Linux's sections are load-bearing.** It builds tables *by section* and
+refers to their bounds by symbols the linker script must define --
+`__start_notes`, `__per_cpu_start`, `__start___ex_table`. Discarding one does
+not give a missing symbol; it gives "relocation refers to a symbol in a
+discarded section", which names the section and not the reason.
+
+**FP and SIMD had to be enabled.** `CPACR_EL1.FPEN` is zero out of reset and
+nk never needed it -- nk is built `-mgeneral-regs-only`. Linux's generic code
+uses SIMD freely, and a `memcpy` is enough. nk does not save those registers
+across a context switch, which is correct only while nothing holds live FP
+state across one.
+
+### What is true, and what is not, about the process boundary
+
+`exit` is nk's, not Linux's. Passing it through ends a *Linux* task, and nk's
+EL0 process is not one -- it is a set of nk page tables and an exception frame
+Linux has never heard of. That split is the honest state of things: nk owns
+processes, Linux owns everything a process asks for.
+
+And a real limitation worth stating before it is discovered: **Linux, under
+LKL, believes it is in a single flat address space.** Its `copy_from_user` is
+a `memcpy`. So the user/kernel separation nk enforces with `AT S1E0R` is
+nk's alone -- Linux will not check a pointer for us, and every syscall that
+takes one has to be checked on nk's side before it is passed through.
+
+### What is next
+
+An ELF loader and a filesystem, so the program is a file rather than a hundred
+bytes of assembly in the kernel image. Then each nk process needs to be backed
+by a Linux task, which is what `fork` and `execve` need anyway. After that the
+desktop is configuration rather than construction.
 
 ## The 203 symbols: what borrowing everything actually costs
 
