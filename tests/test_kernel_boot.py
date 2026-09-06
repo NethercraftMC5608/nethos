@@ -327,19 +327,28 @@ class LinuxOnNk(unittest.TestCase):
         self.assertRegex(self.out, r'getpid\(\)\s+-> 1')
         self.assertRegex(self.out, r'getuid\(\)\s+-> 0')
 
-    def test_a_process_at_el0_reaches_linux(self):
-        # The whole chain: nk boots the machine, Linux boots on nk, a process
-        # runs at EL0 in its own address space, makes an svc, nk catches it,
-        # Linux answers, and the answer comes back out as the exit status.
-        # 1 is the pid -- from Linux's own sys_getpid.
-        self.assertIn('entering EL0', self.out)
-        self.assertIn('the process exited with status 1', self.out)
+    def test_each_el0_process_has_its_own_linux_task(self):
+        tasks = re.findall(r'process: nk (\d+) Linux pid (\d+) tid (\d+)', self.out)
+        self.assertEqual(len(tasks), 2, self.out)
+        self.assertNotEqual(tasks[0][0], tasks[1][0])
+        self.assertNotEqual(tasks[0][1], tasks[1][1])
+        for _, pid, tid in tasks:
+            self.assertGreater(int(pid), 1)
+            self.assertEqual(pid, tid)
+            self.assertIn(f'the process exited with status {pid}', self.out)
+
+    def test_private_linux_state_and_task_cleanup(self):
+        self.assertIn('distinct PIDs, private files/fs, both Linux tasks reaped', self.out)
+        self.assertIn('parent: Linux init survived both exits', self.out)
+        self.assertIn('nk page tables, pages and task stacks reclaimed', self.out)
+
+    def test_user_address_spaces_survive_preemption(self):
+        self.assertRegex(self.out, r'EL0 IRQs [1-9]\d* and [1-9]\d*, private stacks survived')
+        self.assertNotIn('the process exited with status 99', self.out)
 
     def test_elf_is_loaded_through_linux_vfs(self):
-        self.assertRegex(self.out, r'rootfs: /nk-init read back through Linux VFS \(\d+ bytes\)')
-        self.assertIn('ELF: 1 PT_LOAD segment(s)', self.out)
-        # The program exits 99 if its BSS, EFAULT or ENOSYS assertions fail.
-        self.assertIn('the process exited with status 1', self.out)
+        self.assertEqual(self.out.count('rootfs: /nk-init read back through Linux VFS'), 2)
+        self.assertEqual(self.out.count('ELF: 1 PT_LOAD segment(s)'), 2)
 
     def test_lkl_user_pointer_boundary(self):
         self.assertIn('refused a user pointer into kernel memory (EFAULT)', self.out)

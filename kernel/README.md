@@ -44,3 +44,7 @@ kernel. `docs/KERNEL.md` is honest about how far that is.
 `--lkl` also loads an ELF fixture from Linux's memory-backed rootfs through
 its VFS. The fixture checks BSS and pointer rejection before printing at EL0.
 This is a bootstrap executable, not yet support for ordinary desktop binaries.
+
+Each launched LKL process now owns a Linux thread-group leader with a private
+file-descriptor table and filesystem context. The boot test runs two ELF
+processes under timer preemption and checks their identities and cleanup.

@@ -106,3 +106,22 @@ pub fn read_file(path: &core::ffi::CStr) -> Result<alloc::vec::Vec<u8>, i64> {
     }
     result
 }
+
+/// Must be the first LKL call on a fresh nk thread. LKL's private syscall
+/// 245 (arch_specific_syscall + 1) creates a thread-group leader via TLS.
+/// It still shares fs/files with host0 until Linux unshare separates them.
+pub fn attach_process() -> Result<i64, i64> {
+    let rc = syscall(245, [0; 6]);
+    if rc < 0 {
+        return Err(rc);
+    }
+    let rc = syscall(97, [0x200 | 0x400, 0, 0, 0, 0, 0]);
+    if rc < 0 {
+        return Err(rc);
+    }
+    let pid = syscall(172, [0; 6]);
+    if pid <= 1 || pid != syscall(178, [0; 6]) {
+        return Err(-22);
+    }
+    Ok(pid)
+}

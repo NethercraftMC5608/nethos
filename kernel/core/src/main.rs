@@ -148,8 +148,33 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             // EL0 makes an `svc`, nk catches it, and Linux answers.
             println!();
             println!("Now the same question from EL0:");
-            let p = user::spawn_from_rootfs().expect("cannot load rootfs executable");
-            user::run(&p);
+            let first = user::spawn_from_rootfs().expect("cannot load rootfs executable");
+            let second = user::spawn_from_rootfs().expect("cannot load rootfs executable");
+            let parent_mask = lkl::syscall(166, [0o22,0,0,0,0,0]);
+            let fd = lkl::syscall(56, [-100,c"/nk-init".as_ptr() as i64,0,0,0,0]);
+            assert!(fd >= 0);
+            selftest::process_descriptor(fd);
+            let a = user::launch(first, Some(selftest::process_context));
+            let b = user::launch(second, Some(selftest::process_context));
+            sched::join(a);
+            sched::join(b);
+            let pa = sched::linux_pid(a);
+            let pb = sched::linux_pid(b);
+            assert!(pa > 1 && pb > 1 && pa != pb);
+            assert_eq!(sched::exit_status(a), pa as i32);
+            assert_eq!(sched::exit_status(b), pb as i32);
+            assert_eq!(lkl::syscall(57, [fd,0,0,0,0,0]), 0);
+            assert_eq!(lkl::syscall(166, [parent_mask,0,0,0,0,0]), 0o22);
+            assert_eq!(lkl::syscall(129, [pa,0,0,0,0,0]), -3);
+            assert_eq!(lkl::syscall(129, [pb,0,0,0,0,0]), -3);
+            println!("  processes: distinct PIDs, private files/fs, both Linux tasks reaped");
+            assert_eq!(lkl::syscall(172, [0;6]), 1);
+            println!("  parent: Linux init survived both exits");
+            assert!(sched::user_irqs(a) > 0 && sched::user_irqs(b) > 0);
+            println!("  processes: EL0 IRQs {} and {}, private stacks survived", sched::user_irqs(a), sched::user_irqs(b));
+            sched::reap_process(a);
+            sched::reap_process(b);
+            println!("  processes: nk page tables, pages and task stacks reclaimed");
         }
         stop();
     }

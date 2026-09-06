@@ -310,16 +310,17 @@ the one below it.
       sixteen task slots where Linux wanted sixty-four.
 - [x] **EL0 `svc` routed to `lkl_syscall`.** A process at EL0, in its own page
       tables, asks `getpid` and Linux answers 1. The chain from bare aarch64
-      to the Linux ABI is closed. `exit` stays nk's, because nk's process is
-      not a Linux task.
+      to the Linux ABI is closed. Process exit now runs Linux task cleanup
+      through the host TLS destructor.
 - [x] **Filesystem-backed ELF bootstrap.** Linux rootfs/VFS stores and reads
       an embedded `/nk-init` ELF fixture; nk validates and maps its segments,
       zero-fills BSS and runs it at EL0. Persistent storage, external binaries
       and a complete process startup ABI are still outstanding.
-- [ ] **Back each nk process with a Linux task**, which is what `fork` and
-      `execve` need anyway. Note that LKL believes it is in one flat address
-      space -- its `copy_from_user` is a memcpy -- so every user pointer must
-      be checked on nk's side before it is passed through.
+- [x] **Back each launched nk process with a Linux task.** Dedicated host
+      threads request Linux thread-group leaders, unshare files/fs, retain
+      their identity through EL0 preemption, and release Linux tasks on exit.
+      The parent reclaims nk pages and stacks after joining. Fork, execve,
+      userspace signals and Linux wait-status propagation remain outstanding.
 - [ ] **Desktop runtime integration.** Normal binary addresses, dynamic
       linking, checked syscall buffers, signals, shared memory, futexes and
       DRM/device access must work before desktop configuration can be tested.

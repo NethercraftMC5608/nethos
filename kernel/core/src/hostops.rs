@@ -110,7 +110,6 @@ pub extern "C" fn nk_halt() -> ! {
     crate::halt()
 }
 
-
 /// # Safety
 /// `s` points at `len` readable bytes.
 #[no_mangle]
@@ -213,10 +212,7 @@ extern "C" fn trampoline(slot: usize) {
 /// # Safety
 /// `f` is a valid function and `arg` outlives the thread.
 #[no_mangle]
-pub unsafe extern "C" fn nk_thread_create(
-    f: unsafe extern "C" fn(*mut u8),
-    arg: *mut u8,
-) -> usize {
+pub unsafe extern "C" fn nk_thread_create(f: unsafe extern "C" fn(*mut u8), arg: *mut u8) -> usize {
     // The entry goes in *before* the task exists, and the slot index is what
     // is passed as the task's argument. Recording it afterwards would leave a
     // window in which a tick could run the trampoline against an empty slot.
@@ -250,26 +246,58 @@ pub extern "C" fn nk_thread_join(id: usize) -> i32 {
 
 // --- thread-local storage ------------------------------------------------
 
-/// One slot per key per task. Linux uses a handful of keys and nk has sixteen
-/// tasks, so a fixed table costs a kilobyte and removes an allocator from a
+/// One slot per key per task. A fixed table sized with the scheduler
+/// removes an allocator from a
 /// path the scheduler calls into.
 const MAX_KEYS: usize = 8;
 static mut TLS: [[*mut u8; MAX_KEYS]; sched::MAX_TASKS] =
     [[core::ptr::null_mut(); MAX_KEYS]; sched::MAX_TASKS];
 static mut KEYS_USED: usize = 0;
+static mut DESTRUCTORS: [Option<unsafe extern "C" fn(*mut u8)>; MAX_KEYS] = [None; MAX_KEYS];
 
 #[no_mangle]
-pub extern "C" fn nk_tls_alloc() -> usize {
+pub extern "C" fn nk_tls_alloc(destructor: Option<unsafe extern "C" fn(*mut u8)>) -> usize {
     unsafe {
         let k = KEYS_USED;
         assert!(k < MAX_KEYS, "out of TLS keys");
+        DESTRUCTORS[k] = destructor;
         KEYS_USED += 1;
         k
     }
 }
 
 #[no_mangle]
-pub extern "C" fn nk_tls_free(_key: usize) {}
+pub extern "C" fn nk_tls_free(key: usize) {
+    assert!(key < MAX_KEYS);
+    unsafe {
+        DESTRUCTORS[key] = None;
+        for id in 0..sched::MAX_TASKS {
+            TLS[id][key] = core::ptr::null_mut();
+        }
+    }
+}
+
+/// Called on the exiting host thread. Clear before invoking: LKL's callback
+/// switches Linux tasks and may schedule, so no TLS borrow can span it.
+pub fn tls_cleanup() {
+    for _ in 0..4 {
+        for key in 0..MAX_KEYS {
+            let (value, destructor) = unsafe {
+                let id = sched::current_id();
+                let value = TLS[id][key];
+                TLS[id][key] = core::ptr::null_mut();
+                (value, DESTRUCTORS[key])
+            };
+            if let Some(destructor) = destructor {
+                if !value.is_null() {
+                    unsafe {
+                        destructor(value);
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn nk_tls_set(key: usize, value: *mut u8) -> i32 {
@@ -313,7 +341,11 @@ pub extern "C" fn nk_timer_alloc(fire: extern "C" fn()) -> usize {
         let timers = &mut *(&raw mut TIMERS);
         for (i, slot) in timers.iter_mut().enumerate() {
             if slot.is_none() {
-                *slot = Some(OneShot { deadline: 0, armed: false, fire });
+                *slot = Some(OneShot {
+                    deadline: 0,
+                    armed: false,
+                    fire,
+                });
                 return i;
             }
         }

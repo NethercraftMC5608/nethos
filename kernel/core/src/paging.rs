@@ -345,3 +345,28 @@ pub unsafe fn init(ram_base: u64, ram_size: u64) {
     );
     assert!(check & 1 == 1, "the MMU did not come on");
 }
+
+/// Kernel threads always use the kernel root, never a process's mappings.
+pub fn kernel_address_space() -> u64 { &raw const L0 as u64 }
+
+/// Reclaim the private user subtree, then the copied root. The remaining
+/// root entries belong to the kernel and must not be freed.
+/// # Safety
+/// This is a finished, single-threaded process's inactive address space,
+/// created by new_address_space/map_user in USER_BASE's top-level slot only.
+pub unsafe fn destroy_user_address_space(root: u64) {
+    unsafe fn free_table(table: *mut u64, level: usize) {
+        for i in 0..512 {
+            let entry = *table.add(i);
+            if entry & 1 == 0 { continue; }
+            let child = (entry & 0x0000_ffff_ffff_f000) as *mut u64;
+            if level < 3 { free_table(child, level+1); }
+            else { crate::frames::free(child as *mut u8); }
+        }
+        crate::frames::free(table as *mut u8);
+    }
+    assert_ne!(root, kernel_address_space());
+    let entry = *(root as *const u64).add((crate::user::USER_BASE >> 39) as usize);
+    if entry & 1 != 0 { free_table((entry & 0x0000_ffff_ffff_f000) as *mut u64, 1); }
+    crate::frames::free(root as *mut u8);
+}

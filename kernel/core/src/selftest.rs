@@ -156,3 +156,23 @@ pub fn run() {
         panic!("{} self-test failures", failures);
     }
 }
+
+#[cfg(nk_lkl)]
+static PROCESS_FD: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(-1);
+
+#[cfg(nk_lkl)]
+pub fn process_descriptor(fd: i64) {
+    PROCESS_FD.store(fd, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Runs on each newly attached process before EL0. Closing an inherited
+/// descriptor and changing umask must affect neither the parent nor sibling.
+#[cfg(nk_lkl)]
+pub fn process_context(pid: i64) {
+    let fd = PROCESS_FD.load(core::sync::atomic::Ordering::SeqCst);
+    assert_eq!(crate::lkl::syscall(57, [fd,0,0,0,0,0]), 0);
+    let mask = pid & 0o777;
+    crate::lkl::syscall(166, [mask,0,0,0,0,0]);
+    crate::sched::yield_now();
+    assert_eq!(crate::lkl::syscall(166, [mask,0,0,0,0,0]), mask);
+}

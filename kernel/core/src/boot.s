@@ -176,12 +176,8 @@ __vectors:
     VENTRY 6        // current EL, SPx:  FIQ
     VENTRY 7        // current EL, SPx:  SError
     VENTRY_EL0_SYNC // lower EL, AArch64: synchronous  <- system calls
-    // Deliberately not irq_entry. An interrupt from a lower EL arrives with
-    // SP still pointing at the user stack, and irq_entry pushes its frame
-    // wherever SP happens to be. There is no EL0 yet, so this cannot fire --
-    // and when there is one, this has to become a handler that swaps stacks
-    // first rather than a line someone changes without noticing.
-    VENTRY 9        // lower EL, AArch64: IRQ
+    .balign 128
+    b       el0_irq_entry // same full user frame as SVC, on SP_EL1
     VENTRY 10       // lower EL, AArch64: FIQ
     VENTRY 11       // lower EL, AArch64: SError
     VENTRY 12       // lower EL, AArch32: synchronous

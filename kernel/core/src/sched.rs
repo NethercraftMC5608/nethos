@@ -1,9 +1,8 @@
 //! Threads, and a round robin over them.
 //!
-//! Kernel threads only: one address space, no user mode, no priorities. That
-//! is not a placeholder for something better -- it is what the drivers need.
-//! Linux's `kthread`, workqueues and the softirq machinery all sit on exactly
-//! this, and Stage 3's shim will map onto it directly.
+//! Kernel threads and single-threaded EL0 processes share the scheduler.
+//! Each task retains its translation root; Linux task ownership lives in
+//! the host TLS associated with that same nk thread.
 //!
 //! Preemptive, from the timer interrupt. Cooperative scheduling would be less
 //! code and would be a trap: a driver that spins waiting for a device would
@@ -73,6 +72,10 @@ pub struct Task {
     /// What this task is blocked on, when it is blocked: the id of a
     /// semaphore or mutex. Zero when it blocked for some other reason.
     pub waiting_on: u32,
+    pub ttbr0: u64,
+    pub linux_pid: i64,
+    pub exit_status: i32,
+    pub user_irqs: u64,
 }
 
 static mut TASKS: [Task; MAX_TASKS] = [Task {
@@ -83,6 +86,10 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     name: "",
     slices: 0,
     waiting_on: 0,
+    ttbr0: 0,
+    linux_pid: 0,
+    exit_status: 0,
+    user_irqs: 0,
 }; MAX_TASKS];
 
 static mut CURRENT: usize = 0;
@@ -158,43 +165,62 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             name,
             slices: 0,
             waiting_on: 0,
+            ttbr0: 0,
+            linux_pid: 0,
+            exit_status: 0,
+            user_irqs: 0,
         };
+        tasks[slot].ttbr0 = crate::paging::kernel_address_space();
         slot
     }
 }
 
 pub fn schedule() {
+    let flags = crate::sync::irq_save();
     unsafe {
-        let tasks = &mut *(&raw mut TASKS);
+        // No exclusive reference survives cpu_switch: another task mutates
+        // this table while the outgoing one sleeps.
         let cur = CURRENT;
-
-        // Round robin: start looking after the current slot, so a task cannot
-        // starve the ones behind it by being ready every time.
         let mut next = None;
         for i in 1..=MAX_TASKS {
-            let c = (cur + i) % MAX_TASKS;
-            if tasks[c].state == State::Ready {
-                next = Some(c);
+            let candidate = (cur + i) % MAX_TASKS;
+            if TASKS[candidate].state == State::Ready {
+                next = Some(candidate);
                 break;
             }
         }
-        let Some(next) = next else { return };
-
-        if tasks[cur].state == State::Running {
-            tasks[cur].state = State::Ready;
+        if let Some(next) = next {
+            if TASKS[cur].state == State::Running {
+                TASKS[cur].state = State::Ready;
+            }
+            TASKS[next].state = State::Running;
+            TASKS[next].slices += 1;
+            core::arch::asm!("mrs {}, ttbr0_el1", out(reg) TASKS[cur].ttbr0, options(nostack));
+            CURRENT = next;
+            set_shadow(TASKS[next].shadow);
+            core::arch::asm!("msr ttbr0_el1, {}", "dsb ishst", "tlbi vmalle1", "dsb ish", "isb",
+                in(reg) TASKS[next].ttbr0, options(nostack));
+            cpu_switch(&raw mut TASKS[cur].sp, TASKS[next].sp);
         }
-        tasks[next].state = State::Running;
-        tasks[next].slices += 1;
-        CURRENT = next;
-
-        // Before the switch, not after: cpu_switch does not return here, it
-        // returns into the incoming task, which may be Linux code that reads
-        // its stack canary through SP_EL0 in its very first instruction.
-        set_shadow(tasks[next].shadow);
-
-        let prev_sp: *mut usize = &raw mut tasks[cur].sp;
-        cpu_switch(prev_sp, tasks[next].sp);
+        crate::sync::irq_restore(flags);
     }
+}
+
+pub fn bind_linux_pid(pid: i64) {
+    unsafe {
+        TASKS[CURRENT].linux_pid = pid;
+    }
+}
+pub fn linux_pid(id: usize) -> i64 {
+    unsafe { TASKS[id].linux_pid }
+}
+pub fn set_exit_status(status: i32) {
+    unsafe {
+        TASKS[CURRENT].exit_status = status;
+    }
+}
+pub fn exit_status(id: usize) -> i32 {
+    unsafe { TASKS[id].exit_status }
 }
 
 /// Give up the rest of this slice.
@@ -277,6 +303,7 @@ pub fn exit_current() -> ! {
 /// Called by task_start when a task's entry function returns.
 #[no_mangle]
 pub extern "C" fn task_exit() -> ! {
+    crate::hostops::tls_cleanup();
     unsafe {
         let tasks = &mut *(&raw mut TASKS);
         tasks[CURRENT].state = State::Finished;
@@ -322,9 +349,39 @@ pub fn report() {
                         i, t.name, s, t.slices, t.waiting_on
                     );
                 } else {
-                    println!("          [{}] {:<10} {:<9} {} slices", i, t.name, s, t.slices);
+                    println!(
+                        "          [{}] {:<10} {:<9} {} slices",
+                        i, t.name, s, t.slices
+                    );
                 }
             }
         }
     }
+}
+
+/// Reap only a joined process task. Its stack is now inactive and its TLS
+/// destructors have already released the Linux task.
+pub fn reap_process(id: usize) {
+    let flags = crate::sync::irq_save();
+    unsafe {
+        assert_ne!(id, CURRENT);
+        let task = TASKS[id];
+        assert!(task.state == State::Finished && task.linux_pid > 1);
+        crate::paging::destroy_user_address_space(task.ttbr0);
+        for i in 0..STACK_PAGES {
+            frames::free((task.stack + i * PAGE) as *mut u8);
+        }
+        frames::free(task.shadow as *mut u8);
+        TASKS[id].state = State::Unused;
+        crate::sync::irq_restore(flags);
+    }
+}
+
+pub fn record_user_irq() {
+    unsafe {
+        TASKS[CURRENT].user_irqs += 1;
+    }
+}
+pub fn user_irqs(id: usize) -> u64 {
+    unsafe { TASKS[id].user_irqs }
 }

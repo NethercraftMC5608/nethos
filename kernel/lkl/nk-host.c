@@ -43,7 +43,7 @@ unsigned long nk_thread_self(void);
 void nk_thread_exit(void);
 int nk_thread_join(unsigned long id);
 
-unsigned long nk_tls_alloc(void);
+unsigned long nk_tls_alloc(void (*destructor)(void *));
 void nk_tls_free(unsigned long key);
 int nk_tls_set(unsigned long key, void *value);
 void *nk_tls_get(unsigned long key);
@@ -126,12 +126,7 @@ static int host_thread_equal(lkl_thread_t a, lkl_thread_t b) { return a == b; }
 
 static struct lkl_tls_key *host_tls_alloc(void (*destructor)(void *))
 {
-	/* Destructors are not run. nk's threads are kernel threads that live
-	 * for the life of the machine, so a key's value is never reclaimed --
-	 * a leak bounded by the number of keys times the number of threads,
-	 * and one that would matter the moment threads came and went. */
-	(void)destructor;
-	return (struct lkl_tls_key *)(nk_tls_alloc() + 1);
+	return (struct lkl_tls_key *)(nk_tls_alloc(destructor) + 1);
 }
 
 static void host_tls_free(struct lkl_tls_key *key)

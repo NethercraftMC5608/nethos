@@ -12,7 +12,8 @@
 //! Inventing a cleaner numbering would be inventing a system that nothing can
 //! be run on, which is the whole thing being avoided.
 //!
-//! One bootstrap process, no fork, exec replacement, signals or teardown.
+//! Each LKL process has a dedicated nk thread and Linux task.
+//! Fork, exec replacement and userspace signals are not implemented.
 //! LKL builds load an ELF fixture through Linux's rootfs; standalone builds
 //! retain the raw smoke-test program. Neither supports a desktop runtime yet.
 
@@ -89,6 +90,11 @@ pub fn spawn() -> Process {
 
 /// Run it. Does not return: every way out of EL0 is through a vector.
 pub fn run(p: &Process) -> ! {
+    #[cfg(nk_lkl)]
+    assert!(
+        crate::sched::linux_pid(crate::sched::current_id()) > 1,
+        "EL0 must run on an attached Linux process thread"
+    );
     println!();
     println!("  entering EL0...");
     println!();
@@ -131,20 +137,11 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // nothing else to run yet, so it stops -- but reporting it as a user
         // fault rather than a kernel one is the distinction the whole
         // privilege boundary exists to make.
-        crate::stop();
+        sys_exit(-11);
     }
 
-    // Process lifetime remains nk's.
-    //
-    // `exit` cannot go to Linux: it would end a *Linux* task, and nk's EL0
-    // process is not one -- it is a set of nk page tables and an exception
-    // frame that Linux has never heard of. Passing it through terminates
-    // Linux's init instead and never returns, which is exactly what happened.
-    //
-    // nk owns processes and explicitly exposes selected Linux services.
-    // Joining the two properly means each nk
-    // process being backed by a Linux task, which is what `fork` and `execve`
-    // would need anyway.
+    // nk owns the exit status; the host TLS destructor performs Linux's
+    // do_exit for this process's backing task before the nk thread finishes.
     if matches!(frame.x[8], 93 | 94) {
         sys_exit(frame.x[0] as i32);
     }
@@ -203,6 +200,12 @@ fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
 fn sys_exit(status: i32) -> ! {
     println!();
     println!("  the process exited with status {}", status);
+    #[cfg(nk_lkl)]
+    {
+        crate::sched::set_exit_status(status);
+        crate::sched::exit_current()
+    }
+    #[cfg(not(nk_lkl))]
     crate::stop()
 }
 
@@ -297,4 +300,39 @@ unsafe fn publish_code(start: *mut u8, len: usize) {
         core::arch::asm!("dc cvau, {}", in(reg) address, options(nostack));
     }
     core::arch::asm!("dsb ish", "ic iallu", "dsb ish", "isb", options(nostack));
+}
+
+#[cfg(nk_lkl)]
+pub fn launch(p: Process, prepare: Option<fn(i64)>) -> usize {
+    let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new((p, prepare))) as usize;
+    let flags = crate::sync::irq_save();
+    let id = crate::sched::spawn("process", process_entry, arg);
+    unsafe {
+        crate::sync::irq_restore(flags);
+    }
+    id
+}
+
+#[cfg(nk_lkl)]
+extern "C" fn process_entry(arg: usize) {
+    let (p, prepare) =
+        *unsafe { alloc::boxed::Box::from_raw(arg as *mut (Process, Option<fn(i64)>)) };
+    let pid = crate::lkl::attach_process().expect("Linux process attach failed");
+    crate::sched::bind_linux_pid(pid);
+    println!(
+        "  process: nk {} Linux pid {} tid {}",
+        crate::sched::current_id(),
+        pid,
+        crate::lkl::syscall(178, [0; 6])
+    );
+    if let Some(prepare) = prepare {
+        prepare(pid);
+    }
+    run(&p);
+}
+
+#[no_mangle]
+pub extern "C" fn rust_el0_irq() {
+    crate::sched::record_user_irq();
+    crate::exceptions::rust_irq();
 }

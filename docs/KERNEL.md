@@ -269,10 +269,33 @@ state across one.
 
 ### What is true, and what is not, about the process boundary
 
-`exit` is nk's, not Linux's. Passing it through ends a *Linux* task, and nk's
-EL0 process is not one -- it is a set of nk page tables and an exception frame
-Linux has never heard of. That split is the honest state of things: nk owns
-processes; Linux provides the services nk explicitly exposes.
+Every launched EL0 process now has a dedicated nk scheduler thread and a
+Linux thread-group leader. Its first LKL call is the existing private
+`new_thread_group_leader` syscall (245); calling getpid first would instead
+attach it as a thread of init. Linux `unshare(CLONE_FS | CLONE_FILES)` then
+separates its descriptor table and filesystem context from init. PID equals
+TID for these single-threaded processes, and the binding stays in host TLS
+through syscall and scheduler switches.
+
+`exit` records the status in nk, runs LKL's TLS destructor on the owning host
+thread, and finishes that nk thread. The destructor invokes Linux `do_exit`
+and Linux reaps the backing task. nk's joining parent can then reclaim the
+user pages, private page tables, kernel stack and scheduler slot. The real
+exit status currently belongs to nk; LKL's destructor uses `do_exit(0)`.
+Linux wait4 status propagation is not implemented.
+
+The scheduler saves/restores TTBR0 and IRQ state across switches. EL0 IRQs
+save the full integer exception frame and user SP before entering the timer
+handler. Kernel threads use the kernel root, so they cannot retain a reaped
+process's mappings. Two concurrent ELF fixtures store different PIDs at the
+same user stack address, survive timer preemption, and exit with their own
+PIDs. The boot checks also verify independent descriptor tables and umasks,
+ESRCH for both exited Linux PIDs, and that init survives both exits.
+
+This reuses LKL's existing task lifecycle; it does not implement fork or
+execve. LKL's memory and signal-handler sharing remain its host-task model;
+user signals, FP/SIMD context, ordinary binary startup and child inheritance
+from arbitrary nk parents still need integration.
 
 And a real limitation worth stating before it is discovered: **Linux, under
 LKL, believes it is in a single flat address space.** Its `copy_from_user` is
@@ -311,8 +334,8 @@ and keeps the standalone and driver-shim boot paths covered.
 ### What is next
 
 Attach a persistent root device to LKL, support normal executable addresses
-and startup state, marshal file and memory syscalls, and give processes
-independent Linux state. Dynamic linking, signals, shared memory, futexes,
+and startup state, marshal file and memory syscalls, and extend process
+inheritance beyond the bootstrap parent. Dynamic linking, signals, shared memory, futexes,
 thread register state and DRM/device access still require integration and
 validation. A working PID call and ELF fixture do not establish desktop
 compatibility or GPU acceleration.
