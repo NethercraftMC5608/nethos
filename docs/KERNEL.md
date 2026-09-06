@@ -157,6 +157,89 @@ desktop:
 - **User space — started.** A program runs at EL0 in its own address space and
   makes Linux system calls. See below.
 
+## The 203 symbols: what borrowing everything actually costs
+
+This measurement changed the plan, and it was made because the question was
+asked twice and the answer given was wrong. It is recorded in full because it
+is the most important number in the project.
+
+**Take all of it.** Build Linux's `mm/`, `fs/`, `kernel/`, `block/`,
+`net/core/`, `lib/`, `ipc/` and `security/` for arm64 -- 1219 objects, about
+3.8 million lines, defining 15,899 symbols. Then ask what is still unresolved:
+
+```
+  unresolved after taking all of that:            932
+  of which arch/arm64 supplies:                   203   <- the whole contract
+```
+
+**203 symbols is the entire interface between Linux and the machine it runs
+on.** Everything above it -- the VFS, ext4, the page cache, the scheduler, the
+network stack, the syscall layer, every binary's ABI -- comes for free once
+those are answered.
+
+And the 203 are not evenly weighted. Well over half are features that can be
+declined outright:
+
+| group | examples | needed for a desktop? |
+| --- | --- | --- |
+| hibernation | `swsusp_arch_suspend`, `arch_hibernation_header_save` | no |
+| kexec / crash dumps | `machine_kexec`, `copy_oldmem_page` | no |
+| hardware breakpoints | `arch_install_hw_breakpoint`, `hw_breakpoint_slots` | no |
+| memory tagging | `mte_sync_tags`, `mte_invalidate_tags` | no |
+| SVE / SME | `sve_set_current_vl`, `sme_do_dvmsync` | no |
+| pointer auth | `ptrauth_set_enabled_keys` | no |
+| 32-bit compat | `compat_arch_ptrace`, `aarch32_setup_additional_pages` | no |
+| contiguous PTEs | `contpte_set_ptes` and eleven siblings | no, an optimisation |
+| huge pages | `huge_pte_alloc`, `pmd_set_huge` | not at first |
+| perf and stack walking | `perf_reg_value`, `arch_stack_walk` | no |
+
+What is genuinely required is perhaps sixty functions, and nk already has the
+hard ones in some form: page tables, a context switch, user address spaces,
+`copy_from_user` through `AT S1E0R`, cache and TLB maintenance, an interrupt
+controller, a timer.
+
+**For scale**, the arch port that does exactly this and runs a full Linux
+userland is `arch/um` -- User Mode Linux:
+
+```
+  arch/um   91 C and assembly files    26,636 lines
+            87 headers                  4,033 lines
+```
+
+Thirty thousand lines, to unlock three point eight million.
+
+### So the earlier answer was wrong
+
+This document previously said a desktop needed "~200 syscalls with real
+semantics" and would take years. That is the cost of *reimplementing* the
+Linux ABI, which is what gVisor and Fuchsia's Starnix and FreeBSD's
+Linuxulator do, and it is genuinely years -- gVisor implements 277 of 351
+syscalls and is a funded team's multi-year project.
+
+It is the wrong plan. **You do not implement Linux's ABI. You implement the
+machine underneath it, and Linux implements its own ABI, as it already does.**
+The shim in `kernel/linux/emul/` is that mistake in miniature, growing
+sideways: every driver ported adds a few more Linux functions written by hand.
+An arch port inverts it -- write the 203, get everything.
+
+### What it costs, honestly
+
+The trade is what nk *is*. With `arch/nk/`, Linux's memory manager and
+scheduler replace nk's: `frames.rs`, `heap.rs` and `sched.rs` become the
+backing for Linux's, or go. nk is then the architecture layer of a Linux
+kernel -- boot, MMU, GIC, timer, context switch, user access -- plus
+everything above the kernel, which was always the interesting part of NETHOS
+anyway.
+
+There is also a contract the symbol count does not show: the *header*
+contract. `asm/pgtable.h`, `asm/thread_info.h`, `asm/ptrace.h` and their
+neighbours define types and macros Linux's core compiles against, and there
+are 4,033 lines of them in `arch/um`. And nk's core is Rust, while an arch
+port is C compiled by kbuild -- so the parts of nk that would become
+`arch/nk/` have to be C, or wrapped in it.
+
+None of that is years.
+
 ## What can be borrowed, measured rather than argued
 
 "Why write any of this -- why not take existing modules?" is the right
