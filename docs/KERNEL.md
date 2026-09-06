@@ -151,6 +151,72 @@ one boots.
 - **5** — decide with `ldk report`'s numbers whether USB, DRM or WiFi is worth
   attempting. Genode is funded and staffed and still does not do GPU.
 
+## What can be borrowed, measured rather than argued
+
+"Why write any of this -- why not take existing modules?" is the right
+question to keep asking, and the answer is a number, not an opinion. `ldk`
+exists to produce it. Compiling a file for arm64 and counting the symbols it
+needs from outside itself:
+
+```
+  file                               defines  needs    KB
+  net/ethernet/eth.o                      24     22    69
+  fs/read_write.o                         55     35   197
+  lib/vsprintf.o                          19     48   193
+  drivers/gpu/drm/drm_gem.o                47     73   177
+  mm/vmalloc.o                            56    114   477
+  mm/page_alloc.o                         85    121   702
+  fs/namei.o                             104    125   480
+  drivers/net/virtio_net.o                  0    189   700
+  kernel/fork.o                            51    200   370
+  kernel/sched/core.o                     154    261   700
+  net/core/dev.o                          260    279  1298
+```
+
+Nothing there is out of reach. The per-file cost of borrowing from Linux is
+tens to a couple of hundred symbols, which is the same order as the drivers
+already ported. **The instinct to borrow rather than write is correct, and
+these numbers say so.**
+
+The whole DRM core is the useful case to price, because it is what stands
+between nk and a GPU. Built for arm64 it is 85 objects and 11.6MB; it defines
+1232 symbols and needs 989, of which **427 come from outside DRM**. Three
+times virtio-blk's 154 -- large, and not absurd.
+
+The obstacle is not the number. It is *which* symbols:
+
+```
+  __arch_copy_from_user   __arch_copy_to_user   kern_unmount
+  kill_anon_super         kobject_uevent_env    __folio_batch_release
+```
+
+`copy_to_user`. `kern_unmount`. `kobject_uevent_env`. DRM's entire purpose is
+to serve ioctls from userspace; it mounts an internal filesystem for its
+objects and reports them through sysfs. Porting it to nk would produce a
+working interface **with no caller**, because the caller is Mesa, and Mesa is
+userland.
+
+So the real gate is not "can modules be borrowed" -- they can, and should be.
+It is that a desktop needs *userspace*, and userspace is where borrowing stops
+helping: the Linux ABI is not a library with an interface, it is the kernel's
+entire observable behaviour, depended on in detail by binaries nobody is going
+to recompile.
+
+There is a premade answer even to that, and it should be known rather than
+rediscovered: **LKL** links the whole Linux kernel as a library, and **rump
+kernels** do the same for NetBSD under a BSD licence. Either would give nk
+syscalls, a VFS and a network stack tomorrow. Both also mean the kernel
+underneath is Linux, or NetBSD, and the part that is nk becomes the boot code
+and the platform glue. That is a real and respectable design -- it is simply a
+different project from this one, and worth choosing deliberately.
+
+**What is reachable without any of it**: nk can talk to virtio-gpu *directly*,
+with no DRM at all. The virtqueue code virtio-blk proved already works, and
+virtio-gpu's 2D protocol is a short list of commands -- create a resource,
+attach backing pages, set the scanout, transfer, flush. No DRM core, no
+userspace, no Mesa: nk drawing to a screen by itself. That is weeks, not years,
+and it is the next real milestone after the vmemmap.
+
 ## Where Stage 4 stands, and the wall it found
 
 `virtio_net.c`, unmodified, now registers a `net_device`, is opened, brings up
