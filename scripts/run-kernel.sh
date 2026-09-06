@@ -8,6 +8,7 @@
 #   scripts/run-kernel.sh --net            attach virtio-net, user mode (stage 4)
 #   scripts/run-kernel.sh --smp N          more CPUs than the one boot.s uses
 #   scripts/run-kernel.sh --port NAME      link an ldk port's Linux drivers in
+#   scripts/run-kernel.sh --lkl            link the whole Linux kernel in
 #   scripts/run-kernel.sh --tcg            emulate instead of using HVF
 #   scripts/run-kernel.sh --gdb            wait for gdb on :1234
 #   scripts/run-kernel.sh --timeout N      kill after N seconds (for tests)
@@ -29,6 +30,7 @@ DISK=""
 NET=0
 GDB=0
 TCG=0
+LKL=0
 PORT=""
 TIMEOUT=0
 
@@ -42,6 +44,7 @@ while [ $# -gt 0 ]; do
         --smp)       SMP="${2:?--smp needs a count}"; shift 2 ;;
         --mem)       MEM="${2:?--mem needs MB}"; shift 2 ;;
         --port)      PORT="${2:?--port needs a name, e.g. virtio-blk}"; shift 2 ;;
+        --lkl)       LKL=1; shift ;;
         --tcg)       TCG=1; shift ;;
         --gdb)       GDB=1; shift ;;
         --timeout)   TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
@@ -66,6 +69,18 @@ if [ -n "$PORT" ]; then
     [ -f "$LIB" ] || die "no archive for $PORT.  cd kernel/ldk && python3 ldk.py build $PORT && python3 ldk.py shim $PORT"
     export NK_LINUX_LIB="$LIB"
     say "Linking $PORT ($(du -h "$LIB" | cut -f1))"
+fi
+
+# --lkl links lkl.o: arch/lkl plus all of Linux, as one archive. nk stops
+# being the kernel and becomes the machine underneath one.
+if [ "$LKL" -eq 1 ]; then
+    LIB="$ROOT/kernel/ldk/build/lkl/libnklkl.a"
+    [ -f "$LIB" ] || die "no Linux archive.  cd kernel/ldk && python3 ldk.py lkl"
+    export NK_LKL_LIB="$LIB"
+    # The kernel image alone is 14MB and Linux wants its own memory on top,
+    # from nk's frame allocator through the host's page_alloc.
+    [ "$MEM" -lt 1024 ] && MEM=1024
+    say "Linking Linux ($(du -h "$LIB" | cut -f1))"
 fi
 
 if [ "$BUILD" -eq 1 ]; then

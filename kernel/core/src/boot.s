@@ -75,6 +75,23 @@ real_start:
     eret
 
 at_el1:
+    // Let EL1 use FP and SIMD.
+    //
+    // CPACR_EL1.FPEN is 0 out of reset, which traps every FP and SIMD
+    // instruction to EL1 as "SIMD/FP access trapped". nk's own code never
+    // uses either -- it is built -mgeneral-regs-only -- so this was not
+    // needed until Linux was linked in, and Linux's generic code uses SIMD
+    // freely (a memcpy is enough).
+    //
+    // nk does not save or restore these registers across a context switch,
+    // which is correct only while nothing holds live FP state across one.
+    // The moment user space runs floating-point code, cpu_switch has to grow
+    // the other 512 bytes.
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(3 << 20)      // FPEN: do not trap
+    msr     cpacr_el1, x0
+    isb
+
     ldr     x0, =__stack_top
     mov     sp, x0
 

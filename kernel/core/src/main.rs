@@ -15,6 +15,9 @@ pub mod exceptions;
 pub mod frames;
 pub mod gic;
 pub mod heap;
+pub mod hostops;
+#[cfg(nk_lkl)]
+pub mod lkl;
 #[cfg(nk_linux)]
 pub mod linux;
 pub mod mmio;
@@ -113,6 +116,28 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
     println!("Stage 1 up. Unmasking interrupts.");
     sched::enable();
     unsafe { core::arch::asm!("msr daifclr, #0xf", options(nomem, nostack)) };
+
+    // The whole Linux kernel, when it is linked in: nk stops being the
+    // kernel and becomes the machine underneath one.
+    #[cfg(nk_lkl)]
+    {
+        // Before Linux starts: its timer callbacks run here, in thread
+        // context, not in the interrupt that noticed they were due.
+        hostops::start_timer_thread();
+        if lkl::boot() {
+            println!();
+            println!("Linux is up on nk. Asking it something:");
+            println!();
+            // getpid is 172 on aarch64. Chosen because it is the smallest
+            // possible question -- it touches the task model and nothing
+            // else -- and because an answer at all means the scheduler,
+            // memory, timers and locks nk handed over all work.
+            println!("  getpid()  -> {}", lkl::syscall(172, [0; 6]));
+            println!("  gettid()  -> {}", lkl::syscall(178, [0; 6]));
+            println!("  getuid()  -> {}", lkl::syscall(174, [0; 6]));
+        }
+        stop();
+    }
 
     // Linux code runs from here on. Interrupts are already on and the
     // scheduler is running, because a driver's probe may sleep, wait on a

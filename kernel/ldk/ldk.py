@@ -604,7 +604,6 @@ def cmd_lkl(args):
     The output is `lkl.o`: the entire Linux kernel, for aarch64, as one
     object. Its undefined symbols are the whole of what nk must supply.
     """
-    (void := None)
     say("Fetching lkl/linux (shallow; a few minutes the first time)")
     subprocess.run(["docker", "volume", "create", LKL_VOLUME],
                    check=True, stdout=subprocess.DEVNULL)
@@ -615,18 +614,28 @@ cd /src
 [ -d linux ] || git clone --depth 1 https://github.com/lkl/linux.git
 cd linux
 [ -f .config ] || make ARCH=lkl defconfig >/dev/null
-make ARCH=lkl -j$(nproc) >/tmp/build.log 2>&1 || { tail -30 /tmp/build.log; exit 1; }
-cp lkl.o /out/lkl.o
+# -mno-outline-atomics: without it gcc emits calls to __aarch64_*_sync
+# helpers that live in libgcc, and nk has no libgcc. Inline atomics are
+# what a kernel wants anyway -- an out-of-line call per atomic on a
+# machine that has LSE instructions is a strange thing to pay for.
+make ARCH=lkl KCFLAGS="-mno-outline-atomics" -j$(nproc) >/tmp/build.log 2>&1 \
+    || { tail -30 /tmp/build.log; exit 1; }
 cp arch/lkl/include/uapi/asm/host_ops.h /out/
 cp arch/lkl/include/uapi/lkl.h /out/ 2>/dev/null || true
-echo "  lkl.o: $(stat -c%s /out/lkl.o) bytes"
-echo "  needs from the host:"
-nm --undefined-only /out/lkl.o | awk '{print "    " $2}' | sort -u
+# Stripped of debug info: 344MB to 20MB, and nk links the whole thing.
+strip --strip-debug lkl.o -o /out/lkl.o
+gcc -c -ffreestanding -fno-stack-protector -fno-PIE -mgeneral-regs-only \
+    -Wall -Wextra -Wno-unused-parameter -I/out /shim/lkl/nk-host.c -o /out/nk-host.o
+rm -f /out/libnklkl.a && ar rcs /out/libnklkl.a /out/lkl.o /out/nk-host.o
+echo "  lkl.o: $(stat -c%s /out/lkl.o) bytes stripped"
+echo "  the whole Linux kernel still wants, from nk:"
+ld -r -o /tmp/c.o /out/lkl.o /out/nk-host.o
+nm --undefined-only /tmp/c.o | awk '{print "    " $2}' | sort -u
 """
     out = BUILD / "lkl"
     out.mkdir(parents=True, exist_ok=True)
     cmd = ["docker", "run", "--rm", "-v", f"{LKL_VOLUME}:/src",
-           "-v", f"{out}:/out", IMAGE, "sh", "-c", script]
+           "-v", f"{out}:/out", "-v", f"{KERNEL}:/shim", IMAGE, "sh", "-c", script]
     subprocess.run(cmd, check=True)
     say(f"{(out / 'lkl.o').relative_to(ROOT)}")
     print()

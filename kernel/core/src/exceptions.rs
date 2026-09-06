@@ -94,6 +94,9 @@ pub extern "C" fn rust_irq() {
         unsafe {
             crate::linux::nk_tick()
         };
+        // One-shot timers Linux asked for. Checked on the periodic tick,
+        // which caps their resolution at one tick -- see hostops.rs.
+        crate::hostops::tick_timers();
         // Completion before the switch, not after: cpu_switch does not return
         // here, it returns into some other task, and an un-EOI'd interrupt
         // stays active forever. The symptom is a timer that ticks exactly

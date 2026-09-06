@@ -157,6 +157,87 @@ desktop:
 - **User space — started.** A program runs at EL0 in its own address space and
   makes Linux system calls. See below.
 
+## Linux, linked into nk
+
+`ldk lkl` fetches LKL, builds it, and produces one archive. `run-kernel.sh
+--lkl` links it:
+
+```
+  nk with the whole Linux kernel inside it:  14,076,168 bytes
+
+  linux:  handing over the machine
+  linux:  starting the kernel
+```
+
+**Linux runs on nk.** It creates threads on nk's scheduler, takes nk's
+semaphores and mutexes, allocates from nk's frame allocator, and drives its
+clock off nk's timer. It does not finish booting yet -- see below -- but every
+primitive nk handed over is being used and works.
+
+### How small the interface turned out to be
+
+`arch/lkl` is a real, maintained Linux architecture port. It is **5,168
+lines** -- against 26,636 for `arch/um` and 179,127 for `arch/arm64` --
+because its "hardware" is a struct of function pointers the host fills in.
+Built for aarch64 with `-mno-outline-atomics` it produces `lkl.o`: 19.7MB
+stripped, the entire kernel, with **two** undefined symbols.
+
+```
+  lkl_bug
+  lkl_printf
+```
+
+`kernel/lkl/nk-host.c` is 288 lines and supplies those two plus the struct:
+threads, semaphores, mutexes, thread-local storage, memory, pages, time,
+one-shot timers, ioremap, and setjmp. `kernel/core/src/hostops.rs` is nk's
+half. Combined, what remains unresolved is thirty nk symbols and `memcpy`,
+which is Rust's `compiler_builtins`.
+
+That is the whole integration. For comparison, `kernel/linux/emul/` -- the
+driver shim -- is about two thousand lines and grows with every driver
+ported. This does not grow at all.
+
+### What it cost to link
+
+**Linux's sections are load-bearing.** It does not merely put code in `.text`;
+it builds tables *by section* and refers to their bounds by symbols the linker
+script must define -- `__start_notes`, `__per_cpu_start`, `__start___ex_table`.
+A script that discards one of those does not produce a missing symbol; it
+produces "relocation refers to a symbol in a discarded section", which names
+the section and not the reason. `linker.ld` gathers them now, with the
+boundary symbols Linux's own `vmlinux.lds` defines around each.
+
+**FP and SIMD had to be enabled.** `CPACR_EL1.FPEN` is zero out of reset, and
+nk never needed it -- nk is built `-mgeneral-regs-only`. Linux's generic code
+uses SIMD freely, and a `memcpy` is enough. nk does not save or restore those
+registers across a context switch, which is correct only while nothing holds
+live FP state across one; the moment user space runs floating-point code,
+`cpu_switch` has to grow the other 512 bytes.
+
+**A timer callback must not run in interrupt context.** This is the one that
+cost real time and it is worth stating as a rule. Linux's timer callback goes
+back into Linux, and Linux takes mutexes; a mutex nk cannot grant blocks the
+caller, and blocking inside an interrupt handler marks the *interrupted* task
+blocked and switches away from a stack that is halfway through an exception.
+Nothing reports it -- the machine simply stops making progress, which is
+exactly how it presented. `tick_timers` now records what is due and wakes a
+thread; the thread runs the callbacks, where blocking is allowed.
+
+**Divide before multiplying.** `delta_ns * HZ / 1_000_000_000` overflows a u64
+for a long timeout, and the wrapped deadline lands in the past or the far
+future. Neither fires, and a Linux whose clock has stopped does not report
+anything -- it just stops.
+
+### Where it stops
+
+Linux boots far enough to create its threads, allocate memory, use nk's locks
+and arm and re-arm its clock, and then makes no further progress without
+reaching printk. The next step is finding out where -- most likely the console
+is not registered, or something waits on a subsystem nk has not provided.
+
+None of that is the hard part any more. The hard part was whether the whole
+Linux kernel would link into nk at all, and it does.
+
 ## The 203 symbols: what borrowing everything actually costs
 
 This measurement changed the plan, and it was made because the question was

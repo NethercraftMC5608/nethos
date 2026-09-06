@@ -26,6 +26,23 @@ fn main() {
     // Declared unconditionally so cargo does not warn about an unknown cfg on
     // the builds where it is absent -- which is most of them.
     println!("cargo::rustc-check-cfg=cfg(nk_linux)");
+    println!("cargo::rustc-check-cfg=cfg(nk_lkl)");
+
+    // The whole Linux kernel, as one archive: `ldk lkl` builds it. Twenty
+    // megabytes, and it links because arch/lkl's machine is a struct of
+    // function pointers that kernel/lkl/nk-host.c fills in with nk's.
+    println!("cargo:rerun-if-env-changed=NK_LKL_LIB");
+    if let Ok(lib) = std::env::var("NK_LKL_LIB") {
+        let path = std::fs::canonicalize(&lib)
+            .unwrap_or_else(|e| panic!("NK_LKL_LIB={lib}: {e}"));
+        let dir = path.parent().unwrap().display();
+        println!("cargo:rustc-link-search=native={dir}");
+        println!("cargo:rustc-link-arg=--whole-archive");
+        println!("cargo:rustc-link-arg=-lnklkl");
+        println!("cargo:rustc-link-arg=--no-whole-archive");
+        println!("cargo:rustc-cfg=nk_lkl");
+        println!("cargo:rerun-if-changed={lib}");
+    }
     if let Ok(lib) = std::env::var("NK_LINUX_LIB") {
         // Canonicalised, not used as given. cargo runs build scripts with the
         // package directory as cwd, so a relative NK_LINUX_LIB resolves

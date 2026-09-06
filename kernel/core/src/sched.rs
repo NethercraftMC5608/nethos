@@ -229,6 +229,12 @@ pub fn join(id: usize) {
     }
 }
 
+/// End the current task from inside it. What `task_exit` does when an entry
+/// function returns, exposed for a caller that decides to stop early.
+pub fn exit_current() -> ! {
+    task_exit()
+}
+
 /// Called by task_start when a task's entry function returns.
 #[no_mangle]
 pub extern "C" fn task_exit() -> ! {

@@ -50,8 +50,56 @@ SECTIONS
      * depending on an input section's .balign surviving section merging. */
     .vectors ALIGN(2048) : { KEEP(*(.text.vectors)) }
 
-    .rodata ALIGN(8)  : { *(.rodata .rodata.*) *(__param) *(__bug_table) }
-    .data   ALIGN(8)  : { *(.data .data.*) *(.init.data .init.data.*) }
+    /* Linux's own sections, when lkl.o is linked in.
+     *
+     * Linux does not merely put code in .text and data in .data: it builds
+     * tables by section, and refers to their bounds by symbols the linker
+     * script must define -- __start_notes, __per_cpu_start, __ex_table. A
+     * script that discards one of those sections does not produce a missing
+     * symbol; it produces "relocation refers to a symbol in a discarded
+     * section", which names the section and not the reason.
+     *
+     * So they are gathered rather than dropped, with the boundary symbols
+     * Linux's own vmlinux.lds defines around each. */
+    .rodata ALIGN(8)  : {
+        *(.rodata .rodata.*)
+        *(.data.rel.ro .data.rel.ro.*)
+        *(__param) *(__bug_table) *(__modver)
+        . = ALIGN(8);
+        __start___ex_table = .; *(__ex_table) __stop___ex_table = .;
+        . = ALIGN(8);
+        __start___ksymtab = .; *(SORT(___ksymtab+*)) *(__ksymtab) __stop___ksymtab = .;
+        __start___ksymtab_gpl = .; *(SORT(___ksymtab_gpl+*)) *(__ksymtab_gpl) __stop___ksymtab_gpl = .;
+        __start___kcrctab = .; *(SORT(___kcrctab+*)) *(__kcrctab) __stop___kcrctab = .;
+        __start___kcrctab_gpl = .; *(SORT(___kcrctab_gpl+*)) *(__kcrctab_gpl) __stop___kcrctab_gpl = .;
+        . = ALIGN(8);
+        __start_pci_fixups_early = .; *(.pci_fixup) __end_pci_fixups_early = .;
+    }
+
+    /* Named `notes`, not `.notes`: Linux refers to its bounds as
+     * __start_notes/__stop_notes and the two have to agree. */
+    notes ALIGN(8) : { __start_notes = .; KEEP(*(.note.*)) KEEP(*(.notes)) __stop_notes = .; }
+
+    /* Per-CPU variables. One CPU, so the "array" is one copy and the offset
+     * every access adds is zero -- but the bounds still have to exist,
+     * because Linux walks them at boot to set that offset up. */
+    .data..percpu ALIGN(4096) : {
+        __per_cpu_load = .;
+        __per_cpu_start = .;
+        *(.data..percpu..first)
+        *(.data..percpu..page_aligned)
+        *(.data..percpu..read_mostly)
+        *(.data..percpu)
+        *(.data..percpu..shared_aligned)
+        __per_cpu_end = .;
+    }
+
+    .data ALIGN(8) : {
+        *(.data .data.*)
+        *(.data.rel .data.rel.local)
+        *(.data..ro_after_init)
+        *(.init.data .init.data.*)
+    }
 
     /* 4096, not 16: the page tables in paging.rs are 4KB-aligned statics and
      * TTBR0_EL1 silently ignores the low bits of an address that is not, so a
@@ -86,5 +134,6 @@ SECTIONS
          * silently discarded. */
         *(.modinfo) *(.discard) *(.discard.*)
         *(.altinstructions) *(.altinstr_replacement)
+        *(.debug_*) *(.rela.*)
     }
 }

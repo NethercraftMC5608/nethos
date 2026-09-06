@@ -10,25 +10,26 @@
 
 use crate::println;
 
-/// Write bytes to the console. Not NUL-terminated -- Linux's `vscnprintf`
-/// returns a length and passing it through avoids a second pass over the
-/// string in the one place that runs on every single log line.
+
+// --- what the shim may call in nk ---------------------------------------
+
+
+/// Route a device interrupt to a Linux handler.
+///
+/// The handler is stored rather than called from the GIC path directly: the
+/// C side owns the `void *dev_id` cookie and the two-level threaded-IRQ
+/// convention, and neither belongs on this side of the boundary.
 ///
 /// # Safety
-/// `s` must point at `len` readable bytes.
+/// `intid` is a real, routable interrupt on this machine.
 #[no_mangle]
-pub unsafe extern "C" fn nk_console_write(s: *const u8, len: usize) {
-    if s.is_null() {
-        return;
+pub unsafe extern "C" fn nk_request_irq(intid: u32) -> i32 {
+    if intid < 32 {
+        crate::gic::enable_ppi(intid);
+    } else {
+        crate::gic::enable_spi(intid);
     }
-    let uart = crate::uart::console();
-    for i in 0..len {
-        let b = *s.add(i);
-        if b == b'\n' {
-            uart.put(b'\r');
-        }
-        uart.put(b);
-    }
+    0
 }
 
 /// A disk reported its size. Recorded rather than acted on: nk has no
@@ -54,83 +55,6 @@ pub fn read(sector: u64, buf: &mut [u8]) -> Result<(), i32> {
     } else {
         Err(rc)
     }
-}
-
-#[no_mangle]
-pub extern "C" fn nk_halt() -> ! {
-    crate::halt()
-}
-
-// --- what the shim may call in nk ---------------------------------------
-
-/// `kmalloc`. Linux has no alignment argument, so the shim asks for the
-/// largest alignment any kernel allocation is assumed to have.
-#[no_mangle]
-pub extern "C" fn nk_alloc(size: usize, align: usize) -> *mut u8 {
-    unsafe { crate::heap::alloc_raw(size, align) }
-}
-
-/// # Safety
-/// `p` came from `nk_alloc`.
-#[no_mangle]
-pub unsafe extern "C" fn nk_free(p: *mut u8) {
-    crate::heap::free_raw(p)
-}
-
-/// Whole pages, for the ring buffers a virtqueue needs.
-#[no_mangle]
-pub extern "C" fn nk_alloc_pages(n: usize) -> *mut u8 {
-    crate::frames::alloc_contiguous(n).unwrap_or(core::ptr::null_mut())
-}
-
-/// Mask interrupts and report the previous state, for a Linux spinlock.
-#[no_mangle]
-pub extern "C" fn nk_irq_save() -> u64 {
-    let daif: u64;
-    unsafe {
-        core::arch::asm!("mrs {}, daif", "msr daifset, #0x2", out(reg) daif, options(nomem, nostack))
-    };
-    daif
-}
-
-/// # Safety
-/// `flags` came from `nk_irq_save`.
-#[no_mangle]
-pub unsafe extern "C" fn nk_irq_restore(flags: u64) {
-    core::arch::asm!("msr daif, {}", in(reg) flags, options(nomem, nostack));
-}
-
-#[no_mangle]
-pub extern "C" fn nk_yield() {
-    crate::sched::yield_now()
-}
-
-#[no_mangle]
-pub extern "C" fn nk_ticks() -> u64 {
-    crate::timer::ticks()
-}
-
-#[no_mangle]
-pub extern "C" fn nk_hz() -> u64 {
-    crate::timer::HZ
-}
-
-/// Route a device interrupt to a Linux handler.
-///
-/// The handler is stored rather than called from the GIC path directly: the
-/// C side owns the `void *dev_id` cookie and the two-level threaded-IRQ
-/// convention, and neither belongs on this side of the boundary.
-///
-/// # Safety
-/// `intid` is a real, routable interrupt on this machine.
-#[no_mangle]
-pub unsafe extern "C" fn nk_request_irq(intid: u32) -> i32 {
-    if intid < 32 {
-        crate::gic::enable_ppi(intid);
-    } else {
-        crate::gic::enable_spi(intid);
-    }
-    0
 }
 
 extern "C" {

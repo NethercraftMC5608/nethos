@@ -290,8 +290,25 @@ The shim is discovered, not designed.
 - [ ] **Stage 5.** Decide against `ldk report`'s numbers whether USB, DRM or
       WiFi is worth attempting. Genode still does not do GPU.
 
-**User space** -- separate from the driver stages, and the only road to
-running the NETHOS desktop on nk rather than on Debian's kernel.
+**Linux on nk, via LKL** -- the route to the desktop, and much shorter than
+the one below it.
+
+- [x] **The whole Linux kernel links into nk.** `arch/lkl` is 5,168 lines and
+      produces one 19.7MB object with two undefined symbols; `kernel/lkl/
+      nk-host.c` is 288 lines and supplies the machine. nk is 14MB with Linux
+      inside it, and Linux runs: threads on nk's scheduler, nk's semaphores
+      and mutexes, nk's frame allocator, nk's timer.
+- [ ] **Finish the boot.** It stalls before printk. Cost so far: Linux's
+      sections had to be gathered rather than discarded, FP/SIMD enabled at
+      EL1, timer callbacks moved out of interrupt context, and an overflow in
+      the deadline arithmetic fixed.
+- [ ] **Route EL0 `svc` to `lkl_syscall`.** nk already runs a process at EL0
+      with its own address space; `lkl_syscall` already answers every Linux
+      call. Joining them is the ABI.
+- [ ] Then a filesystem, an ELF loader, and the desktop is configuration
+      rather than construction.
+
+**User space** -- nk's own, and the mechanism the above attaches to.
 
 - [x] **A process at EL0.** Own address space, own translation table, Linux's
       syscall numbers (`write` 64, `exit` 93), and a `copy_from_user` that

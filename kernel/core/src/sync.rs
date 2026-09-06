@@ -21,7 +21,10 @@
 
 use crate::sched;
 
-fn irq_save() -> u64 {
+/// Mask interrupts and report the previous state. Public because every
+/// primitive that has to be safe against an interrupt handler needs it, and
+/// duplicating two instructions per user is how they drift.
+pub fn irq_save() -> u64 {
     let daif: u64;
     unsafe {
         core::arch::asm!("mrs {}, daif", "msr daifset, #0x2", out(reg) daif, options(nomem, nostack))
@@ -29,7 +32,9 @@ fn irq_save() -> u64 {
     daif
 }
 
-unsafe fn irq_restore(flags: u64) {
+/// # Safety
+/// `flags` came from `irq_save`.
+pub unsafe fn irq_restore(flags: u64) {
     core::arch::asm!("msr daif, {}", in(reg) flags, options(nomem, nostack));
 }
 
