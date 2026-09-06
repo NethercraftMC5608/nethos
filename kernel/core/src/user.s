@@ -177,8 +177,16 @@ __user_blob_start:
     mov     x19, x0
     // Distinct values at the same user VA expose a wrong TTBR0 restore.
     str     x19, [sp, #-16]!
-    movz    x21, #0xffff
-    movk    x21, #0x200, lsl #16
+    // Long enough to be preempted several times, not once.
+    //
+    // This was 0x0200ffff, and across both processes the timer fired exactly
+    // once -- so whether a given process had been interrupted depended on
+    // which side of a 10ms tick it happened to run. The test that asserts
+    // address spaces survive preemption then passed or failed on timing
+    // rather than on the thing it was testing. 0x10000000 is about four
+    // ticks per process on this machine and several on a slower one, which
+    // is the direction an assumption like this should fail in.
+    movz    x21, #0x1000, lsl #16
 8:  subs    x21, x21, #1
     b.ne    8b
     ldr     x20, [sp], #16
