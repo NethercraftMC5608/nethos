@@ -102,7 +102,10 @@ ARGS=(
     # No pflash and no EDK2. -kernel loads the ELF straight to the address it
     # is linked at and jumps there, which is the whole boot protocol nk needs;
     # UEFI would only add a firmware to debug through.
-    -machine "virt,accel=$ACCEL"
+    # gic-version=3 explicitly: QEMU's default on `virt` is still GICv2
+    # (arm,cortex-a15-gic in the device tree), and GICv3 is what every ARM
+    # machine made since about 2015 actually has. Verified to work under HVF.
+    -machine "virt,accel=$ACCEL,gic-version=3"
     -cpu "$CPU"
     -smp "$SMP"
     -m "$MEM"
