@@ -9,6 +9,8 @@ unittest discover` on a machine that only works on the desktop.
 import re
 import shutil
 import struct
+import os
+import signal
 import subprocess
 import time
 import unittest
@@ -39,29 +41,48 @@ def boot(*args, timeout=60, watchdog=12):
     without this every class pays its full watchdog -- twelve seconds for a
     run that takes one, ninety for a run that takes fifteen.
     """
+    # --no-build when the runner has already built every variant. Cargo takes
+    # a lock on the package cache that is global, not per target directory, so
+    # a dozen classes starting at once queue on it -- and a class whose
+    # watchdog is twelve seconds can spend all twelve waiting for a build it
+    # did not ask for.
+    prebuilt = ['--no-build'] if os.environ.get('NK_TESTS_PREBUILT') else []
+    # Its own process group. QEMU is a grandchild -- run-kernel.sh backgrounds
+    # it and waits -- so terminating the shell leaves QEMU holding the pipe,
+    # and anything that reads to end-of-file then waits for QEMU's watchdog,
+    # which is exactly the wait this function exists to avoid.
     proc = subprocess.Popen(
-        ['bash', str(RUN), '--timeout', str(watchdog), *args],
+        ['bash', str(RUN), '--timeout', str(watchdog), *prebuilt, *args],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, stdin=subprocess.DEVNULL,
+        text=True, stdin=subprocess.DEVNULL, start_new_session=True,
     )
     lines = []
     deadline = time.monotonic() + timeout
     try:
-        for line in proc.stdout:
+        # readline, not `for line in proc.stdout`. Iterating a file object
+        # uses a read-ahead buffer, so on a pipe it hands back nothing until
+        # several kilobytes have arrived -- which for a kernel whose whole
+        # output is a few kilobytes means nothing until QEMU exits, which is
+        # the thing this loop exists to avoid waiting for.
+        for line in iter(proc.stdout.readline, ''):
             lines.append(line)
             if any(marker in line for marker in DONE):
                 break
             if time.monotonic() > deadline:
                 break
     finally:
-        proc.terminate()
         try:
-            # The build and QEMU are children of the shell being terminated;
-            # give them a moment to go before insisting.
-            lines.append(proc.communicate(timeout=10)[0] or '')
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            lines.append(proc.communicate()[0] or '')
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        # Whatever is still in the pipe, without waiting for end-of-file: the
+        # group has been told to go, and a reader that insists on EOF is back
+        # to waiting for the slowest thing in it.
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+        proc.wait(timeout=10)
     return ''.join(lines)
 
 

@@ -4,6 +4,7 @@
 #   scripts/run-kernel.sh                  build and boot, serial on stdio
 #   scripts/run-kernel.sh --debug          debug profile (no LTO, real panics)
 #   scripts/run-kernel.sh --no-build       boot what is already built
+#   scripts/run-kernel.sh --build-only     build this variant and stop
 #   scripts/run-kernel.sh --disk FILE      attach FILE as virtio-blk  (stage 3)
 #   scripts/run-kernel.sh --net            attach virtio-net, user mode (stage 4)
 #   scripts/run-kernel.sh --smp N          more CPUs than the one boot.s uses
@@ -29,6 +30,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE=release
 BUILD=1
+BUILD_ONLY=0
 SMP=1
 MEM=512
 DISK=""
@@ -47,6 +49,7 @@ while [ $# -gt 0 ]; do
         --debug)     PROFILE=debug; shift ;;
         --release)   PROFILE=release; shift ;;
         --no-build)  BUILD=0; shift ;;
+        --build-only) BUILD_ONLY=1; shift ;;
         --disk)      DISK="${2:?--disk needs a file}"; shift 2 ;;
         --net)       NET=1; shift ;;
         --smp)       SMP="${2:?--smp needs a count}"; shift 2 ;;
@@ -117,6 +120,10 @@ fi
 VARIANT=plain
 [ -n "$PORT" ] && VARIANT="port-$PORT"
 [ "$LKL" -eq 1 ] && VARIANT=lkl
+# NK_INIT is a build-script input too: a kernel with a binary embedded in it is
+# a different kernel. Sharing a directory with the plain --lkl build meant
+# whichever ran last won, and the other silently booted the wrong program.
+[ -n "$INIT" ] && VARIANT="$VARIANT-init"
 if [ "$VARIANT" = plain ]; then
     # The plain build keeps the conventional path: tests and gdb sessions name
     # it, and it is the one a bare `cargo build` in kernel/ produces.
@@ -157,6 +164,15 @@ fi
 [ -n "$OBJCOPY" ] || die "llvm-objcopy is missing.  rustup component add llvm-tools"
 if [ "$BUILD" -eq 1 ] || [ ! -f "$KERNEL" ]; then
     "$OBJCOPY" -O binary "$ELF" "$KERNEL"
+fi
+
+# --build-only exists for the test runner. It runs classes in parallel and
+# they would otherwise take the same cargo lock at the same moment; a class
+# whose watchdog is twelve seconds can spend all twelve waiting for a build it
+# did not ask for, and fail for a reason that has nothing to do with nk.
+if [ "$BUILD_ONLY" -eq 1 ]; then
+    say "Built $VARIANT: $KERNEL"
+    exit 0
 fi
 
 command -v qemu-system-aarch64 >/dev/null || die "qemu-system-aarch64 is missing (brew install qemu)"

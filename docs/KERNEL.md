@@ -1039,14 +1039,37 @@ twelve seconds spends them waiting for a build it did not ask for. The plain
 build keeps `kernel/target`, which is what a bare `cargo build` produces and
 what gdb and the tests name.
 
-**The suite is slower than the work it does, and the reason is known.**
-`psci::poweroff` asks the firmware to switch the machine off when nk finishes;
-the device tree says `hvc` and nk issues it, and QEMU under HVF does not
-oblige. So every class runs to its watchdog rather than to its end: twelve
-seconds for a run that takes one, and ninety for one that takes fifteen. The
-harness reads the console and stops at nk's own end marker, which did not help
--- the output is not arriving line by line, and that is the next thing to look
-at. Until then the parallel runner is what makes it bearable.
+**The suite used to take six and a half minutes and now takes eight seconds.**
+None of that was the kernel. `psci::poweroff` asks the firmware to switch the
+machine off when nk finishes -- the device tree says `hvc`, nk issues it, and
+QEMU under HVF does not oblige -- so every class ran to its watchdog: twelve
+seconds for a run that takes one, ninety for one that takes a second. Three
+things had to be right before reading nk's own end marker actually ended a
+run, and each of them looked like the fix on its own:
+
+- **`for line in proc.stdout` reads ahead.** Iterating a file object buffers
+  several kilobytes, so on a pipe it hands back nothing until the buffer
+  fills -- and a kernel's whole output is a few kilobytes. `iter(f.readline,
+  '')` does not.
+- **QEMU is a grandchild.** `run-kernel.sh` backgrounds it and waits, so
+  terminating the shell leaves QEMU holding the pipe; anything that then
+  reads to end-of-file waits for QEMU's watchdog, which is the wait being
+  avoided. The harness gives the run its own process group and kills that.
+- **Cargo's package-cache lock is global, not per target directory.** A dozen
+  classes starting at once queue on it, and a class whose watchdog is twelve
+  seconds can spend all twelve waiting for a build it did not ask for. The
+  runner builds every variant serially first and the classes then boot what is
+  there.
+
+Getting the variants separated mattered for correctness, not only speed:
+`NK_INIT` is a build-script input, so `--lkl` and `--lkl --init` are different
+kernels, and while they shared a directory whichever built last won and the
+other silently booted the wrong program.
+
+`psci::poweroff` still does not switch the machine off under HVF. It no longer
+costs anything, and it is still worth fixing -- a clean exit distinguishes "the
+kernel finished" from "the kernel hung", which is the whole reason the code is
+there.
 
 **Run the tests with `tests/run-kernel-tests.sh`.** Every class boots QEMU
 from scratch in `setUpClass`, so `unittest discover` is a dozen independent

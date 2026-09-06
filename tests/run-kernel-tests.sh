@@ -32,6 +32,34 @@ CLASSES=$(
 # script text: xargs builds one command line per job, and a script long
 # enough to be useful plus a substituted name exceeds what it will assemble.
 export RESULTS
+# Build every variant first, one at a time.
+#
+# The classes run in parallel and each starts by building the kernel it needs.
+# Left to themselves they take the same cargo lock at the same moment, and a
+# class whose watchdog is twelve seconds can spend all twelve waiting -- a
+# failure with nothing to do with the kernel. Serially here, they all find
+# their build current and go straight to booting.
+warm() {
+    printf "  building %-18s" "$1"
+    shift
+    if bash ../scripts/run-kernel.sh --build-only "$@" >/dev/null 2>&1; then
+        echo ok
+    else
+        echo "FAILED -- $*"
+        exit 1
+    fi
+}
+HELLO="../kernel/ldk/build/nk-hello"
+warm plain
+warm lkl --lkl
+warm "port virtio-blk" --port virtio-blk
+warm "port virtio-net" --port virtio-net
+[ -f "$HELLO" ] && warm "lkl+init" --lkl --init "$HELLO"
+echo
+
+# The classes may now boot what is there rather than each asking cargo.
+export NK_TESTS_PREBUILT=1
+
 echo "$CLASSES" | xargs -P "$JOBS" -I{} sh -c '
     s=$(date +%s)
     python3 -m unittest "$1" > "$RESULTS/$1" 2>&1
