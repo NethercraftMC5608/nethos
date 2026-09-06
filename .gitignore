@@ -26,3 +26,4 @@ payload/wayfire/built/
 # accident; this is the one cargo actually writes to.
 kernel/target/
 kernel/ldk/build/
+kernel/ldk/build/nk-hello

@@ -24,7 +24,6 @@
 //! `sp` must be sixteen-byte aligned at entry; AAPCS requires it and the
 //! first `stp` in any real `_start` will fault if it is not.
 
-use crate::frames::PAGE;
 use alloc::vec::Vec;
 
 pub const AT_NULL: u64 = 0;
@@ -51,18 +50,18 @@ pub const AT_RANDOM: u64 = 25;
 /// builder carries both, and `user_of` is the only place the two are related.
 pub struct Builder {
     page: *mut u8,
-    /// The user address the page's first byte will have.
+    /// The user address the region's first byte will have.
     base: u64,
-    /// How far down from the top of the page has been used.
+    /// How far down from the top of the region has been used.
     off: usize,
 }
 
 impl Builder {
     /// # Safety
-    /// `page` must be a writable mapping of `PAGE` bytes that the process
-    /// will see at `top - PAGE`.
-    pub unsafe fn new(page: *mut u8, top: u64) -> Builder {
-        Builder { page, base: top - PAGE as u64, off: PAGE }
+    /// `page` must be a writable mapping of `size` contiguous bytes that the
+    /// process will see at `top - size`.
+    pub unsafe fn new(page: *mut u8, top: u64, size: usize) -> Builder {
+        Builder { page, base: top - size as u64, off: size }
     }
 
     fn user_of(&self, off: usize) -> u64 {

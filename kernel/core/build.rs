@@ -28,6 +28,28 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(nk_linux)");
     println!("cargo::rustc-check-cfg=cfg(nk_lkl)");
 
+    // An externally built init binary, embedded in the kernel image.
+    //
+    // nk's rootfs is memory-backed and there is no disk to load from yet, so
+    // the only way a program compiled by a real toolchain reaches EL0 is by
+    // travelling inside the kernel. `run-kernel.sh --init FILE` sets this.
+    // Absent, nk uses the hand-assembled fixture in user.s, which is what
+    // every test that does not need a libc runs.
+    println!("cargo:rerun-if-env-changed=NK_INIT");
+    println!("cargo::rustc-check-cfg=cfg(nk_init)");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("nk-init.bin");
+    if let Ok(init) = std::env::var("NK_INIT") {
+        let path = std::fs::canonicalize(&init)
+            .unwrap_or_else(|e| panic!("NK_INIT={init}: {e}"));
+        std::fs::copy(&path, &out).unwrap();
+        println!("cargo:rustc-cfg=nk_init");
+        println!("cargo:rerun-if-changed={}", path.display());
+    } else {
+        // include_bytes! needs the file to exist even on the branch that does
+        // not use it, because cfg is applied after the macro is expanded.
+        std::fs::write(&out, []).unwrap();
+    }
+
     // The whole Linux kernel, as one archive: `ldk lkl` builds it. Twenty
     // megabytes, and it links because arch/lkl's machine is a struct of
     // function pointers that kernel/lkl/nk-host.c fills in with nk's.

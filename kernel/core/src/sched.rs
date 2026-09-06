@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// Four pages. Generous for what runs here, and cheap; a Linux driver's probe
 /// path is not shy with stack, and a kernel stack overflow with no guard page
 /// silently corrupts whatever is below it.
-const STACK_PAGES: usize = 4;
+const STACK_PAGES: usize = 16;
 /// Sixty-four, because Linux wants them.
 ///
 /// Sixteen was plenty for nk's own threads and is nowhere near enough for a
@@ -84,6 +84,16 @@ pub struct Task {
     /// heap, so the two run out of room by meeting rather than by silently
     /// overwriting one another.
     pub mmap_next: u64,
+    /// The process's thread pointer, `TPIDR_EL0`.
+    ///
+    /// nk never reads it, which is exactly why it has to be saved here: it
+    /// belongs entirely to EL0, so nothing in the kernel would notice it
+    /// being wrong. A libc puts its whole thread-local area behind it --
+    /// `errno`, the malloc tcache, the locale -- so leaving one process's
+    /// value in place while another runs hands the second process the first
+    /// one's heap bookkeeping, and the crash lands some distance away in
+    /// malloc rather than anywhere near the switch.
+    pub tpidr: u64,
 }
 
 static mut TASKS: [Task; MAX_TASKS] = [Task {
@@ -101,6 +111,7 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     brk: 0,
     brk_min: 0,
     mmap_next: 0,
+    tpidr: 0,
 }; MAX_TASKS];
 
 static mut CURRENT: usize = 0;
@@ -183,6 +194,7 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             brk: 0,
             brk_min: 0,
             mmap_next: 0,
+            tpidr: 0,
         };
         tasks[slot].ttbr0 = crate::paging::kernel_address_space();
         slot
@@ -210,10 +222,12 @@ pub fn schedule() {
             TASKS[next].state = State::Running;
             TASKS[next].slices += 1;
             core::arch::asm!("mrs {}, ttbr0_el1", out(reg) TASKS[cur].ttbr0, options(nostack));
+            core::arch::asm!("mrs {}, tpidr_el0", out(reg) TASKS[cur].tpidr, options(nostack));
             CURRENT = next;
             set_shadow(TASKS[next].shadow);
             core::arch::asm!("msr ttbr0_el1, {}", "dsb ishst", "tlbi vmalle1", "dsb ish", "isb",
                 in(reg) TASKS[next].ttbr0, options(nostack));
+            core::arch::asm!("msr tpidr_el0, {}", in(reg) TASKS[next].tpidr, options(nostack));
             cpu_switch(&raw mut TASKS[cur].sp, TASKS[next].sp);
         }
         crate::sync::irq_restore(flags);

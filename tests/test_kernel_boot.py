@@ -425,6 +425,52 @@ NET_LIB = ROOT / 'kernel/ldk/build/virtio-net/libnklinux.a'
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
 @unittest.skipUnless(NET_LIB.exists(), 'virtio-net port not built')
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class RealBinary(unittest.TestCase):
+    """A program compiled by a real toolchain, unmodified, at EL0.
+
+    Everything else in this file runs a fixture written for nk. This one runs
+    what `gcc -static` produces from ordinary C against ordinary glibc -- a
+    compiler that has never heard of nk, targeting Linux's ABI, which is the
+    only reason any of the rest of this project matters.
+
+    Skipped when the ldk container is not available, because building it needs
+    an aarch64 toolchain and this suite has to keep passing without docker.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        out = ROOT / 'kernel/ldk/build/nk-hello'
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            build = subprocess.run(
+                ['docker', 'run', '--rm', '-v', f'{ROOT}:/w', '-w', '/w', 'nethos-ldk',
+                 'gcc', '-static', '-O2', '-o', 'kernel/ldk/build/nk-hello',
+                 'kernel/init/hello.c'],
+                capture_output=True, text=True, timeout=300)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            raise unittest.SkipTest(f'no ldk container: {e}')
+        if build.returncode != 0:
+            raise unittest.SkipTest(f'no aarch64 toolchain: {build.stderr.strip()[:200]}')
+        cls.out = boot('--lkl', '--init', str(out), timeout=180, watchdog=90)
+
+    def test_it_runs_and_prints(self):
+        self.assertIn('hello from a real compiled binary, on nk', self.out)
+
+    def test_it_read_its_own_argv_off_the_stack_nk_built(self):
+        # argv[0] is not passed in a register: glibc found it on the stack,
+        # which means argc, argv and the auxiliary vector are all where a libc
+        # looks for them.
+        self.assertIn('/nk-init', self.out)
+
+    def test_it_exits_with_its_own_status(self):
+        self.assertIn('the process exited with status 7', self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('fault in user space', self.out)
+        self.assertNotIn('kernel panic', self.out)
+
+
 class Stage4(unittest.TestCase):
     """An unmodified Linux driver, sending and receiving a real packet.
 

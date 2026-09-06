@@ -159,14 +159,25 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             assert!(fd >= 0);
             selftest::process_descriptor(fd);
             let a = user::launch(first, Some(selftest::process_context));
+            #[cfg(nk_init)]
+            sched::join(a);
             let b = user::launch(second, Some(selftest::process_context));
+            #[cfg(not(nk_init))]
             sched::join(a);
             sched::join(b);
             let pa = sched::linux_pid(a);
             let pb = sched::linux_pid(b);
             assert!(pa > 1 && pb > 1 && pa != pb);
-            assert_eq!(sched::exit_status(a), pa as i32);
-            assert_eq!(sched::exit_status(b), pb as i32);
+            // The fixture exits with its own Linux pid, which is how the two
+            // processes prove they were told different ones. An externally
+            // supplied init exits with whatever it likes.
+            #[cfg(not(nk_init))]
+            {
+                assert_eq!(sched::exit_status(a), pa as i32);
+                assert_eq!(sched::exit_status(b), pb as i32);
+            }
+            #[cfg(nk_init)]
+            println!("  init: exited with {} and {}", sched::exit_status(a), sched::exit_status(b));
             assert_eq!(lkl::syscall(57, [fd,0,0,0,0,0]), 0);
             assert_eq!(lkl::syscall(166, [parent_mask,0,0,0,0,0]), 0o22);
             assert_eq!(lkl::syscall(129, [pa,0,0,0,0,0]), -3);
@@ -174,6 +185,11 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             println!("  processes: distinct PIDs, private files/fs, both Linux tasks reaped");
             assert_eq!(lkl::syscall(172, [0;6]), 1);
             println!("  parent: Linux init survived both exits");
+            // The fixture spins long enough to be preempted several times on
+            // purpose, which is how it demonstrates that address spaces
+            // survive a switch. A real binary is simply too quick, so this
+            // is a claim about the fixture and not about the kernel.
+            #[cfg(not(nk_init))]
             assert!(sched::user_irqs(a) > 0 && sched::user_irqs(b) > 0);
             println!("  processes: EL0 IRQs {} and {}, private stacks survived", sched::user_irqs(a), sched::user_irqs(b));
             sched::reap_process(a);

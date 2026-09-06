@@ -366,6 +366,80 @@ in the second, and gets there through Linux's real `readv`.
 `execve`'s argv and envp are not -- they belong to nk's own loader, since LKL
 has no user space to exec into.
 
+### A program gcc compiled, running on nk
+
+`kernel/init/hello.c` is ordinary C. It is built with `gcc -static -O2`
+against ordinary glibc, by a compiler that has never heard of nk, and it is
+not modified in any way. It loads, runs, prints, reads its own `argv[0]` off
+the stack nk built, and exits with its own status:
+
+```
+$ docker run --rm -v "$PWD:/w" -w /w nethos-ldk \
+      gcc -static -O2 -o build/nk-hello kernel/init/hello.c
+$ scripts/run-kernel.sh --lkl --init build/nk-hello
+  ...
+  hello from a real compiled binary, on nk
+  /nk-init
+  the process exited with status 7
+```
+
+That is the thing the whole project is for. Everything before it ran code
+written for nk; this ran a Linux binary because nk answers Linux's numbers
+with Linux's meanings. `--init FILE` embeds the binary in the kernel image --
+the rootfs is memory-backed and there is no disk to read one from yet.
+
+Getting there needed, in the order the binary asked for them:
+
+- **PT_TLS accepted, not refused.** The loader rejected it as unsupported,
+  which rejected every static binary gcc produces. It should never have been
+  on that list: a static glibc sets its own thread pointer from its own
+  program headers, so the loader's whole part in TLS is to map the segment --
+  which PT_LOAD already covers -- and report AT_PHDR correctly.
+- **A stack measured in pages, not one page.** A libc sets up TLS, tunables,
+  locale and stdio before it reaches `main`; 256KB, mapped up front, because
+  nk has no fault handler that could yet tell a growing stack from a wild
+  pointer.
+- **`mprotect`.** A libc makes its relocated GOT read-only at startup --
+  GNU_RELRO -- and without this the binary stops with glibc's own message:
+  "cannot apply additional memory protection after relocation".
+- **`set_tid_address`, `prlimit64`.** Answered by nk. The first because its
+  argument is a user address Linux would store flat and later write through;
+  what the caller uses is the *return*, and that is the real tid. The second
+  because telling a libc the truth about the stack it was given beats
+  -ENOSYS, which makes it assume a default it will not get.
+- **`set_robust_list` and `rseq` refused.** Both are optimisations a libc
+  asks for and does without. -ENOSYS is honest; pretending to have registered
+  a robust list nk would never walk is not.
+- **`brk` returning what was asked for.** It was returning the page it
+  rounded up to. Linux tracks the break at byte granularity even though it
+  maps whole pages, and a libc told it got more than it asked for hands the
+  difference out twice.
+- **`TPIDR_EL0` saved across a context switch.** nk never reads the thread
+  pointer, which is exactly why it was missed: it belongs entirely to EL0, so
+  nothing in the kernel notices it being wrong. A libc puts `errno`, the
+  malloc tcache and the locale behind it, so leaving one process's value in
+  place while another runs gives the second process the first one's heap
+  bookkeeping -- and the crash lands in malloc, some distance from the switch.
+
+### What a real binary still cannot do
+
+**Return from `main`.** `hello.c` calls `_exit`, and that is nk's limitation
+rather than a choice. Returning from `main` sends glibc into `exit`, which
+walks its atexit handlers and tears stdio down, and somewhere in there control
+arrives back at `_start` -- the register state at the fault is unambiguous
+about it: `x30` is `_start`'s return address from `bl __libc_start_main`, and
+the argument registers are the prologue's, computed from a stack pointer that
+is wherever the program had got to rather than where nk put it.
+
+What is known: it happens with no syscall in between, so it is a wild jump
+inside glibc rather than anything nk returns; `TPIDR_EL0` is correct and
+unchanged at every syscall right up to the last one; it is not concurrency
+(one process alone does it); and it is not RELRO (ignoring the `mprotect`
+moves the crash later without preventing it). Both a `printf` binary and a
+`write` binary reach it, by different routes that meet in
+`_IO_file_doallocate` -- printf on the way in, `_IO_cleanup` on the way out.
+The next step is a TCG run under gdb with a breakpoint on `_start`.
+
 ### The process image: a stack, a heap, and mappings
 
 **The initial stack is an interface nothing declares.** A libc's `_start`

@@ -355,6 +355,15 @@ the one below it.
       answered by nk rather than forwarded, since LKL has no user half to
       return an address from. The fixture checks its own stack layout and
       stores through both the heap and a fresh mapping.
+- [x] **A binary gcc compiled, running on nk.** `kernel/init/hello.c`, built
+      with `gcc -static -O2` against ordinary glibc and not modified for nk,
+      loads, prints, reads its own argv off the stack nk built, and exits
+      with its own status. Needed PT_TLS accepted rather than refused, a
+      256KB stack, `mprotect` for GNU_RELRO, `set_tid_address` and
+      `prlimit64`, `brk` returning what was asked for, and `TPIDR_EL0` saved
+      across context switches. It must call `_exit`: returning from `main`
+      sends glibc into `exit` and control arrives back at `_start`, which is
+      the next thing to find. See docs/KERNEL.md.
 - [ ] **A persistent root, and an externally supplied init.** The rootfs is
       memory-backed and `/nk-init` is seeded from the kernel image.
 - [ ] `fork`, `exec`, `mmap`, `futex`, signals, `epoll` -- the long tail, and

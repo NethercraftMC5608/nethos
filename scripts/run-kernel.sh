@@ -9,6 +9,8 @@
 #   scripts/run-kernel.sh --smp N          more CPUs than the one boot.s uses
 #   scripts/run-kernel.sh --port NAME      link an ldk port's Linux drivers in
 #   scripts/run-kernel.sh --lkl            link the whole Linux kernel in
+#   scripts/run-kernel.sh --init FILE      run FILE at EL0 instead of the
+#                                          built-in fixture (needs --lkl)
 #   scripts/run-kernel.sh --tcg            emulate instead of using HVF
 #   scripts/run-kernel.sh --gdb            wait for gdb on :1234
 #   scripts/run-kernel.sh --timeout N      kill after N seconds (for tests)
@@ -28,6 +30,7 @@ SMP=1
 MEM=512
 DISK=""
 NET=0
+INIT=""
 GDB=0
 TCG=0
 LKL=0
@@ -45,6 +48,7 @@ while [ $# -gt 0 ]; do
         --mem)       MEM="${2:?--mem needs MB}"; shift 2 ;;
         --port)      PORT="${2:?--port needs a name, e.g. virtio-blk}"; shift 2 ;;
         --lkl)       LKL=1; shift ;;
+        --init)      INIT="${2:?--init needs a file}"; shift 2 ;;
         --tcg)       TCG=1; shift ;;
         --gdb)       GDB=1; shift ;;
         --timeout)   TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
@@ -81,6 +85,16 @@ if [ "$LKL" -eq 1 ]; then
     # from nk's frame allocator through the host's page_alloc.
     [ "$MEM" -lt 1024 ] && MEM=1024
     say "Linking Linux ($(du -h "$LIB" | cut -f1))"
+fi
+
+# --init embeds an externally built binary and runs it at EL0 instead of the
+# fixture in user.s. It travels inside the kernel image because nk's rootfs is
+# memory-backed and there is no disk to read it from yet.
+if [ -n "$INIT" ]; then
+    [ -f "$INIT" ] || die "no such file: $INIT"
+    [ "$LKL" -eq 1 ] || die "--init needs --lkl: the ELF loader reads through Linux's VFS"
+    export NK_INIT="$INIT"
+    say "Init: $INIT ($(du -h "$INIT" | cut -f1))"
 fi
 
 if [ "$BUILD" -eq 1 ]; then

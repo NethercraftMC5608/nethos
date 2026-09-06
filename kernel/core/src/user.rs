@@ -39,6 +39,13 @@ pub const USER_STACK_TOP: u64 = 0x1000_0000;
 /// -- rather than by one silently landing on the other.
 pub const USER_MMAP_TOP: u64 = USER_STACK_TOP - 16 * 1024 * 1024;
 
+/// How much stack a process starts with. One page was enough for a program
+/// written in assembly and is nowhere near enough for a libc, which sets up
+/// TLS, locale and stdio buffers before it reaches `main`. Mapped up front
+/// rather than grown on a fault, because nk has no fault handler that could
+/// tell a stack from a wild pointer yet.
+pub const USER_STACK_SIZE: usize = 256 * 1024;
+
 /// The bootstrap process entry state and its own translation table.
 pub struct Process {
     pub ttbr0: u64,
@@ -66,7 +73,8 @@ pub fn spawn() -> Process {
     );
 
     let code = frames::alloc().expect("no memory for the user program");
-    let stack = frames::alloc().expect("no memory for the user stack");
+    let stack = frames::alloc_contiguous(USER_STACK_SIZE / PAGE)
+        .expect("no memory for the user stack");
     unsafe { core::ptr::copy_nonoverlapping(blob_start as *const u8, code, len) };
 
     unsafe {
@@ -77,9 +85,9 @@ pub fn spawn() -> Process {
         paging::map_user(ttbr0, USER_BASE, code as u64, PAGE as u64, true);
         paging::map_user(
             ttbr0,
-            USER_STACK_TOP - PAGE as u64,
+            USER_STACK_TOP - USER_STACK_SIZE as u64,
             stack as u64,
-            PAGE as u64,
+            USER_STACK_SIZE as u64,
             false,
         );
     }
@@ -89,7 +97,7 @@ pub fn spawn() -> Process {
     // building it only on the Linux path would leave this one entering EL0
     // with a stack pointer one byte past its own page.
     let random = stack_seed().expect("no stack guard");
-    let sp = unsafe { crate::stack::Builder::new(stack, USER_STACK_TOP) }
+    let sp = unsafe { crate::stack::Builder::new(stack, USER_STACK_TOP, USER_STACK_SIZE) }
         .build(
             &[b"/nk-init"],
             &[b"PATH=/bin", b"HOME=/"],
@@ -154,7 +162,7 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         let far: u64;
         unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
         println!("!! fault in user space: esr {:#x} ec {:#b} far {:#x}", esr, ec, far);
-        println!("   pc {:#x}  sp {:#x}", frame.elr, frame.sp);
+        println!("   pc {:#x}  sp {:#x}  lr {:#x}", frame.elr, frame.sp, frame.x[30]);
         // The process is what should die here, not the machine. nk has
         // nothing else to run yet, so it stops -- but reporting it as a user
         // fault rather than a kernel one is the distinction the whole
@@ -183,7 +191,7 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // The same rule as `write`, and it has to be here too because this is
         // the call a libc `printf` actually makes.
         sys_writev(frame.x[0], frame.x[1], frame.x[2])
-    } else if matches!(frame.x[8], 214 | 222 | 215) {
+    } else if matches!(frame.x[8], 214 | 222 | 215 | 226 | 96 | 99 | 293 | 261) {
         // The process's address space is nk's, not Linux's. LKL is one flat
         // region with no user half at all, so forwarding these would move
         // Linux's own break and hand back an address this process cannot
@@ -191,7 +199,15 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         match frame.x[8] {
             214 => sys_brk(frame.x[0]),
             222 => sys_mmap(frame.x[0], frame.x[1], frame.x[3]),
-            _ => sys_munmap(frame.x[0], frame.x[1]),
+            215 => sys_munmap(frame.x[0], frame.x[1]),
+            226 => sys_mprotect(frame.x[0], frame.x[1], frame.x[2]),
+            96 => sys_set_tid_address(),
+            261 => sys_prlimit64(frame.x[2], frame.x[3]),
+            // set_robust_list and rseq. Both are optimisations a libc asks
+            // for and does without: glibc checks the return and falls back,
+            // so -ENOSYS is the honest answer and pretending to have
+            // registered a robust list nk would never walk is not.
+            _ => -38,
         }
     } else {
         forward(frame.x[8], &frame.x[..6].try_into().unwrap())
@@ -325,7 +341,11 @@ fn sys_brk(addr: u64) -> i64 {
         unsafe { crate::paging::unmap_user(current_ttbr0(), want, brk - want) };
     }
     crate::sched::set_user_brk(want);
-    want as i64
+    // The *requested* address, not the page it rounded up to. Linux tracks
+    // the break at byte granularity even though it maps whole pages, and a
+    // libc told it got more than it asked for will hand the difference out
+    // twice.
+    addr as i64
 }
 
 /// # mmap(addr, len, prot, flags, fd, off)
@@ -391,6 +411,69 @@ fn sys_munmap(addr: u64, len: u64) -> i64 {
     0
 }
 
+/// # mprotect(addr, len, prot)
+///
+/// Nothing gets both write and execute. A libc asks for this to make its
+/// relocated GOT read-only after startup -- GNU_RELRO -- which is the one
+/// thing standing between a static binary and running here.
+fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
+    const PROT_WRITE: u64 = 2;
+    const PROT_EXEC: u64 = 4;
+    let (_, brk_min, _) = crate::sched::user_memory();
+    if brk_min == 0 || len == 0 || addr & (PAGE as u64 - 1) != 0 {
+        return -22; // -EINVAL
+    }
+    let size = len.div_ceil(PAGE as u64) * PAGE as u64;
+    if addr >= USER_STACK_TOP || size > USER_STACK_TOP - addr {
+        return -22;
+    }
+    let exec = prot & PROT_EXEC != 0;
+    let writable = prot & PROT_WRITE != 0;
+
+    if exec && writable {
+        return -13; // -EACCES, and nk will not make an exception
+    }
+    if unsafe { !paging::protect_user(current_ttbr0(), addr, size, exec, writable) } {
+        return -12; // -ENOMEM: Linux's answer for a hole in the range
+    }
+    0
+}
+
+/// # set_tid_address(ptr)
+///
+/// Answered here rather than forwarded because the pointer is a user address
+/// and Linux, flat, would store it and later write through it into whatever
+/// happens to be at that offset in the kernel. Nothing writes to it: the
+/// address is where Linux would clear the tid when the thread dies, and nk
+/// has no threads to clear it for yet. The *return* is what the caller
+/// actually uses, and it is the real tid.
+fn sys_set_tid_address() -> i64 {
+    crate::sched::linux_pid(crate::sched::current_id())
+}
+
+/// # prlimit64(pid, resource, new, old)
+///
+/// Only the stack limit, and only reading it. A libc asks so it knows how far
+/// it may let the stack grow before it should guard; telling it the truth --
+/// that the stack is exactly what nk mapped -- is better than -ENOSYS, which
+/// makes it assume a default it will not get.
+fn sys_prlimit64(new: u64, old: u64) -> i64 {
+    const RLIM_INFINITY: u64 = !0;
+    if new != 0 {
+        return -1; // -EPERM: nothing may raise a limit here
+    }
+    if old == 0 {
+        return 0;
+    }
+    let mut buf = [0u8; 16];
+    buf[..8].copy_from_slice(&(USER_STACK_SIZE as u64).to_le_bytes());
+    buf[8..].copy_from_slice(&RLIM_INFINITY.to_le_bytes());
+    if crate::uaccess::copy_to_user(old, &buf).is_err() {
+        return crate::uaccess::EFAULT;
+    }
+    0
+}
+
 fn current_ttbr0() -> u64 {
     let v: u64;
     unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) v, options(nomem, nostack)) };
@@ -439,7 +522,16 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
     }
     let start = &raw const __user_elf_start;
     let size = (&raw const __user_elf_end as usize) - start as usize;
+    #[cfg(not(nk_init))]
     let fixture = unsafe { core::slice::from_raw_parts(start, size) };
+    // An externally built binary, when `run-kernel.sh --init` supplied one.
+    // It travels inside the kernel image because the rootfs is memory-backed
+    // and there is no disk to read it from yet.
+    #[cfg(nk_init)]
+    let fixture: &[u8] = {
+        let _ = (start, size);
+        include_bytes!(concat!(env!("OUT_DIR"), "/nk-init.bin"))
+    };
     crate::lkl::write_file(c"/nk-init", fixture).map_err(|_| "rootfs write failed")?;
     let bytes = crate::lkl::read_file(c"/nk-init").map_err(|_| "rootfs read failed")?;
     if bytes != fixture {
@@ -449,7 +541,7 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
         "  rootfs: /nk-init read back through Linux VFS ({} bytes)",
         bytes.len()
     );
-    let image = crate::elf::parse(&bytes, USER_BASE, USER_STACK_TOP - 2 * PAGE as u64)?;
+    let image = crate::elf::parse(&bytes, USER_BASE, USER_MMAP_TOP)?;
     let ttbr0 = paging::new_address_space();
     for s in &image.segments {
         let base = s.address & !(PAGE as u64 - 1);
@@ -484,14 +576,16 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
             }
         }
     }
-    let stack = frames::alloc().expect("no memory for ELF stack");
+    let stack = frames::alloc_contiguous(USER_STACK_SIZE / PAGE)
+        .ok_or("no memory for the ELF stack")?;
+    unsafe { core::ptr::write_bytes(stack, 0, USER_STACK_SIZE) };
     let sp = build_initial_stack(stack, &image)?;
     unsafe {
         paging::map_user(
             ttbr0,
-            USER_STACK_TOP - PAGE as u64,
+            USER_STACK_TOP - USER_STACK_SIZE as u64,
             stack as u64,
-            PAGE as u64,
+            USER_STACK_SIZE as u64,
             false,
         );
         core::arch::asm!("dsb ish", "ic iallu", "dsb ish", "isb", options(nostack));
@@ -593,9 +687,9 @@ fn build_initial_stack(page: *mut u8, image: &crate::elf::Image) -> Result<u64, 
         (AT_SECURE, 0),
     ];
 
-    let sp = unsafe { crate::stack::Builder::new(page, USER_STACK_TOP) }
+    let sp = unsafe { crate::stack::Builder::new(page, USER_STACK_TOP, USER_STACK_SIZE) }
         .build(&[b"/nk-init"], &[b"PATH=/bin", b"HOME=/"], &aux, &random)
-        .ok_or("the initial stack does not fit in one page")?;
+        .ok_or("the initial stack does not fit")?;
     println!(
         "  stack: argc 1, 2 environment entries, {} auxv pairs, sp {:#x}",
         aux.len() + 2,

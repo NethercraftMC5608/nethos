@@ -54,8 +54,14 @@ pub fn parse(b: &[u8], low: u64, high: u64) -> Result<Image, &'static str> {
         b.get(p..p.checked_add(56).ok_or("overflow")?)
             .ok_or("truncated headers")?;
         let kind = n(b, p, 4)?;
-        if kind == 2 || kind == 3 || kind == 7 {
-            return Err("dynamic ELF and TLS are not supported yet");
+        // PT_DYNAMIC and PT_INTERP mean something has to be relocated or an
+        // interpreter mapped, and nk does neither. PT_TLS does *not* belong
+        // on that list: a static glibc sets its own thread pointer from its
+        // own program headers, so the loader's whole part in TLS is to map
+        // the segment (which PT_LOAD already covers) and report AT_PHDR
+        // correctly. Refusing it refused every static binary gcc produces.
+        if kind == 2 || kind == 3 {
+            return Err("dynamic ELF is not supported yet");
         }
         if kind != 1 {
             continue;

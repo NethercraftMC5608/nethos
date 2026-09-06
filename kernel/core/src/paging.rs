@@ -362,6 +362,57 @@ pub unsafe fn unmap_user(ttbr0: u64, va: u64, size: u64) -> usize {
     freed
 }
 
+/// Change the permissions of an existing user mapping.
+///
+/// Returns false if any page in the range is not mapped -- `mprotect` over a
+/// hole is an error, unlike `munmap`, and a partial change would leave the
+/// process with a range whose permissions differ half way through.
+///
+/// # Safety
+/// `ttbr0` must be a user address space and the range must lie in the part of
+/// it the process owns.
+pub unsafe fn protect_user(ttbr0: u64, va: u64, size: u64, exec: bool, writable: bool) -> bool {
+    if exec && writable {
+        return false;
+    }
+    let l0 = table_of(ttbr0) as *mut u64;
+    // Two passes: nothing is changed until every page is known to be there.
+    for pass in 0..2 {
+        let mut off = 0;
+        while off < size {
+            let v = va + off;
+            off += 4096;
+            let e0 = *l0.add(((v >> L0_SHIFT) & 511) as usize);
+            if !is_table(e0) {
+                return false;
+            }
+            let l1 = (e0 & ADDR) as *mut u64;
+            let e1 = *l1.add(((v >> L1_SHIFT) & 511) as usize);
+            if !is_table(e1) {
+                return false;
+            }
+            let l2 = (e1 & ADDR) as *mut u64;
+            let e2 = *l2.add(((v >> L2_SHIFT) & 511) as usize);
+            if !is_table(e2) {
+                return false;
+            }
+            let l3 = (e2 & ADDR) as *mut u64;
+            let slot = l3.add(((v >> L3_SHIFT) & 511) as usize);
+            if *slot & pte::VALID == 0 {
+                return false;
+            }
+            if pass == 1 {
+                let keep = *slot & !(pte::AP_RW_ANY | pte::AP_RO_ANY | pte::UXN);
+                *slot = keep
+                    | if writable { pte::AP_RW_ANY } else { pte::AP_RO_ANY }
+                    | if exec { 0 } else { pte::UXN };
+            }
+        }
+    }
+    core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
+    true
+}
+
 /// PROBE: walk a table by hand and print every descriptor.
 pub fn dump_walk(ttbr0: u64, va: u64) {
     unsafe {
