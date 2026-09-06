@@ -366,6 +366,52 @@ in the second, and gets there through Linux's real `readv`.
 `execve`'s argv and envp are not -- they belong to nk's own loader, since LKL
 has no user space to exec into.
 
+### The process image: a stack, a heap, and mappings
+
+**The initial stack is an interface nothing declares.** A libc's `_start`
+takes no arguments; it reads argc, argv, envp and the auxiliary vector off the
+stack at a layout the kernel is simply expected to have built. Get it wrong
+and the program does not fail at a syscall nk could name -- it dereferences
+whatever happened to be there. nk builds the real thing now: the strings, then
+sixteen bytes for AT_RANDOM, then a sixteen-byte-aligned vector carrying
+AT_PHDR (worked out from whichever segment contains the program headers),
+AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_BASE, AT_ENTRY, the four ids, AT_HWCAP,
+AT_CLKTCK, AT_SECURE, AT_RANDOM and AT_NULL.
+
+AT_HWCAP says nothing. Claiming no optional CPU feature is always safe;
+claiming one nk has not enabled at EL0 -- FP, SVE -- is a trap the libc
+springs on itself at its first instruction that uses it.
+
+AT_RANDOM comes from Linux's generator with **GRND_INSECURE, and that is not
+optional**: plain `getrandom` blocks until the CRNG is seeded, and on a
+machine whose only entropy is a virtual timer it may never be. The first
+attempt deadlocked the boot thread inside Linux with every other task idle,
+which is precisely what the watchdog was built to report. GRND_INSECURE is
+Linux's own answer -- bytes now, from a pool that says it is not trustworthy
+yet.
+
+**`brk`, `mmap` and `munmap` are nk's, not Linux's.** LKL is one flat region
+with no user half at all, so forwarding them would move Linux's own break and
+hand back an address the process cannot reach. The heap grows up from the
+first page past the loaded image; anonymous mappings grow down from 16MB below
+the stack. The two run out of room by *meeting*, which nk detects and refuses,
+rather than by one silently landing on the other. File-backed `mmap` is
+refused rather than faked: it would make the page cache nk's problem as well
+as Linux's, and returning memory that does not contain the file is worse than
+returning nothing.
+
+`brk` reports failure the way Linux does -- by returning the old break, never
+an errno -- because a libc that receives an errno here will not recognise it.
+`munmap` over a hole succeeds, which is what makes it safe for a libc to call
+over a range it is unsure of; the addresses are not reused, so a freed region
+stays free while something might still hold a pointer into it. That wastes
+address space rather than memory: the pages themselves go back.
+
+The fixture checks all of it from EL0 -- walks its own argv and auxv, grows
+the break and stores through it, maps a page and confirms it is zeroed, and
+unmaps it -- so a wrong layout exits with a failure code rather than printing
+a line that says it worked.
+
 ### The low half, and the global mapping that was blocking it
 
 `USER_BASE` is `0x400000`. Getting there took three things, and the middle one

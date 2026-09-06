@@ -169,6 +169,55 @@ __user_elf_start:
     .balign 4096
 .global __user_blob_start
 __user_blob_start:
+    // Before anything else: is the stack the shape a libc expects?
+    //
+    // Nothing declares this interface. `_start` takes no arguments and reads
+    // argc, argv, envp and the auxiliary vector off the stack at a layout the
+    // kernel is simply expected to have built -- so a real binary would not
+    // fail here at a syscall nk could name, it would dereference whatever
+    // happened to be there. Checking it is the only way to know it is right.
+    ldr     x0, [sp]                // argc
+    cmp     x0, #1
+    b.ne    9f
+    ldr     x1, [sp, #8]            // argv[0], which is "/nk-init"
+    cbz     x1, 9f
+    ldrb    w0, [x1]
+    cmp     w0, #0x2f               // '/'
+    b.ne    9f
+    ldr     x0, [sp, #16]           // argv must be NULL-terminated
+    cbnz    x0, 9f
+
+    add     x2, sp, #24             // envp
+12: ldr     x0, [x2], #8
+    cbnz    x0, 12b                 // walk to its NULL; auxv follows
+
+    mov     x3, xzr                 // AT_PAGESZ
+    mov     x4, xzr                 // AT_RANDOM
+13: ldr     x0, [x2], #8
+    ldr     x1, [x2], #8
+    cbz     x0, 14f                 // AT_NULL
+    cmp     x0, #6                  // AT_PAGESZ
+    csel    x3, x1, x3, eq
+    cmp     x0, #25                 // AT_RANDOM
+    csel    x4, x1, x4, eq
+    b       13b
+14: mov     x0, #4096
+    cmp     x3, x0
+    b.ne    9f
+    cbz     x4, 9f
+    // The stack guard has to be sixteen bytes of something. A constant here
+    // would give every process on the machine the same canary, so all-zero is
+    // the one answer that is definitely wrong.
+    ldp     x0, x1, [x4]
+    orr     x0, x0, x1
+    cbz     x0, 9f
+
+    mov     x0, #1
+    adr     x1, 15f
+    mov     x2, 16f - 15f
+    mov     x8, #64
+    svc     #0
+
     // Ask who we are. With Linux linked in this is answered by Linux's own
     // sys_getpid, on nk. Without it, by nk's two-entry table, which does not
     // implement 172 and says so.
@@ -294,6 +343,54 @@ __user_blob_start:
     svc     #0
 4:
 
+    // A heap, and an anonymous mapping. These are nk's own answers: LKL is one
+    // flat region with no user half, so forwarding brk or mmap would move
+    // Linux's break and hand back an address this process cannot reach.
+    mov     x0, #0
+    mov     x8, #214                // __NR_brk, asking
+    svc     #0
+    mov     x24, x0
+    cbz     x24, 9f
+    add     x0, x24, #4096
+    mov     x8, #214                // __NR_brk, setting
+    svc     #0
+    cmp     x0, x24
+    b.eq    9f                      // brk reports failure by not moving
+    movz    x1, #0xbeef
+    str     x1, [x24]               // the page has to be there and writable
+    ldr     x2, [x24]
+    cmp     x1, x2
+    b.ne    9f
+
+    mov     x0, #0
+    mov     x1, #4096
+    mov     x2, #3                  // PROT_READ|PROT_WRITE
+    mov     x3, #0x22               // MAP_PRIVATE|MAP_ANONYMOUS
+    mov     x4, #-1
+    mov     x5, #0
+    mov     x8, #222                // __NR_mmap
+    svc     #0
+    tbnz    x0, #63, 9f
+    mov     x26, x0
+    movz    x1, #0xcafe
+    str     x1, [x26]
+    ldr     x2, [x26]
+    cmp     x1, x2
+    b.ne    9f
+    ldr     x2, [x26, #8]           // and the rest of it must be zero
+    cbnz    x2, 9f
+    mov     x0, x26
+    mov     x1, #4096
+    mov     x8, #215                // __NR_munmap
+    svc     #0
+    cbnz    x0, 9f
+
+    mov     x0, #1
+    adr     x1, 17f
+    mov     x2, 18f - 17f
+    mov     x8, #64
+    svc     #0
+
     // Then something the kernel must refuse: 0x40080000 is the kernel's own
     // image. Whoever answers, a user pointer into kernel memory has to come
     // back as an error rather than as the kernel's first instructions.
@@ -351,6 +448,10 @@ __user_blob_start:
 7:  .ascii  "\n"
 10: .ascii  "  and again by readv, gathered back out with writev: "
 11:
+15: .ascii  "  stack: argc, argv, envp and a seeded auxv, as a libc expects\n"
+16:
+17: .ascii  "  memory: brk grew and holds a value, mmap gave a zeroed page\n"
+18:
 .balign 4
 .balign 4
 .global __user_blob_end

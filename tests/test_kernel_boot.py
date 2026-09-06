@@ -401,6 +401,19 @@ class LinuxOnNk(unittest.TestCase):
         # writev carries it back out as three gathered pieces.
         self.assertIn('and again by readv, gathered back out with writev: ELF', self.out)
 
+    def test_the_stack_is_the_shape_a_libc_expects(self):
+        # The fixture walks it itself -- argc, a NUL-terminated argv, past
+        # envp's terminator into the auxiliary vector, and checks AT_PAGESZ
+        # and that AT_RANDOM's sixteen bytes are not all zero. Getting any of
+        # that wrong exits 99 instead of printing this.
+        self.assertIn('argc, argv, envp and a seeded auxv', self.out)
+
+    def test_a_process_has_a_heap_and_can_map_memory(self):
+        # brk and mmap are nk's own: LKL is one flat region with no user half,
+        # so forwarding them would move Linux's break and return an address
+        # this process cannot reach. The fixture stores to both and reads back.
+        self.assertIn('brk grew and holds a value, mmap gave a zeroed page', self.out)
+
     def test_nothing_faulted(self):
         self.assertNotIn('!!EXC', self.out)
         self.assertNotIn('!! kernel panic', self.out)

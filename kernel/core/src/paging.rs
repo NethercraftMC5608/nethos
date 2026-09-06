@@ -311,6 +311,57 @@ pub unsafe fn map_user_permissions(ttbr0: u64, va: u64, pa: u64, size: u64, exec
     core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
 }
 
+/// Remove a user mapping and free the pages behind it.
+///
+/// Returns how many pages it actually freed. Unmapping something that was
+/// never mapped is not an error -- `munmap` over a hole is legal and common,
+/// and a process that frees its own memory twice should not take the kernel
+/// with it.
+///
+/// The page tables themselves are left in place. They are freed wholesale
+/// when the address space is destroyed, and keeping an empty level-3 table
+/// costs one page against the alternative of reference-counting three levels
+/// on every unmap.
+///
+/// # Safety
+/// `ttbr0` must be a user address space, and `va..va+size` must lie inside
+/// the part of it the process owns -- never over the kernel's copied tables.
+pub unsafe fn unmap_user(ttbr0: u64, va: u64, size: u64) -> usize {
+    let l0 = table_of(ttbr0) as *mut u64;
+    let mut freed = 0;
+    let mut off = 0;
+    while off < size {
+        let v = va + off;
+        off += 4096;
+        // Walk without creating: a hole stays a hole.
+        let e0 = *l0.add(((v >> L0_SHIFT) & 511) as usize);
+        if !is_table(e0) {
+            continue;
+        }
+        let l1 = (e0 & ADDR) as *mut u64;
+        let e1 = *l1.add(((v >> L1_SHIFT) & 511) as usize);
+        if !is_table(e1) {
+            continue;
+        }
+        let l2 = (e1 & ADDR) as *mut u64;
+        let e2 = *l2.add(((v >> L2_SHIFT) & 511) as usize);
+        if !is_table(e2) {
+            continue;
+        }
+        let l3 = (e2 & ADDR) as *mut u64;
+        let slot = l3.add(((v >> L3_SHIFT) & 511) as usize);
+        let e3 = *slot;
+        if e3 & pte::VALID == 0 {
+            continue;
+        }
+        *slot = 0;
+        crate::frames::free((e3 & ADDR) as *mut u8);
+        freed += 1;
+    }
+    core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
+    freed
+}
+
 /// PROBE: walk a table by hand and print every descriptor.
 pub fn dump_walk(ttbr0: u64, va: u64) {
     unsafe {

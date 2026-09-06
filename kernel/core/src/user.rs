@@ -21,28 +21,31 @@ use crate::frames::{self, PAGE};
 use crate::paging;
 use crate::println;
 
-/// Where a process's image goes: 512GiB, the second top-level table entry.
+/// Where a process's image goes: 0x400000, which is where aarch64 links a
+/// non-PIE executable, so an ordinary binary needs no relocation to run here.
 ///
-/// It should be 0x400000, which is where aarch64 links a non-PIE executable,
-/// and `paging` now leaves that address free -- only the 34MB the devices
-/// actually occupy is mapped, not the whole first gigabyte. Moving there was
-/// tried and does not work under HVF: any address translated through the
-/// kernel's own low tables faults at level 2, on descriptors that read back
-/// correct and that **the same kernel translates fine under TCG, where the
-/// process runs to completion**. See docs/KERNEL.md.
-///
-/// So it stays here, where the process's mappings hang off a top-level entry
-/// the kernel never uses and every table below it is freshly allocated. That
-/// is the configuration that works on both, and the difference between the
-/// two is the clue the next attempt should start from.
+/// Getting to this address took narrowing the device map to the 34MB the
+/// machine actually has, and then finding that user pages were mapped global
+/// in an address space with ASID 0 -- so the kernel's own walking of the low
+/// half poisoned the process's translations, under HVF only. See
+/// docs/KERNEL.md.
 pub const USER_BASE: u64 = 0x0040_0000;
-pub const USER_STACK_TOP: u64 = 0x0100_0000;
+pub const USER_STACK_TOP: u64 = 0x1000_0000;
+
+/// Where anonymous mappings start, growing downward.
+///
+/// Between the heap growing up from the end of the image and this growing
+/// down, the two run out of room by meeting -- which nk can detect and refuse
+/// -- rather than by one silently landing on the other.
+pub const USER_MMAP_TOP: u64 = USER_STACK_TOP - 16 * 1024 * 1024;
 
 /// The bootstrap process entry state and its own translation table.
 pub struct Process {
     pub ttbr0: u64,
     pub entry: u64,
     pub stack: u64,
+    /// The first address above the loaded image: where the heap starts.
+    pub brk: u64,
 }
 
 extern "C" {
@@ -81,14 +84,29 @@ pub fn spawn() -> Process {
         );
     }
 
+    // The same initial stack a loaded binary gets. The smoke test is the same
+    // program, and it checks the layout before it does anything else, so
+    // building it only on the Linux path would leave this one entering EL0
+    // with a stack pointer one byte past its own page.
+    let random = stack_seed().expect("no stack guard");
+    let sp = unsafe { crate::stack::Builder::new(stack, USER_STACK_TOP) }
+        .build(
+            &[b"/nk-init"],
+            &[b"PATH=/bin", b"HOME=/"],
+            &[(crate::stack::AT_PAGESZ, PAGE as u64), (crate::stack::AT_ENTRY, USER_BASE)],
+            &random,
+        )
+        .expect("the initial stack does not fit in one page");
+
     println!(
         "  user:   {} bytes of program at {:#x}, stack at {:#x}, ttbr0 {:#x}",
-        len, USER_BASE, USER_STACK_TOP, ttbr0
+        len, USER_BASE, sp, ttbr0
     );
     Process {
         ttbr0,
         entry: USER_BASE,
-        stack: USER_STACK_TOP,
+        stack: sp,
+        brk: USER_BASE + PAGE as u64,
     }
 }
 
@@ -97,6 +115,9 @@ pub fn run(p: &Process) -> ! {
     println!();
     println!("  entering EL0...");
     println!();
+    // The memory layout belongs to the running task, because `brk` and `mmap`
+    // are answered from whichever thread makes the call, and this is it.
+    crate::sched::set_user_memory(p.brk, USER_MMAP_TOP);
     unsafe { enter_user(p.entry, p.stack, p.ttbr0) }
 }
 
@@ -162,6 +183,16 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // The same rule as `write`, and it has to be here too because this is
         // the call a libc `printf` actually makes.
         sys_writev(frame.x[0], frame.x[1], frame.x[2])
+    } else if matches!(frame.x[8], 214 | 222 | 215) {
+        // The process's address space is nk's, not Linux's. LKL is one flat
+        // region with no user half at all, so forwarding these would move
+        // Linux's own break and hand back an address this process cannot
+        // reach. They are the calls nk has to answer itself.
+        match frame.x[8] {
+            214 => sys_brk(frame.x[0]),
+            222 => sys_mmap(frame.x[0], frame.x[1], frame.x[3]),
+            _ => sys_munmap(frame.x[0], frame.x[1]),
+        }
     } else {
         forward(frame.x[8], &frame.x[..6].try_into().unwrap())
     };
@@ -266,6 +297,126 @@ fn sys_writev(fd: u64, iov: u64, count: u64) -> i64 {
     bytes.len() as i64
 }
 
+/// How much of the address space one process may claim. A runaway `brk` loop
+/// should be told no, not allowed to exhaust the machine's memory on behalf
+/// of a program that has already gone wrong.
+const USER_MEM_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// # brk(addr)
+///
+/// Returns the break. `brk(0)` asks for it; anything else sets it, and the
+/// return value is what it actually became -- Linux's brk reports failure by
+/// returning the *old* break, never an errno, and a libc that gets an errno
+/// here will not recognise it.
+fn sys_brk(addr: u64) -> i64 {
+    let (brk, brk_min, mmap_next) = crate::sched::user_memory();
+    if brk_min == 0 {
+        return brk as i64; // not a process with a heap
+    }
+    let want = addr.div_ceil(PAGE as u64) * PAGE as u64;
+    if addr == 0 || want < brk_min || want >= mmap_next || want - brk_min > USER_MEM_LIMIT {
+        return brk as i64;
+    }
+    if want > brk {
+        if !map_anonymous(brk, want - brk) {
+            return brk as i64;
+        }
+    } else if want < brk {
+        unsafe { crate::paging::unmap_user(current_ttbr0(), want, brk - want) };
+    }
+    crate::sched::set_user_brk(want);
+    want as i64
+}
+
+/// # mmap(addr, len, prot, flags, fd, off)
+///
+/// Anonymous private mappings only, which is what a libc's malloc asks for.
+/// A file mapping needs the page cache to be nk's problem as well as Linux's
+/// and is a separate piece of work; refusing it is better than returning
+/// memory that does not contain the file.
+fn sys_mmap(addr: u64, len: u64, flags: u64) -> i64 {
+    const MAP_ANONYMOUS: u64 = 0x20;
+    const ENOMEM: i64 = -12;
+    const EINVAL: i64 = -22;
+    if flags & MAP_ANONYMOUS == 0 {
+        println!("  mmap of a file is not implemented");
+        return -38; // -ENOSYS
+    }
+    // MAP_FIXED would have to unmap whatever is there and honour the exact
+    // address; nothing needs it yet, and quietly ignoring the hint would give
+    // a caller that does need it the wrong answer.
+    if flags & 0x10 != 0 {
+        return EINVAL;
+    }
+    let _ = addr;
+    if len == 0 || len > USER_MEM_LIMIT {
+        return EINVAL;
+    }
+    let len = len.div_ceil(PAGE as u64) * PAGE as u64;
+    let (_, brk_min, mmap_next) = crate::sched::user_memory();
+    if brk_min == 0 || mmap_next < len {
+        return ENOMEM;
+    }
+    let at = mmap_next - len;
+    let (brk, _, _) = crate::sched::user_memory();
+    if at <= brk {
+        return ENOMEM; // the heap and the mappings have met
+    }
+    if !map_anonymous(at, len) {
+        return ENOMEM;
+    }
+    crate::sched::set_user_mmap_next(at);
+    at as i64
+}
+
+/// # munmap(addr, len)
+///
+/// Unmapping a hole is legal and returns success, which is what makes it safe
+/// for a libc to call over a range it is not sure about. The addresses are
+/// not reused: `mmap_next` only ever falls, so a freed region stays free
+/// rather than being handed out again while something still holds a pointer
+/// into it. That wastes address space and not memory, and the pages
+/// themselves do go back.
+fn sys_munmap(addr: u64, len: u64) -> i64 {
+    let (_, brk_min, _) = crate::sched::user_memory();
+    if brk_min == 0 || len == 0 {
+        return -22; // -EINVAL
+    }
+    let start = addr & !(PAGE as u64 - 1);
+    let end = (addr + len).div_ceil(PAGE as u64) * PAGE as u64;
+    if start < brk_min || end <= start || end > USER_STACK_TOP {
+        return -22;
+    }
+    unsafe { crate::paging::unmap_user(current_ttbr0(), start, end - start) };
+    0
+}
+
+fn current_ttbr0() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+/// Back a user range with fresh zeroed pages. All or nothing: a partial
+/// mapping would leave the process holding an address range that faults half
+/// way through, which is worse than being told no.
+fn map_anonymous(at: u64, len: u64) -> bool {
+    let ttbr0 = current_ttbr0();
+    let mut done = 0;
+    while done < len {
+        let Some(page) = frames::alloc() else {
+            unsafe { crate::paging::unmap_user(ttbr0, at, done) };
+            return false;
+        };
+        unsafe {
+            core::ptr::write_bytes(page, 0, PAGE);
+            paging::map_user_permissions(ttbr0, at + done, page as u64, PAGE as u64, false, true);
+        }
+        done += PAGE as u64;
+    }
+    true
+}
+
 fn sys_exit(status: i32) -> ! {
     println!();
     println!("  the process exited with status {}", status);
@@ -334,8 +485,7 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
         }
     }
     let stack = frames::alloc().expect("no memory for ELF stack");
-    // Empty argc/argv/envp/auxv terminators. Dynamic libc startup is not yet
-    // supported; this fixture uses the syscall ABI directly.
+    let sp = build_initial_stack(stack, &image)?;
     unsafe {
         paging::map_user(
             ttbr0,
@@ -351,11 +501,107 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
         image.segments.len(),
         image.entry
     );
-    Ok(Process {
-        ttbr0,
-        entry: image.entry,
-        stack: USER_STACK_TOP - 48,
-    })
+    // The heap starts on the first page boundary past everything the image
+    // asked for, so growing it can never land on the program's own bss.
+    let brk = image
+        .segments
+        .iter()
+        .map(|s| s.address + s.memsz as u64)
+        .max()
+        .unwrap_or(USER_BASE)
+        .div_ceil(PAGE as u64)
+        * PAGE as u64;
+    Ok(Process { ttbr0, entry: image.entry, stack: sp, brk })
+}
+
+/// Sixteen bytes for AT_RANDOM, from which a libc takes its stack guard.
+///
+/// GRND_INSECURE, and it is not optional. Plain `getrandom` *blocks* until
+/// the CRNG is seeded, and on a machine whose only entropy is a virtual timer
+/// it may never be: the first attempt deadlocked the boot thread inside Linux
+/// with every other task idle, which is what the watchdog exists to report.
+/// GRND_INSECURE is Linux's own answer to exactly this -- bytes now, from a
+/// pool that says it is not yet trustworthy.
+#[cfg(nk_lkl)]
+fn stack_seed() -> Result<[u8; 16], &'static str> {
+    const GRND_INSECURE: i64 = 0x0004;
+    let mut random = [0u8; 16];
+    let args = [random.as_mut_ptr() as i64, random.len() as i64, GRND_INSECURE, 0, 0, 0];
+    if crate::lkl::syscall(278, args) != random.len() as i64 {
+        return Err("getrandom did not fill the stack guard");
+    }
+    Ok(random)
+}
+
+/// Without Linux there is no generator, and the virtual counter is the only
+/// thing on this machine that differs between one boot and the next. It is
+/// not entropy and is not claimed to be; it is here so the standalone smoke
+/// test gets a stack of the same *shape*, which is what it is checking.
+#[cfg(not(nk_lkl))]
+fn stack_seed() -> Result<[u8; 16], &'static str> {
+    let mut random = [0u8; 16];
+    for (i, chunk) in random.chunks_mut(8).enumerate() {
+        let t: u64;
+        unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) t, options(nomem, nostack)) };
+        chunk.copy_from_slice(&(t ^ (0x9e37_79b9_7f4a_7c15u64.wrapping_mul(i as u64 + 1))).to_le_bytes());
+    }
+    Ok(random)
+}
+
+/// argc, argv, envp and the auxiliary vector, as a libc's `_start` expects
+/// to find them.
+///
+/// Nothing declares this interface: `_start` takes no arguments and reads it
+/// off the stack at a shape the kernel is simply expected to have built. So
+/// the failure mode for getting it wrong is not a syscall nk could name, it
+/// is the program dereferencing whatever happened to be there.
+#[cfg(nk_lkl)]
+fn build_initial_stack(page: *mut u8, image: &crate::elf::Image) -> Result<u64, &'static str> {
+    use crate::stack::*;
+
+    // AT_PHDR is the *address* the program headers ended up at, which is only
+    // knowable from the segment that happens to contain them -- usually the
+    // first, because it starts at file offset 0 and so covers the headers.
+    let phdr = image
+        .segments
+        .iter()
+        .find(|s| image.phoff >= s.offset && image.phoff < s.offset + s.filesz)
+        .map(|s| s.address + (image.phoff - s.offset) as u64)
+        .unwrap_or(0);
+
+    let random = stack_seed()?;
+
+    let aux = [
+        (AT_PHDR, phdr),
+        (AT_PHENT, 56),
+        (AT_PHNUM, image.phnum as u64),
+        (AT_PAGESZ, PAGE as u64),
+        // No interpreter: the loader refuses dynamic images, so nothing was
+        // mapped for one and AT_BASE has to say so rather than lie.
+        (AT_BASE, 0),
+        (AT_FLAGS, 0),
+        (AT_ENTRY, image.entry),
+        (AT_UID, 0),
+        (AT_EUID, 0),
+        (AT_GID, 0),
+        (AT_EGID, 0),
+        // Claiming no optional CPU features is always safe; claiming one nk
+        // has not enabled at EL0 -- FP, SVE -- is a trap the libc springs
+        // itself, on its first instruction that uses it.
+        (AT_HWCAP, 0),
+        (AT_CLKTCK, 100),
+        (AT_SECURE, 0),
+    ];
+
+    let sp = unsafe { crate::stack::Builder::new(page, USER_STACK_TOP) }
+        .build(&[b"/nk-init"], &[b"PATH=/bin", b"HOME=/"], &aux, &random)
+        .ok_or("the initial stack does not fit in one page")?;
+    println!(
+        "  stack: argc 1, 2 environment entries, {} auxv pairs, sp {:#x}",
+        aux.len() + 2,
+        sp
+    );
+    Ok(sp)
 }
 
 /// Publish freshly copied instructions through the physical identity alias.

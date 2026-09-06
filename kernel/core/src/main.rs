@@ -27,6 +27,7 @@ pub mod paging;
 pub mod psci;
 pub mod sched;
 pub mod selftest;
+pub mod stack;
 pub mod stub;
 pub mod sync;
 #[cfg(nk_lkl)]

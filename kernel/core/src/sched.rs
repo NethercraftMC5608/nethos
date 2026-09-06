@@ -76,6 +76,14 @@ pub struct Task {
     pub linux_pid: i64,
     pub exit_status: i32,
     pub user_irqs: u64,
+    /// The process's heap break, and the lowest value `brk` may return to.
+    /// Zero for a kernel thread, which has neither.
+    pub brk: u64,
+    pub brk_min: u64,
+    /// Where the next anonymous mapping goes. Grows downward, away from the
+    /// heap, so the two run out of room by meeting rather than by silently
+    /// overwriting one another.
+    pub mmap_next: u64,
 }
 
 static mut TASKS: [Task; MAX_TASKS] = [Task {
@@ -90,6 +98,9 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     linux_pid: 0,
     exit_status: 0,
     user_irqs: 0,
+    brk: 0,
+    brk_min: 0,
+    mmap_next: 0,
 }; MAX_TASKS];
 
 static mut CURRENT: usize = 0;
@@ -169,6 +180,9 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             linux_pid: 0,
             exit_status: 0,
             user_irqs: 0,
+            brk: 0,
+            brk_min: 0,
+            mmap_next: 0,
         };
         tasks[slot].ttbr0 = crate::paging::kernel_address_space();
         slot
@@ -204,6 +218,30 @@ pub fn schedule() {
         }
         crate::sync::irq_restore(flags);
     }
+}
+
+/// Give the current task a process's memory layout, just before it enters
+/// EL0. It is set here rather than carried in the `Process` because `brk` and
+/// `mmap` are answered from whatever thread is running, and that is this one.
+pub fn set_user_memory(brk: u64, mmap_top: u64) {
+    unsafe {
+        TASKS[CURRENT].brk = brk;
+        TASKS[CURRENT].brk_min = brk;
+        TASKS[CURRENT].mmap_next = mmap_top;
+    }
+}
+
+/// (brk, brk_min, mmap_next) for the running task.
+pub fn user_memory() -> (u64, u64, u64) {
+    unsafe { (TASKS[CURRENT].brk, TASKS[CURRENT].brk_min, TASKS[CURRENT].mmap_next) }
+}
+
+pub fn set_user_brk(v: u64) {
+    unsafe { TASKS[CURRENT].brk = v }
+}
+
+pub fn set_user_mmap_next(v: u64) {
+    unsafe { TASKS[CURRENT].mmap_next = v }
 }
 
 pub fn bind_linux_pid(pid: i64) {

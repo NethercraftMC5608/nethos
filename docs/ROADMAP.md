@@ -349,6 +349,12 @@ the one below it.
 - [ ] **The kernel into TTBR1's half.** No longer a prerequisite for low
       addresses, but it removes the copy of the kernel's tables that every
       address space carries. TTBR1 is enabled and aliases the kernel already.
+- [x] **The process image a real binary expects.** argc, argv, envp and a
+      full auxiliary vector on the initial stack -- the interface no libc
+      declares and every libc reads -- plus `brk`, `mmap` and `munmap`
+      answered by nk rather than forwarded, since LKL has no user half to
+      return an address from. The fixture checks its own stack layout and
+      stores through both the heap and a fresh mapping.
 - [ ] **A persistent root, and an externally supplied init.** The rootfs is
       memory-backed and `/nk-init` is seeded from the kernel image.
 - [ ] `fork`, `exec`, `mmap`, `futex`, signals, `epoll` -- the long tail, and

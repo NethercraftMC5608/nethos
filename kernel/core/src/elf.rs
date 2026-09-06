@@ -16,6 +16,13 @@ pub struct Segment {
 pub struct Image {
     pub entry: u64,
     pub segments: Vec<Segment>,
+    /// Where the program headers are in the file, and how many. A libc reads
+    /// its own headers at startup -- for TLS, for the stack-guard flag, for
+    /// `dl_iterate_phdr` -- so it is handed their *address* in AT_PHDR, and
+    /// that can only be worked out from the segment that happens to contain
+    /// them.
+    pub phoff: usize,
+    pub phnum: usize,
 }
 fn n(bytes: &[u8], off: usize, len: usize) -> Result<u64, &'static str> {
     let s = bytes
@@ -97,7 +104,7 @@ pub fn parse(b: &[u8], low: u64, high: u64) -> Result<Image, &'static str> {
     {
         return Err("entry is not executable file data");
     }
-    Ok(Image { entry, segments })
+    Ok(Image { entry, segments, phoff, phnum: count })
 }
 
 #[cfg(test)]
