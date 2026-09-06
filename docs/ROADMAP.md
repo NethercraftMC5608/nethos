@@ -344,7 +344,8 @@ the one below it.
       call's arguments; buffers are copied in and out with `AT S1E0R`/`S1E0W`
       rather than passed, because LKL is a flat address space and Linux
       blocks inside syscalls. An undescribed call is refused, not passed
-      through. Nested pointers (`execve`, `writev`, `sendmsg`) are next.
+      through. Nested pointers are walked for `readv`/`writev`'s iovecs;
+      `sendmsg`'s control messages are the same shape and still to come.
 - [ ] **The kernel into TTBR1's half.** No longer a prerequisite for low
       addresses, but it removes the copy of the kernel's tables that every
       address space carries. TTBR1 is enabled and aliases the kernel already.

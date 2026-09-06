@@ -349,11 +349,22 @@ guessing; **a missing entry is a refusal, never a passthrough.**
 are different questions and asking the wrong one lets a read-only page be
 written. Transfers are bounded at 64KB.
 
-What this does not yet do is *nested* pointers. `execve`'s argv and envp,
-`writev`'s iovecs, `sendmsg`'s control messages are arrays of pointers into
-user memory, and each has to be walked and each element copied. That is the
-next piece of the layer, and it is the reason those calls are absent rather
-than described.
+**Nested pointers are walked.** `readv` and `writev` take an array of
+`struct iovec`, each entry a pointer into user memory, so the argument is a
+pointer to pointers and every one of them has to be followed. nk copies the
+array, sums the lengths -- refusing the whole call rather than truncating one
+entry, because a short `writev` is a legitimate result and would hide the
+refusal -- and copies everything the entries point at into **one flat
+buffer**, handing Linux an iovec array whose entries point into it at
+offsets. Linux does not care that they are contiguous, and it makes the copy
+back a walk over offsets rather than a second set of allocations. The fixture
+checks the distribution rather than only the total: a `readv` with iovecs of
+length 1 and 3 must put the ELF magic's `0x7f` in the first buffer and "ELF"
+in the second, and gets there through Linux's real `readv`.
+
+`sendmsg`'s control messages are the same shape and still to come.
+`execve`'s argv and envp are not -- they belong to nk's own loader, since LKL
+has no user space to exec into.
 
 ### The low half, and the global mapping that was blocking it
 

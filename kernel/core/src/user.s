@@ -232,6 +232,63 @@ __user_blob_start:
     svc     #0
     add     sp, sp, #64
 
+    // Scatter and gather, which is what a libc actually uses.
+    //
+    // readv into two *disjoint* buffers proves the marshalling layer
+    // distributes the kernel's one flat buffer back across the user's ranges
+    // rather than copying it all to the first one; writev to the console
+    // proves the gather side. Both are the nested case: the argument is a
+    // pointer to an array of pointers, and every one has to be walked.
+    mov     x0, x22
+    mov     x1, #0
+    mov     x2, #0                  // SEEK_SET
+    mov     x8, #62                 // __NR_lseek
+    svc     #0
+
+    sub     sp, sp, #128            // 0..47 iovecs, 48 one byte, 56 three
+    add     x9, sp, #48
+    str     x9, [sp, #0]
+    mov     x9, #1
+    str     x9, [sp, #8]
+    add     x9, sp, #56
+    str     x9, [sp, #16]
+    mov     x9, #3
+    str     x9, [sp, #24]
+    mov     x0, x22
+    mov     x1, sp
+    mov     x2, #2
+    mov     x8, #65                 // __NR_readv
+    svc     #0
+    cmp     x0, #4
+    b.ne    9f
+    ldrb    w0, [sp, #48]           // the first iovec got only the 0x7f
+    cmp     w0, #0x7f
+    b.ne    9f
+
+    // ...and the second got "ELF", printed here in one gather call.
+    adr     x9, 10f
+    str     x9, [sp, #0]
+    mov     x9, 11f - 10f
+    str     x9, [sp, #8]
+    add     x9, sp, #56
+    str     x9, [sp, #16]
+    mov     x9, #3
+    str     x9, [sp, #24]
+    adr     x9, 7f
+    str     x9, [sp, #32]
+    mov     x9, #1
+    str     x9, [sp, #40]
+    mov     x0, #1
+    mov     x1, sp
+    mov     x2, #3
+    mov     x8, #66                 // __NR_writev
+    svc     #0
+    mov     x9, 11f - 10f
+    add     x9, x9, #4
+    cmp     x0, x9
+    b.ne    9f
+    add     sp, sp, #128
+
     mov     x0, x22
     mov     x8, #57                 // __NR_close
     svc     #0
@@ -292,6 +349,8 @@ __user_blob_start:
 5:  .ascii  "  /nk-init, opened and read from EL0 through Linux, begins: "
 6:
 7:  .ascii  "\n"
+10: .ascii  "  and again by readv, gathered back out with writev: "
+11:
 .balign 4
 .balign 4
 .global __user_blob_end

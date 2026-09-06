@@ -393,6 +393,14 @@ class LinuxOnNk(unittest.TestCase):
         # written by a real binary rather than guessed at.
         self.assertIn('syscall 40 has no descriptor yet', self.out)
 
+    def test_nested_pointers_are_walked_not_passed(self):
+        # readv fills two disjoint user buffers from one flat kernel buffer,
+        # and the fixture checks the distribution itself: the first iovec has
+        # length 1 and must receive only the 0x7f, the second must receive
+        # "ELF". Getting that wrong exits 99 rather than printing this, and
+        # writev carries it back out as three gathered pieces.
+        self.assertIn('and again by readv, gathered back out with writev: ELF', self.out)
+
     def test_nothing_faulted(self):
         self.assertNotIn('!!EXC', self.out)
         self.assertNotIn('!! kernel panic', self.out)

@@ -155,8 +155,13 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
     // else -- including writes to a descriptor the process opened itself --
     // is Linux's. This is the one place nk still answers on Linux's behalf,
     // and it goes away when there is a real console device.
-    let ret = if frame.x[8] == 64 && (frame.x[0] == 1 || frame.x[0] == 2) {
+    let console = frame.x[0] == 1 || frame.x[0] == 2;
+    let ret = if frame.x[8] == 64 && console {
         sys_write(frame.x[0], frame.x[1], frame.x[2])
+    } else if frame.x[8] == 66 && console {
+        // The same rule as `write`, and it has to be here too because this is
+        // the call a libc `printf` actually makes.
+        sys_writev(frame.x[0], frame.x[1], frame.x[2])
     } else {
         forward(frame.x[8], &frame.x[..6].try_into().unwrap())
     };
@@ -212,6 +217,53 @@ fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
         uart.put(*b);
     }
     count as i64
+}
+
+/// # writev(fd, iov, iovcnt)
+///
+/// The console's scatter/gather form. Each entry is checked and copied on its
+/// own, so a bad pointer half way down refuses without having invented a
+/// short write: nothing is emitted until every entry has been read.
+fn sys_writev(fd: u64, iov: u64, count: u64) -> i64 {
+    if fd != 1 && fd != 2 {
+        return -9; // -EBADF
+    }
+    if count > 1024 {
+        return -22; // -EINVAL, and Linux's own UIO_MAXIOV
+    }
+    let mut raw = alloc::vec![0u8; count as usize * 16];
+    if crate::uaccess::copy_from_user(&mut raw, iov).is_err() {
+        println!("  refused a user pointer into kernel memory (EFAULT)");
+        return crate::uaccess::EFAULT;
+    }
+
+    let mut bytes: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    for i in 0..count as usize {
+        let e = &raw[i * 16..];
+        let base = u64::from_le_bytes(e[0..8].try_into().unwrap());
+        let len = u64::from_le_bytes(e[8..16].try_into().unwrap()) as usize;
+        if len == 0 {
+            continue;
+        }
+        if bytes.len() + len > crate::uaccess::MAX_TRANSFER {
+            return -22;
+        }
+        let at = bytes.len();
+        bytes.resize(at + len, 0);
+        if crate::uaccess::copy_from_user(&mut bytes[at..], base).is_err() {
+            println!("  refused a user pointer into kernel memory (EFAULT)");
+            return crate::uaccess::EFAULT;
+        }
+    }
+
+    let uart = crate::uart::console();
+    for b in &bytes {
+        if *b == b'\n' {
+            uart.put(b'\r');
+        }
+        uart.put(*b);
+    }
+    bytes.len() as i64
 }
 
 fn sys_exit(status: i32) -> ! {
