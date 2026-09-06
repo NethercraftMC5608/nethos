@@ -539,9 +539,55 @@ one exec would not notice and a shell would. `enter_user_fresh` is
 `TPIDR_EL0` is cleared too. It belonged to the program that is gone, and the
 memory it pointed at has just been freed.
 
+### fork, and wait4
+
+`fork` is nk's because the address space is, and `wait4` is nk's because the
+exit status is -- a process's status is recorded when it calls `exit`, and
+Linux's own task is torn down with `do_exit(0)` underneath.
+
+The child is a copy of the parent **at the instruction it forked on**, so it
+is entered by restoring a saved exception frame rather than by jumping to an
+entry point: `resume_user` is `el0_sync_entry`'s exit path with the frame
+passed in rather than found on the stack, and `x0` set to zero, which is what
+`fork` returns in the child.
+
+Three things worth writing down:
+
+**The copy is a real copy.** Copy-on-write is the obvious improvement and it
+needs a fault handler that can tell a write to a shared page from a wild
+pointer, which nk does not have -- and getting that wrong turns a bug in one
+process into silent corruption in another. Permissions are copied with the
+pages, so the child's text stays executable and its RELRO stays read-only.
+Only the process's own pages: the first gigabyte is shared with the devices,
+and those level-2 entries are *blocks*, so following one as though it were a
+table turns a fork into freeing the kernel's memory one entry at a time.
+
+**`fork` returns the child's pid, and only the child can obtain one.**
+Attaching to Linux binds the task to the host thread doing the attaching, so
+the parent blocks on a semaphore until the child has published its pid. That
+is a real serialisation and it is the honest one: the alternative is inventing
+a pid before Linux has agreed to it.
+
+**`clone` is a menu and nk implements one column of it.** Sharing memory makes
+a thread and sharing nothing makes a process; anything asking for `CLONE_VM`,
+`CLONE_FILES` or `CLONE_THREAD` is refused with ENOSYS rather than quietly
+given its own memory, which would look like it worked until two threads
+disagreed about a variable.
+
+A wait status is not an exit code: the low byte says how the process died and
+the second says with what, so a normal exit is the code shifted up by eight.
+A libc's `WEXITSTATUS` undoes exactly that and gets nonsense from a plain code.
+
+**What fork does not yet do is inherit the parent's descriptors.** The child
+gets a fresh Linux task with its own filesystem context and its own empty
+descriptor table, because that is what `attach_process` builds. Real fork
+copies the table, and a shell needs it to -- redirection is a `dup2` in the
+child of an fd the parent opened. That is the next piece.
+
 ### What a real binary still cannot do
 
-`fork`, threads, signals, and any `mmap` of a file. The rootfs is
+Threads, signals, and any `mmap` of a file. A forked child does not inherit
+its parent's open descriptors. The rootfs is
 memory-backed and `/nk-init` is seeded from the kernel image, so the binary
 travels inside `nk.bin` rather than being read from a disk.
 
@@ -1200,6 +1246,24 @@ components, BSD-licensed, no strings — at the price of far worse coverage of
 modern hardware. Both are real choices. This one assumes Linux drivers.
 
 ## Working here
+
+**Each build variant has its own target directory.** `NK_LKL_LIB` and
+`NK_LINUX_LIB` are build-script inputs, so a plain kernel, a driver port and
+the whole of Linux invalidate each other's builds. One directory means a full
+rebuild at every switch, and with the suite running classes in parallel it is
+worse than slow: they take the same cargo lock, and a class whose watchdog is
+twelve seconds spends them waiting for a build it did not ask for. The plain
+build keeps `kernel/target`, which is what a bare `cargo build` produces and
+what gdb and the tests name.
+
+**The suite is slower than the work it does, and the reason is known.**
+`psci::poweroff` asks the firmware to switch the machine off when nk finishes;
+the device tree says `hvc` and nk issues it, and QEMU under HVF does not
+oblige. So every class runs to its watchdog rather than to its end: twelve
+seconds for a run that takes one, and ninety for one that takes fifteen. The
+harness reads the console and stops at nk's own end marker, which did not help
+-- the output is not arriving line by line, and that is the next thing to look
+at. Until then the parallel runner is what makes it bearable.
 
 **Run the tests with `tests/run-kernel-tests.sh`.** Every class boots QEMU
 from scratch in `setUpClass`, so `unittest discover` is a dozen independent

@@ -196,6 +196,45 @@ enter_user_fresh:
     mov     sp, x3
     b       enter_user
 
+// resume_user(frame, ttbr0, kernel_sp)
+//
+// fork's other half. The child has to start where its parent was -- the same
+// instruction, the same registers, the same user stack -- so it is entered by
+// restoring a saved exception frame rather than by jumping to an entry point.
+// This is `el0_sync_entry`'s exit path with the frame passed in rather than
+// found on the stack.
+.global resume_user
+resume_user:
+    mov     sp, x2                  // the child's own kernel stack, wound back
+    msr     ttbr0_el1, x1
+    dsb     ishst
+    tlbi    vmalle1
+    dsb     ish
+    isb
+
+    ldp     x2,  x3,  [x0, #16 * 16]
+    msr     spsr_el1, x2
+    msr     sp_el0, x3
+    ldp     x30, x2,  [x0, #16 * 15]
+    msr     elr_el1, x2
+    ldp     x2,  x3,  [x0, #16 * 1]
+    ldp     x4,  x5,  [x0, #16 * 2]
+    ldp     x6,  x7,  [x0, #16 * 3]
+    ldp     x8,  x9,  [x0, #16 * 4]
+    ldp     x10, x11, [x0, #16 * 5]
+    ldp     x12, x13, [x0, #16 * 6]
+    ldp     x14, x15, [x0, #16 * 7]
+    ldp     x16, x17, [x0, #16 * 8]
+    ldp     x18, x19, [x0, #16 * 9]
+    ldp     x20, x21, [x0, #16 * 10]
+    ldp     x22, x23, [x0, #16 * 11]
+    ldp     x24, x25, [x0, #16 * 12]
+    ldp     x26, x27, [x0, #16 * 13]
+    ldp     x28, x29, [x0, #16 * 14]
+    // x0 and x1 last: x0 is the frame pointer until this instruction.
+    ldp     x0,  x1,  [x0, #16 * 0]
+    eret
+
 // The program itself, in the kernel image, because nk has no filesystem to
 // load one from yet. Position-independent -- it is copied to whatever address
 // the user address space puts it at, so every reference is PC-relative.

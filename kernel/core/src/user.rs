@@ -61,6 +61,8 @@ extern "C" {
     fn enter_user(entry: u64, stack: u64, ttbr0: u64) -> !;
     #[cfg(nk_lkl)]
     fn enter_user_fresh(entry: u64, stack: u64, ttbr0: u64, kernel_sp: u64) -> !;
+    #[cfg(nk_lkl)]
+    fn resume_user(frame: *const Frame, ttbr0: u64, kernel_sp: u64) -> !;
 }
 
 /// Build the standalone smoke-test address space, sharing EL1-only kernel
@@ -193,6 +195,10 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // The same rule as `write`, and it has to be here too because this is
         // the call a libc `printf` actually makes.
         sys_writev(frame.x[0], frame.x[1], frame.x[2])
+    } else if matches!(frame.x[8], 220 | 260) {
+        // clone and wait4. Both are nk's for the same reason execve is: the
+        // address space and the exit status are nk's, not Linux's.
+        process(frame)
     } else if frame.x[8] == 221 && cfg!(nk_lkl) {
         // execve does not return, so it is not part of the dispatch below:
         // either it replaces the program or it fails and says why. It needs
@@ -416,6 +422,169 @@ fn sys_munmap(addr: u64, len: u64) -> i64 {
     }
     unsafe { crate::paging::unmap_user(current_ttbr0(), start, end - start) };
     0
+}
+
+/// clone and wait4, or -ENOSYS on a build with no Linux behind them.
+#[cfg(nk_lkl)]
+fn process(frame: &Frame) -> i64 {
+    if frame.x[8] == 220 {
+        fork(frame)
+    } else {
+        wait4(frame.x[0] as i64, frame.x[1], frame.x[2])
+    }
+}
+
+#[cfg(not(nk_lkl))]
+fn process(frame: &Frame) -> i64 {
+    println!("  syscall {} needs a Linux task to attach to", frame.x[8]);
+    -38
+}
+
+/// What a forked child needs to become itself, handed to its new nk thread.
+#[cfg(nk_lkl)]
+struct Forked {
+    frame: Frame,
+    ttbr0: u64,
+    brk: u64,
+    brk_min: u64,
+    mmap_next: u64,
+    tpidr: u64,
+    /// Signalled once the child has a Linux pid, because `fork` has to return
+    /// that pid to the parent and only the child can obtain one: attaching
+    /// binds the Linux task to the host thread it runs on.
+    ready: &'static crate::sync::Semaphore,
+    pid: &'static core::sync::atomic::AtomicI64,
+}
+
+/// # clone(flags, stack, ...) -- but only the shape `fork` uses
+///
+/// A real `clone` is a menu: sharing memory makes a thread, sharing nothing
+/// makes a process, and the flags say which. nk implements the one column of
+/// that menu it can honour completely, and refuses the rest rather than
+/// silently giving a thread its own memory -- which would look like it worked
+/// until two of them disagreed about a variable.
+#[cfg(nk_lkl)]
+fn fork(frame: &Frame) -> i64 {
+    use core::sync::atomic::{AtomicI64, Ordering};
+
+    // glibc's fork() is clone(CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD,
+    // 0, ...). The tid flags concern a pointer nk does not write to, and
+    // SIGCHLD is the exit signal, which nk does not deliver -- wait4 is how a
+    // parent finds out here. Anything asking to share memory or files is a
+    // thread and is refused.
+    const CLONE_VM: u64 = 0x0100;
+    const CLONE_FILES: u64 = 0x0400;
+    const CLONE_THREAD: u64 = 0x00010000;
+    if frame.x[0] & (CLONE_VM | CLONE_FILES | CLONE_THREAD) != 0 {
+        println!("  clone: threads are not implemented (flags {:#x})", frame.x[0]);
+        return -38; // -ENOSYS
+    }
+
+    let parent = current_ttbr0();
+    let Some(ttbr0) = (unsafe { paging::copy_user_address_space(parent) }) else {
+        return -12; // -ENOMEM
+    };
+
+    let (brk, brk_min, mmap_next) = crate::sched::user_memory();
+    let tpidr: u64;
+    unsafe { core::arch::asm!("mrs {}, tpidr_el0", out(reg) tpidr, options(nomem, nostack)) };
+
+    // Leaked on purpose: the child reads them on its own thread after this
+    // one has returned to EL0, so they cannot live in this stack frame. One
+    // pair per fork is a real cost and the honest fix is a slab of them,
+    // which is worth doing when fork is on a hot path and not before.
+    let ready: &'static crate::sync::Semaphore =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(crate::sync::Semaphore::new(0)));
+    let pid: &'static AtomicI64 =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(AtomicI64::new(0)));
+
+    let mut child_frame = Frame { x: frame.x, elr: frame.elr, spsr: frame.spsr, sp: frame.sp };
+    child_frame.x[0] = 0; // what fork returns in the child
+
+    let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(Forked {
+        frame: child_frame,
+        ttbr0,
+        brk,
+        brk_min,
+        mmap_next,
+        tpidr,
+        ready,
+        pid,
+    })) as usize;
+
+    let me = crate::sched::current_id();
+    let flags = crate::sync::irq_save();
+    let id = crate::sched::spawn("forked", forked_entry, arg);
+    crate::sched::set_parent(id, me);
+    unsafe { crate::sync::irq_restore(flags) };
+
+    // Wait for the child to have a pid. fork returns it, and only the child
+    // can get one -- attaching binds the Linux task to the host thread that
+    // does the attaching.
+    ready.down();
+    pid.load(Ordering::Acquire)
+}
+
+#[cfg(nk_lkl)]
+extern "C" fn forked_entry(arg: usize) {
+    use core::sync::atomic::Ordering;
+    let f = *unsafe { alloc::boxed::Box::from_raw(arg as *mut Forked) };
+
+    // A Linux task of its own, so the child has its own pid and its own view
+    // of the filesystem. This is *not* a copy of the parent's: descriptors
+    // the parent had open are not inherited, which real fork does inherit and
+    // a shell will need. It is a limitation, not a design.
+    let pid = crate::lkl::attach_process().expect("Linux process attach failed");
+    crate::sched::bind_linux_pid(pid);
+    f.pid.store(pid, Ordering::Release);
+    f.ready.up();
+
+    crate::sched::set_user_memory_full(f.brk, f.brk_min, f.mmap_next);
+    unsafe {
+        core::arch::asm!("msr tpidr_el0, {}", in(reg) f.tpidr, options(nomem, nostack));
+        resume_user(
+            &f.frame,
+            f.ttbr0,
+            crate::sched::kernel_stack_top() as u64,
+        )
+    }
+}
+
+/// # wait4(pid, status, options, rusage)
+///
+/// nk's, because nk owns the exit status: a process's status is recorded when
+/// it calls `exit`, and Linux's own task is torn down with `do_exit(0)`
+/// underneath. Only children of the caller, which is why the scheduler
+/// records who forked whom.
+#[cfg(nk_lkl)]
+fn wait4(pid: i64, status: u64, options: u64) -> i64 {
+    const WNOHANG: u64 = 1;
+    let me = crate::sched::current_id();
+    loop {
+        if let Some(id) = crate::sched::finished_child(me, pid) {
+            let child = crate::sched::linux_pid(id);
+            let code = crate::sched::exit_status(id);
+            crate::sched::reap_process(id);
+            if status != 0 {
+                // A wait status is not an exit code: the low byte says how it
+                // died and the second says with what, so a normal exit is the
+                // code shifted up by eight. A libc's WEXITSTATUS undoes
+                // exactly this and gets nonsense from a plain code.
+                let w = ((code as u32 & 0xff) << 8).to_le_bytes();
+                if crate::uaccess::copy_to_user(status, &w).is_err() {
+                    return crate::uaccess::EFAULT;
+                }
+            }
+            return child;
+        }
+        if !crate::sched::has_live_child(me, pid) {
+            return -10; // -ECHILD
+        }
+        if options & WNOHANG != 0 {
+            return 0;
+        }
+        crate::sched::yield_now();
+    }
 }
 
 /// `execve`, or -ENOSYS on a build with no Linux to read the file through.

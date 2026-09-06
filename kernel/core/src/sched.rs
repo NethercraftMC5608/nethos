@@ -84,6 +84,11 @@ pub struct Task {
     /// heap, so the two run out of room by meeting rather than by silently
     /// overwriting one another.
     pub mmap_next: u64,
+    /// The task that forked this one, or 0. `wait4` needs it: a process may
+    /// only wait for its own children, and "its own" is a fact nothing else
+    /// records -- Linux knows about its tasks but nk owns the address spaces
+    /// and the exit statuses, so the relation has to live where those do.
+    pub parent: usize,
     /// The process's thread pointer, `TPIDR_EL0`.
     ///
     /// nk never reads it, which is exactly why it has to be saved here: it
@@ -111,6 +116,7 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     brk: 0,
     brk_min: 0,
     mmap_next: 0,
+    parent: 0,
     tpidr: 0,
 }; MAX_TASKS];
 
@@ -194,6 +200,7 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             brk: 0,
             brk_min: 0,
             mmap_next: 0,
+            parent: 0,
             tpidr: 0,
         };
         tasks[slot].ttbr0 = crate::paging::kernel_address_space();
@@ -258,14 +265,56 @@ pub fn set_user_mmap_next(v: u64) {
     unsafe { TASKS[CURRENT].mmap_next = v }
 }
 
-/// The top of the running task's kernel stack.
+/// Record who forked whom, and answer questions about it.
+pub fn set_parent(child: usize, parent: usize) {
+    unsafe { TASKS[child].parent = parent }
+}
+
+/// A child of `parent` that has finished, if there is one.
+pub fn finished_child(parent: usize, want_pid: i64) -> Option<usize> {
+    unsafe {
+        (0..MAX_TASKS).find(|&i| {
+            TASKS[i].parent == parent
+                && TASKS[i].state == State::Finished
+                && (want_pid <= 0 || TASKS[i].linux_pid == want_pid)
+        })
+    }
+}
+
+/// Whether `parent` still has a child that might yet finish. `wait4` blocks
+/// only while this is true; with no children at all it has to return ECHILD
+/// rather than wait for one that is never coming.
+pub fn has_live_child(parent: usize, want_pid: i64) -> bool {
+    unsafe {
+        (0..MAX_TASKS).any(|i| {
+            TASKS[i].parent == parent
+                && TASKS[i].state != State::Unused
+                && (want_pid <= 0 || TASKS[i].linux_pid == want_pid)
+        })
+    }
+}
+
+/// The task's own memory layout, for a child that inherits its parent's.
+pub fn set_user_memory_full(brk: u64, brk_min: u64, mmap_next: u64) {
+    unsafe {
+        TASKS[CURRENT].brk = brk;
+        TASKS[CURRENT].brk_min = brk_min;
+        TASKS[CURRENT].mmap_next = mmap_next;
+    }
+}
+
+/// The top of a task's kernel stack.
 ///
 /// `execve` needs it: it never returns through the exception frame it was
 /// called on, and every frame below that one is dead the moment the new
 /// program starts. Without resetting the stack pointer those frames are
 /// leaked for the life of the task, which a shell would notice.
 pub fn kernel_stack_top() -> usize {
-    unsafe { TASKS[CURRENT].stack + STACK_PAGES * PAGE }
+    kernel_stack_top_of(unsafe { CURRENT })
+}
+
+pub fn kernel_stack_top_of(id: usize) -> usize {
+    unsafe { TASKS[id].stack + STACK_PAGES * PAGE }
 }
 
 pub fn bind_linux_pid(pid: i64) {

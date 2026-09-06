@@ -106,6 +106,26 @@ if [ -n "$INIT" ]; then
     say "Init: $INIT ($(du -h "$INIT" | cut -f1))"
 fi
 
+# A target directory per variant.
+#
+# NK_LKL_LIB and NK_LINUX_LIB are build-script inputs, so switching between a
+# plain kernel, a driver port and the whole of Linux invalidates the previous
+# build every time. With one directory that is a full rebuild on every switch,
+# and with the test suite running classes in parallel it is worse than slow:
+# they take the same cargo lock, and a class whose watchdog is twelve seconds
+# spends them waiting for a build it did not ask for.
+VARIANT=plain
+[ -n "$PORT" ] && VARIANT="port-$PORT"
+[ "$LKL" -eq 1 ] && VARIANT=lkl
+if [ "$VARIANT" = plain ]; then
+    # The plain build keeps the conventional path: tests and gdb sessions name
+    # it, and it is the one a bare `cargo build` in kernel/ produces.
+    TARGET="$ROOT/kernel/target"
+else
+    TARGET="$ROOT/kernel/target-$VARIANT"
+fi
+export CARGO_TARGET_DIR="$TARGET"
+
 if [ "$BUILD" -eq 1 ]; then
     command -v cargo >/dev/null || die "cargo is missing.  brew install rustup && rustup default stable"
     say "Building nk ($PROFILE)"
@@ -116,7 +136,7 @@ if [ "$BUILD" -eq 1 ]; then
     fi
 fi
 
-ELF="$ROOT/kernel/target/aarch64-unknown-none-softfloat/$PROFILE/nk"
+ELF="$TARGET/aarch64-unknown-none-softfloat/$PROFILE/nk"
 [ -f "$ELF" ] || die "no kernel at $ELF -- drop --no-build"
 
 # QEMU is given the flat binary, not the ELF. Handed an ELF it loads the

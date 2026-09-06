@@ -362,6 +362,67 @@ pub unsafe fn unmap_user(ttbr0: u64, va: u64, size: u64) -> usize {
     freed
 }
 
+/// Copy an address space: every page the process owns, with the permissions
+/// it had.
+///
+/// `fork` is the only caller and it wants the plainest possible thing: real
+/// memory, copied. Copy-on-write is the obvious improvement and it needs a
+/// fault handler that can tell a write to a shared page from a wild pointer,
+/// which nk does not have yet -- and getting that wrong turns a bug in one
+/// process into silent corruption in another.
+///
+/// Only the process's own pages are copied. The first gigabyte is shared with
+/// the devices, and those level-2 entries are *blocks*, not tables; following
+/// one as though it were a table is what turns a fork into freeing the
+/// kernel's memory a page-table entry at a time.
+///
+/// # Safety
+/// `parent` must be a user address space built by `new_address_space`.
+pub unsafe fn copy_user_address_space(parent: u64) -> Option<u64> {
+    let child = new_address_space();
+    let pl0 = table_of(parent) as *const u64;
+    let e0 = *pl0;
+    if !is_table(e0) {
+        return Some(child);
+    }
+    let pl1 = (e0 & ADDR) as *const u64;
+    let e1 = *pl1;
+    if !is_table(e1) {
+        return Some(child);
+    }
+    let pl2 = (e1 & ADDR) as *const u64;
+    for i in 0..512 {
+        let e2 = *pl2.add(i);
+        if !is_table(e2) {
+            continue; // a block: the shared device mapping
+        }
+        let pl3 = (e2 & ADDR) as *const u64;
+        for j in 0..512 {
+            let e3 = *pl3.add(j);
+            if e3 & pte::VALID == 0 {
+                continue;
+            }
+            let va = ((i as u64) << L2_SHIFT) | ((j as u64) << L3_SHIFT);
+            let Some(page) = crate::frames::alloc() else {
+                destroy_user_address_space(child);
+                return None;
+            };
+            core::ptr::copy_nonoverlapping((e3 & ADDR) as *const u8, page, 4096);
+            // The permissions the parent had, not a guess: an executable page
+            // stays executable and a read-only one stays read-only, which is
+            // what makes the child's RELRO and its text the same as its
+            // parent's.
+            let exec = e3 & pte::UXN == 0;
+            // AP_RO_ANY is *both* AP bits, and AP_RW_ANY is one of them, so
+            // "read-only" is the pair being present rather than the field
+            // being non-zero -- a writable page has bit 6 set too.
+            let writable = e3 & pte::AP_RO_ANY != pte::AP_RO_ANY;
+            map_user_permissions(child, va, page as u64, 4096, exec, writable);
+        }
+    }
+    Some(child)
+}
+
 /// Change the permissions of an existing user mapping.
 ///
 /// Returns false if any page in the range is not mapped -- `mprotect` over a

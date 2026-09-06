@@ -37,6 +37,14 @@ pub fn init(fdt: &Fdt) {
         .map(|v| if v.starts_with(b"smc") { Method::Smc } else { Method::Hvc })
         .unwrap_or(Method::None);
     unsafe { METHOD = m };
+    crate::println!(
+        "  psci:   {}",
+        match m {
+            Method::Hvc => "hvc",
+            Method::Smc => "smc",
+            Method::None => "absent -- the machine will not switch itself off",
+        }
+    );
 }
 
 /// Turn the machine off. Returns only if the firmware refuses.

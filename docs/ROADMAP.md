@@ -381,7 +381,17 @@ the one below it.
       only once TTBR0 points at the new -- the kernel is mapped through the
       same tables. A failed execve leaves the caller intact, which is what
       execve promises and what building-before-tearing-down buys.
-- [ ] `fork`, `mmap` of a file, `futex`, signals, `epoll` -- the long tail, and
+- [x] **`fork` and `wait4`.** The child is a copy of the parent at the
+      instruction it forked on -- entered by restoring the parent's exception
+      frame with x0 zeroed, not by jumping to an entry point -- with a real
+      copy of its memory and its permissions. `clone` refuses the flags that
+      would make a thread rather than quietly giving it its own memory. What
+      is missing is descriptor inheritance: the child gets a fresh Linux task
+      with an empty fd table, and a shell needs the parent's.
+- [ ] **Descriptor inheritance across fork**, then a console Linux owns so
+      fd 0/1/2 are real and `isatty` and termios work. nk still answers
+      writes to 1 and 2 itself.
+- [ ] `mmap` of a file, `futex`, signals, `epoll` -- the long tail, and
       the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.
 

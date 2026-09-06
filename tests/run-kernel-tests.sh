@@ -33,8 +33,9 @@ CLASSES=$(
 # enough to be useful plus a substituted name exceeds what it will assemble.
 export RESULTS
 echo "$CLASSES" | xargs -P "$JOBS" -I{} sh -c '
+    s=$(date +%s)
     python3 -m unittest "$1" > "$RESULTS/$1" 2>&1
-    printf "%-40s %s\n" "$1" "$(tail -1 "$RESULTS/$1")"
+    printf "%-40s %4ss  %s\n" "$1" "$(( $(date +%s) - s ))" "$(tail -1 "$RESULTS/$1")"
 ' _ {}
 
 ran=$(ls "$RESULTS" | wc -l | tr -d ' ')

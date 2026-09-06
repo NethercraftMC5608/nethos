@@ -10,6 +10,7 @@ import re
 import shutil
 import struct
 import subprocess
+import time
 import unittest
 from pathlib import Path
 
@@ -23,12 +24,45 @@ CARGO = shutil.which('cargo') or shutil.which('cargo', path='/opt/homebrew/opt/r
 HAVE = bool(CARGO) and bool(shutil.which('qemu-system-aarch64'))
 
 
+# What nk prints on its last line, and what it prints instead when it dies.
+# A run is over at either: waiting past them buys nothing and costs the whole
+# watchdog, which is most of what this suite used to spend its time doing.
+DONE = ('nk: done.', '!! kernel panic')
+
+
 def boot(*args, timeout=60, watchdog=12):
-    out = subprocess.run(
+    """Boot nk and return everything it said.
+
+    Reads the serial console as it arrives and stops at nk's own end marker
+    rather than waiting for QEMU to exit. nk asks the firmware to switch the
+    machine off when it finishes and QEMU under HVF does not oblige, so
+    without this every class pays its full watchdog -- twelve seconds for a
+    run that takes one, ninety for a run that takes fifteen.
+    """
+    proc = subprocess.Popen(
         ['bash', str(RUN), '--timeout', str(watchdog), *args],
-        capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, stdin=subprocess.DEVNULL,
     )
-    return out.stdout + out.stderr
+    lines = []
+    deadline = time.monotonic() + timeout
+    try:
+        for line in proc.stdout:
+            lines.append(line)
+            if any(marker in line for marker in DONE):
+                break
+            if time.monotonic() > deadline:
+                break
+    finally:
+        proc.terminate()
+        try:
+            # The build and QEMU are children of the shell being terminated;
+            # give them a moment to go before insisting.
+            lines.append(proc.communicate(timeout=10)[0] or '')
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            lines.append(proc.communicate()[0] or '')
+    return ''.join(lines)
 
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
@@ -452,6 +486,50 @@ def make_cpio(root, name):
     if cpio.returncode != 0:
         raise unittest.SkipTest(f'cpio failed: {cpio.stderr.decode()[:200]}')
     return archive
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class Fork(unittest.TestCase):
+    """A process with a child, and a parent that reaps it.
+
+    fork is nk's because the address space is: the child is a copy of the
+    parent at the instruction it forked on, entered by restoring the parent's
+    exception frame with x0 set to zero rather than by jumping to an entry
+    point. wait4 is nk's because the exit status is -- Linux's own task is
+    torn down with do_exit(0) underneath.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        root = ROOT / 'kernel/ldk/build/fork-root'
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        shutil.copy(build_c('fork', 'nk-fork'), root / 'nk-init')
+        cls.out = boot('--lkl', '--initrd', str(make_cpio(root, 'fork.cpio')),
+                       timeout=180, watchdog=90)
+
+    def test_the_child_sees_zero_and_the_parent_a_pid(self):
+        self.assertIn('child: fork() returned 0', self.out)
+        self.assertIn('parent: fork() returned a pid', self.out)
+
+    def test_they_do_not_share_memory(self):
+        # The same variable, written on both sides after the fork. A shared
+        # page would make one of these read the other's value.
+        self.assertIn('child: fork() returned 0, shared is 20', self.out)
+        self.assertIn('parent: fork() returned a pid, shared is 10', self.out)
+
+    def test_the_parent_reaps_the_child_and_reads_its_status(self):
+        self.assertIn('parent: reaped its child, which exited 9', self.out)
+
+    def test_waiting_with_no_children_says_so(self):
+        self.assertIn('parent: wait4 with no children returned ECHILD', self.out)
+
+    def test_the_parent_exits_with_its_own_status(self):
+        self.assertIn('the process exited with status 7', self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('fault in user space', self.out)
+        self.assertNotIn('kernel panic', self.out)
 
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
