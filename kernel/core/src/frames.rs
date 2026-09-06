@@ -117,13 +117,31 @@ pub fn alloc() -> Option<*mut u8> {
 /// heap, once, at boot. A driver wanting contiguous DMA memory at runtime is
 /// Stage 3's problem and will need a real buddy allocator.
 pub fn alloc_contiguous(n: usize) -> Option<*mut u8> {
+    alloc_contiguous_aligned(n, PAGE)
+}
+
+/// `n` contiguous frames whose physical address is a multiple of `align`.
+///
+/// Needed the moment nk maps something with a block entry rather than a page:
+/// a 2MB block descriptor has no room for the low bits of an address, so the
+/// hardware simply ignores them, and a mapping made from a misaligned
+/// physical address silently points somewhere else. The alignment is checked
+/// rather than assumed for that reason -- there is no fault to catch it.
+///
+/// The skipped bytes are lost. That is deliberate: reclaiming them means
+/// pushing a run of pages onto the free list, and the free list holds single
+/// frames in no order, so a later `alloc_contiguous` could not use them
+/// anyway. The waste is bounded by `align` per call and there are two calls.
+pub fn alloc_contiguous_aligned(n: usize, align: usize) -> Option<*mut u8> {
+    assert!(align.is_power_of_two() && align >= PAGE);
     unsafe {
         let f = &mut *(&raw mut FRAMES);
         for r in &mut f.regions[..f.nregions] {
-            if r.end - r.next >= n * PAGE {
-                let p = r.next as *mut u8;
-                r.next += n * PAGE;
-                f.used += n;
+            let start = (r.next + align - 1) & !(align - 1);
+            if start < r.end && r.end - start >= n * PAGE {
+                f.used += (start - r.next) / PAGE + n;
+                r.next = start + n * PAGE;
+                let p = start as *mut u8;
                 core::ptr::write_bytes(p, 0, n * PAGE);
                 return Some(p);
             }

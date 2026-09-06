@@ -23,9 +23,9 @@ CARGO = shutil.which('cargo') or shutil.which('cargo', path='/opt/homebrew/opt/r
 HAVE = bool(CARGO) and bool(shutil.which('qemu-system-aarch64'))
 
 
-def boot(*args, timeout=60):
+def boot(*args, timeout=60, watchdog=12):
     out = subprocess.run(
-        ['bash', str(RUN), '--timeout', '12', *args],
+        ['bash', str(RUN), '--timeout', str(watchdog), *args],
         capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
     )
     return out.stdout + out.stderr
@@ -240,6 +240,53 @@ class Stage3(unittest.TestCase):
         self.assertNotIn('unimplemented Linux API', self.out)
         self.assertNotIn('!! exception', self.out)
         self.assertNotIn('!! kernel panic', self.out)
+
+
+NET_LIB = ROOT / 'kernel/ldk/build/virtio-net/libnklinux.a'
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+@unittest.skipUnless(NET_LIB.exists(), 'virtio-net port not built')
+class Stage4(unittest.TestCase):
+    """An unmodified Linux driver, sending and receiving a real packet.
+
+    Under TCG, not HVF: virtio-net makes an MMIO access QEMU's HVF backend
+    refuses to decode. Emulation is perhaps twenty times slower, hence the
+    much longer watchdog.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot('--port', 'virtio-net', '--net', '--tcg',
+                       timeout=300, watchdog=90)
+
+    def test_the_vmemmap_is_mapped(self):
+        # Without it, anything that dereferences a struct page faults on an
+        # address nothing ever mapped -- which is where Stage 4 stopped.
+        self.assertRegex(self.out, r'vmemmap: \d+ MiB of struct page at 0x[0-9a-f]+')
+
+    def test_the_driver_reads_its_mac_off_the_device(self):
+        # QEMU's default, so this is a real read of the device's config
+        # space rather than anything nk invented.
+        self.assertIn('virtio-net is up -- 52:54:00:12:34:56', self.out)
+
+    def test_it_gets_an_arp_reply(self):
+        # Transmit and receive both, through the real driver: the virtio
+        # header, the descriptor chain, the notify register, its own
+        # interrupt handler, NAPI, and the used ring.
+        self.assertIn('10.0.2.2 is at 52:55:0a:00:02:02', self.out)
+
+    def test_the_frame_really_is_an_arp_reply(self):
+        # Checked from the bytes, not from nk's own summary of them:
+        # destination is our MAC, ethertype 0806, opcode 0002.
+        self.assertIn('52 54 00 12 34 56 52 55 0a 00 02 02 08 06 00 01', self.out)
+        self.assertIn('08 00 06 04 00 02', self.out)
+
+    def test_nothing_faulted_and_no_stub_was_reached(self):
+        self.assertNotIn('unimplemented Linux API', self.out)
+        self.assertNotIn('!!EXC', self.out)
+        self.assertNotIn('!! kernel panic', self.out)
+        self.assertIn('nk: done.', self.out)
 
 
 if __name__ == '__main__':

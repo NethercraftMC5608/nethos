@@ -145,9 +145,9 @@ one boots.
 - **3 — done.** Unmodified `virtio_mmio` + `virtio_blk` read a sector off a
   QEMU disk. 113 of the 154 symbols they ask for are implemented; the other
   41 are stubs that never ran.
-- **4 — in progress.** `virtio_net` probes, opens, reports the MAC address it
-  read off the device (`52:54:00:12:34:56`) and transmits. The receive path
-  stops at the `struct page` wall below. `e1000` is untouched.
+- **4 — done.** `virtio_net` sends an ARP request and receives the reply:
+  `10.0.2.2 is at 52:55:0a:00:02:02`. Needed a real vmemmap. `e1000` is
+  untouched.
 - **5** — decide with `ldk report`'s numbers whether USB, DRM or WiFi is worth
   attempting. Genode is funded and staffed and still does not do GPU.
 
@@ -217,7 +217,64 @@ attach backing pages, set the scanout, transfer, flush. No DRM core, no
 userspace, no Mesa: nk drawing to a screen by itself. That is weeks, not years,
 and it is the next real milestone after the vmemmap.
 
-## Where Stage 4 stands, and the wall it found
+## Stage 4, and the vmemmap
+
+```
+  reply: 10.0.2.2 is at 52:55:0a:00:02:02
+  52 54 00 12 34 56 52 55 0a 00 02 02 08 06 00 01
+  08 00 06 04 00 02 52 55 0a 00 02 02 0a 00 02 02
+```
+
+Destination our MAC, ethertype `0806`, opcode `0002`, sender `10.0.2.2`.
+`virtio_net.c` unmodified: it read its own MAC out of the device's
+configuration space, transmitted through `ndo_start_xmit`, took its own
+interrupt, ran NAPI and handed the reply up through `gro_receive_skb`.
+
+**The wall was `struct page`, and it was predicted in writing.** `emul/mm.c`
+said at Stage 3:
+
+> the moment something *dereferences* a struct page -- reads a page flag,
+> takes a reference, follows a mapping -- it faults on an address that is not
+> mapped, and that is when the real vmemmap has to be built.
+
+`receive_buf` calls `virt_to_head_page`, which reads `page->compound_head`.
+virtio-blk never did: it only ever converted an address into a page and
+straight back, so the pages it named never had to exist.
+
+So they exist now. Eight megabytes of `struct page` for a 512MB guest,
+allocated and mapped at the address Linux's own arithmetic chooses. Three
+things had to be built for it, and each is worth having anyway:
+
+- **`paging::map_normal`** -- the first mapping in nk of an address that is
+  not simply itself. `virt_to_page` computes where the array is; nk does not
+  get to choose.
+- **`frames::alloc_contiguous_aligned`** -- a 2MB block descriptor has no room
+  for the low bits of a physical address, so the hardware ignores them, and a
+  block made from a misaligned address silently points somewhere else. There
+  is no fault for this; it is asserted instead.
+- **`nk_vmemmap_range`**, in C, using Linux's own `virt_to_page`. A second
+  copy of that arithmetic in Rust would be a second chance to get it wrong,
+  and getting it wrong is what cost Stage 3 its longest afternoon.
+
+The address turned out to be `0x1ffc1000000` -- below 2^48, so it fits in
+TTBR0 and nk still has no high-half mapping at all. That was luck rather than
+design, and it will not survive user space.
+
+Two other things Stage 4 established:
+
+**HVF cannot run this port.** virtio-net makes an MMIO access QEMU's HVF
+backend refuses to decode -- the same `assert(isv)` as the writeback load in
+`mmio.rs`, from driver code this time rather than nk's. `--tcg` separated "nk
+is wrong" from "the hypervisor cannot do this" in one run, for the second
+time. Development of this port happens under TCG.
+
+**A time-based wait is the wrong shape under TCG.** The virtual timer counts
+guest cycles rather than following the host clock, so a three-second deadline
+is around seven hundred real ones and is indistinguishable from a hang -- it
+was diagnosed as one. The probe wait counts yields instead, which is the thing
+actually being waited for.
+
+## The old Stage 4 note, kept for the diagnosis
 
 `virtio_net.c`, unmodified, now registers a `net_device`, is opened, brings up
 its NAPI contexts, reads its MAC address out of the device's configuration

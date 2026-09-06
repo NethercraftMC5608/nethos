@@ -19,6 +19,12 @@
 
 use crate::println;
 
+/// Bits per level of a 4KB-granule, 48-bit walk.
+const L0_SHIFT: u64 = 39;
+const L1_SHIFT: u64 = 30;
+const L2_SHIFT: u64 = 21;
+const BLOCK_2MB: u64 = 1 << L2_SHIFT;
+
 /// A page-table entry. Only the bits nk sets are named.
 mod pte {
     pub const VALID: u64 = 1 << 0;
@@ -54,6 +60,72 @@ struct Table([u64; 512]);
 // non-zero entry here is a valid mapping to somewhere arbitrary.
 static mut L0: Table = Table([0; 512]);
 static mut L1: Table = Table([0; 512]);
+
+/// Follow a table entry, creating the next-level table if it is not there.
+///
+/// Tables come from the frame allocator, which returns zeroed pages -- which
+/// matters more here than anywhere else in the kernel: a non-zero entry in a
+/// fresh page table is a valid mapping to an arbitrary address, and the fault
+/// it eventually produces has no connection to the code that caused it.
+///
+/// # Safety
+/// The MMU is on and the frame allocator is up.
+unsafe fn next_table(entry: *mut u64) -> *mut u64 {
+    if *entry & pte::VALID == 0 {
+        let page = crate::frames::alloc().expect("out of memory for a page table");
+        *entry = (page as u64) | pte::VALID | pte::TABLE;
+        // The walk is done by hardware reading memory this CPU just wrote.
+        // Without the barrier the walker may not see it.
+        core::arch::asm!("dsb ishst", options(nostack));
+    }
+    (*entry & 0x0000_ffff_ffff_f000) as *mut u64
+}
+
+/// Map `size` bytes of normal memory at `va` onto `pa`, in 2MB blocks.
+///
+/// Called after boot, unlike `init`, so it allocates the tables it needs
+/// rather than using the static ones -- and it is the first thing in nk to
+/// map an address that is not simply itself. Linux's vmemmap is the reason:
+/// `struct page` lives at an address computed from a formula, not one nk gets
+/// to choose.
+///
+/// # Safety
+/// `va`, `pa` and `size` are 2MB-aligned; the range is not already mapped.
+pub unsafe fn map_normal(va: u64, pa: u64, size: u64) {
+    assert!(va % BLOCK_2MB == 0 && pa % BLOCK_2MB == 0 && size % BLOCK_2MB == 0);
+    assert!(va >> 48 == 0, "only TTBR0 addresses: {va:#x}");
+
+    let l0 = &raw mut L0 as *mut u64;
+    let mut off = 0;
+    while off < size {
+        let v = va + off;
+        let l0e = l0.add(((v >> L0_SHIFT) & 511) as usize);
+        let l1 = next_table(l0e);
+        let l1e = l1.add(((v >> L1_SHIFT) & 511) as usize);
+        // The static L1 uses 1GB blocks; a block entry here would be
+        // overwritten by next_table into a table pointer, silently unmapping
+        // a gigabyte. Nothing currently overlaps, and this says so out loud
+        // rather than discovering it as a fault somewhere else entirely.
+        assert!(
+            *l1e & pte::VALID == 0 || *l1e & pte::TABLE != 0,
+            "{v:#x} lands inside an existing 1GB block"
+        );
+        let l2 = next_table(l1e);
+        let l2e = l2.add(((v >> L2_SHIFT) & 511) as usize);
+        *l2e = (pa + off) | pte::VALID | pte::AF | pte::SH_INNER | pte::attr(ATTR_NORMAL)
+            | pte::UXN
+            | pte::PXN;
+        off += BLOCK_2MB;
+    }
+
+    core::arch::asm!(
+        "dsb ishst",
+        "tlbi vmalle1",
+        "dsb ish",
+        "isb",
+        options(nostack)
+    );
+}
 
 /// Map the machine and switch the MMU on.
 ///

@@ -57,3 +57,25 @@ bool is_vmalloc_addr(const void *x)
 	(void)x;
 	return false;
 }
+
+/*
+ * The span of `struct page` that has to exist for a range of RAM.
+ *
+ * Computed with Linux's own virt_to_page rather than by reimplementing its
+ * arithmetic here: the whole point of the note above is that the arithmetic
+ * is subtle and asymmetric, and a second copy of it in Rust would be a second
+ * chance to get it wrong.
+ */
+void nk_vmemmap_range(unsigned long long ram_start, unsigned long long ram_size,
+		      unsigned long long *va, unsigned long long *size);
+void nk_vmemmap_range(unsigned long long ram_start, unsigned long long ram_size,
+		      unsigned long long *va, unsigned long long *size)
+{
+	struct page *first = virt_to_page((void *)(unsigned long)ram_start);
+	struct page *last =
+		virt_to_page((void *)(unsigned long)(ram_start + ram_size - 1));
+
+	*va = (unsigned long long)(unsigned long)first;
+	*size = (unsigned long long)(unsigned long)(last + 1) -
+		(unsigned long long)(unsigned long)first;
+}

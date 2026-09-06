@@ -143,6 +143,7 @@ extern "C" {
     /// presents as a device that never answers.
     pub fn nk_tick();
     fn nk_blk_read(sector: u64, buf: *mut u8, len: u32) -> i32;
+    fn nk_vmemmap_range(ram_start: u64, ram_size: u64, va: *mut u64, size: *mut u64);
     fn nk_net_up(mac: *mut u8) -> i32;
     fn nk_net_xmit(frame: *const u8, len: u32) -> i32;
     fn nk_net_poll();
@@ -190,6 +191,14 @@ pub fn init() {
     println!("  linux:  running initcalls");
     let n = unsafe { nk_linux_init() };
     println!("  linux:  {} initcalls ran", n);
+}
+
+/// Where Linux's `struct page` array has to live, and how big it is, for a
+/// given range of RAM.
+pub fn vmemmap_range(ram_start: u64, ram_size: u64) -> (u64, u64) {
+    let (mut va, mut size) = (0u64, 0u64);
+    unsafe { nk_vmemmap_range(ram_start, ram_size, &mut va, &mut size) };
+    (va, size)
 }
 
 /// Bring the network interface up and report its MAC address.

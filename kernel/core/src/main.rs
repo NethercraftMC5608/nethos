@@ -117,6 +117,7 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
     // else to run.
     #[cfg(nk_linux)]
     {
+        map_vmemmap(ram_base, ram_size);
         linux::init();
         linux::probe(&fdt);
 
@@ -343,6 +344,51 @@ extern "C" fn worker(id: usize) {
         while timer::ticks() < until {
             core::hint::spin_loop();
         }
+    }
+}
+
+/// Give Linux the `struct page` array it believes already exists.
+///
+/// Everything in Linux that handles memory eventually holds a `struct page`.
+/// nk got a long way without one: `virt_to_page` and `page_to_phys` are pure
+/// arithmetic, and virtio-blk only ever converted an address into a page and
+/// straight back again, so the pages it named never had to exist. The first
+/// driver that *reads* one -- virtio-net's receive path, through
+/// `virt_to_head_page` -- faults on an address nothing ever mapped.
+///
+/// So it gets mapped. Eight megabytes for a 512MB guest, at an address Linux's
+/// own arithmetic chooses; nk allocates the memory, zeroes it and maps it
+/// where the formula says it is. See emul/mm.c for why the formula lands where
+/// it does.
+#[cfg(nk_linux)]
+fn map_vmemmap(ram_base: u64, ram_size: u64) {
+    const BLOCK: u64 = 2 * 1024 * 1024;
+    let (va, size) = linux::vmemmap_range(ram_base, ram_size);
+    // Rounded outwards to whole 2MB blocks: the mapping granule is larger
+    // than the array, and a partial block at either end would leave a page
+    // Linux thinks exists unmapped.
+    let start = va & !(BLOCK - 1);
+    let bytes = ((va + size + BLOCK - 1) & !(BLOCK - 1)) - start;
+
+    let pa = frames::alloc_contiguous_aligned(
+        (bytes / frames::PAGE as u64) as usize,
+        BLOCK as usize,
+    )
+    .expect("not enough memory for the struct page array");
+    unsafe { paging::map_normal(start, pa as u64, bytes) };
+    println!(
+        "  vmemmap: {} MiB of struct page at {:#x} -> {:#x}",
+        bytes / (1024 * 1024),
+        start,
+        pa as usize
+    );
+    // Proof it is really there, before anything relies on it. A write that
+    // faults here is a mapping bug; one that faults later is a driver bug,
+    // and telling those apart afterwards is expensive.
+    unsafe {
+        let p = start as *mut u64;
+        p.write_volatile(0);
+        p.add((bytes / 8 - 1) as usize).write_volatile(0);
     }
 }
 

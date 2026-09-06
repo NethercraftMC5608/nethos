@@ -280,14 +280,13 @@ The shim is discovered, not designed.
       `virt_to_page` not using `virt_to_pfn`, which produced a read the device
       reported as successful and never delivered; and a console whose only
       failure mode was looking like a hang.
-- [~] **Stage 4, part done.** `virtio_net` probes, opens, reports the MAC it
-      read off the device (52:54:00:12:34:56) and transmits. The receive path
-      hits the `struct page` wall `emul/mm.c` predicted: `virt_to_head_page`
-      dereferences a page nk only ever computed an address for. The fix is a
-      real vmemmap -- 8MB of `struct page` for this guest, mapped through
-      TTBR1, which `paging.rs` currently disables outright. `e1000` after
-      that. Also learned: HVF cannot decode one of virtio-net's MMIO
-      accesses, so this port is developed under `--tcg`.
+- [x] **Stage 4.** `virtio_net` sends an ARP request and receives the reply --
+      `10.0.2.2 is at 52:55:0a:00:02:02`, checked from the raw frame bytes.
+      Needed a real vmemmap: 8MB of `struct page`, because `receive_buf`
+      dereferences one where virtio-blk only ever computed an address for it.
+      Built `paging::map_normal` and `frames::alloc_contiguous_aligned` for
+      it. HVF cannot decode one of virtio-net's MMIO accesses, so this port
+      runs under `--tcg`. `e1000` still untouched.
 - [ ] **Stage 5.** Decide against `ldk report`'s numbers whether USB, DRM or
       WiFi is worth attempting. Genode still does not do GPU.
 

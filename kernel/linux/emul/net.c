@@ -217,12 +217,26 @@ bool napi_complete_done(struct napi_struct *napi, int work_done)
  */
 gro_result_t gro_receive_skb(struct gro_node *gro, struct sk_buff *skb)
 {
+	const u8 *start = skb->data;
+	unsigned int len = skb->len;
+
 	(void)gro;
-	if (!rx_len && skb->len && skb->len <= sizeof(rx_buf)) {
-		memcpy(rx_buf, skb->data, skb->len);
+	/*
+	 * From the MAC header, not from skb->data. eth_type_trans has already
+	 * pulled the fourteen-byte Ethernet header off -- that is its job, so
+	 * that the layer above sees only its own protocol -- and nk *is* the
+	 * layer above but wants the whole frame. skb_mac_header points back at
+	 * it, and the header is still in the buffer, only behind `data`.
+	 */
+	if (skb_mac_header_was_set(skb)) {
+		start = skb_mac_header(skb);
+		len += skb->data - start;
+	}
+	if (!rx_len && len && len <= sizeof(rx_buf)) {
+		memcpy(rx_buf, start, len);
 		/* Length last: nk polls it, and a non-zero length has to mean
 		 * the bytes are already there. */
-		rx_len = skb->len;
+		rx_len = len;
 	}
 	kfree_skb(skb);
 	return GRO_NORMAL;
