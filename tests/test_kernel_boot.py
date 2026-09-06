@@ -406,7 +406,7 @@ class LinuxOnNk(unittest.TestCase):
         # envp's terminator into the auxiliary vector, and checks AT_PAGESZ
         # and that AT_RANDOM's sixteen bytes are not all zero. Getting any of
         # that wrong exits 99 instead of printing this.
-        self.assertIn('argc, argv, envp and a seeded auxv', self.out)
+        self.assertIn('zeroed registers, argc, argv, envp and a seeded auxv', self.out)
 
     def test_a_process_has_a_heap_and_can_map_memory(self):
         # brk and mmap are nk's own: LKL is one flat region with no user half,
@@ -457,11 +457,16 @@ class RealBinary(unittest.TestCase):
     def test_it_runs_and_prints(self):
         self.assertIn('hello from a real compiled binary, on nk', self.out)
 
-    def test_it_read_its_own_argv_off_the_stack_nk_built(self):
-        # argv[0] is not passed in a register: glibc found it on the stack,
-        # which means argc, argv and the auxiliary vector are all where a libc
-        # looks for them.
-        self.assertIn('/nk-init', self.out)
+    def test_printf_and_malloc_work(self):
+        # printf with arguments drags in malloc, stdio buffering and an fstat
+        # on the console; the string came out of a heap allocation.
+        self.assertIn('argv[0] is /nk-init, argc is 1, and the heap works too', self.out)
+
+    def test_it_returns_from_main_through_glibcs_exit(self):
+        # Returning from main runs glibc's atexit handlers -- including the
+        # one it takes from x0 at process entry, which is why every register
+        # has to arrive zero. See docs/KERNEL.md.
+        self.assertIn('and its destructor ran on the way out', self.out)
 
     def test_it_exits_with_its_own_status(self):
         self.assertIn('the process exited with status 7', self.out)

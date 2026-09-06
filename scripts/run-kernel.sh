@@ -13,6 +13,7 @@
 #                                          built-in fixture (needs --lkl)
 #   scripts/run-kernel.sh --tcg            emulate instead of using HVF
 #   scripts/run-kernel.sh --gdb            wait for gdb on :1234
+#   scripts/run-kernel.sh --trace FILE     log EL0 instructions (needs --tcg)
 #   scripts/run-kernel.sh --timeout N      kill after N seconds (for tests)
 #
 # Nothing here touches build/, the images, or anything scripts/run.sh uses.
@@ -31,6 +32,7 @@ MEM=512
 DISK=""
 NET=0
 INIT=""
+TRACE=""
 GDB=0
 TCG=0
 LKL=0
@@ -51,6 +53,7 @@ while [ $# -gt 0 ]; do
         --init)      INIT="${2:?--init needs a file}"; shift 2 ;;
         --tcg)       TCG=1; shift ;;
         --gdb)       GDB=1; shift ;;
+        --trace)     TRACE="${2:?--trace needs a file}"; shift 2 ;;
         --timeout)   TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
         -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
         *) printf '\033[1;31mERROR:\033[0m unknown option: %s\n' "$1" >&2; exit 1 ;;
@@ -93,7 +96,9 @@ fi
 if [ -n "$INIT" ]; then
     [ -f "$INIT" ] || die "no such file: $INIT"
     [ "$LKL" -eq 1 ] || die "--init needs --lkl: the ELF loader reads through Linux's VFS"
-    export NK_INIT="$INIT"
+    # Absolute, because cargo runs build scripts with the package directory
+    # as cwd -- a relative path would resolve against kernel/core/.
+    export NK_INIT="$(cd "$(dirname "$INIT")" && pwd)/$(basename "$INIT")"
     say "Init: $INIT ($(du -h "$INIT" | cut -f1))"
 fi
 
@@ -180,6 +185,22 @@ if [ "$NET" -eq 1 ]; then
     # not a flag.
     ARGS+=( -netdev user,id=nknet
             -device virtio-net-device,netdev=nknet,mrg_rxbuf=off )
+fi
+
+# --trace logs every instruction QEMU executes in the user binary's address
+# range, and nothing else. Without -dfilter this is a Linux boot's worth of
+# gigabytes; with it, it is only what runs at EL0, which is the one thing a
+# kernel cannot see into by itself.
+if [ -n "$TRACE" ]; then
+    [ "$TCG" -eq 1 ] || die "--trace needs --tcg: HVF does not run through the translator"
+    # start+size, not start-end: QEMU accepts the second form in its own
+    # documentation and rejects it here with "Invalid range".
+    ARGS+=( -d "${TRACE_D:-exec,nochain}" -dfilter "${TRACE_RANGE:-0x400000+0xa0000}" -D "$TRACE" )
+    # Basic-block granularity, not per-instruction: `nochain` stops QEMU
+    # linking blocks, so every block entry is logged, which is a list of the
+    # branches taken -- exactly what a control-flow question needs, and a
+    # fraction of the volume.
+    say "Tracing EL0 execution to $TRACE"
 fi
 
 if [ "$GDB" -eq 1 ]; then

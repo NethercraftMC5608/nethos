@@ -137,6 +137,50 @@ enter_user:
     msr     elr_el1, x0             // where to start
     mov     x3, #0                  // EL0t, DAIF clear: interrupts on in user
     msr     spsr_el1, x3
+
+    // Every register zero, and x0 above all.
+    //
+    // The aarch64 process-entry ABI says x0 holds `rtld_fini` -- a function
+    // the dynamic loader wants run at exit -- and that it is zero when there
+    // is none. Linux clears every register on execve for exactly this reason.
+    // nk was leaving x0 holding the entry address, so glibc registered
+    // `_start` as an atexit handler and called it on the way out: the program
+    // ran main, printed, and then re-entered itself, dying on a write to
+    // __libc_stack_end that RELRO had by then made read-only. Nothing in the
+    // failure pointed at the entry path, and the same argument applies to the
+    // other thirty registers -- whatever nk leaves in them is kernel state
+    // handed to user space.
+    mov     x0,  #0
+    mov     x1,  #0
+    mov     x2,  #0
+    mov     x3,  #0
+    mov     x4,  #0
+    mov     x5,  #0
+    mov     x6,  #0
+    mov     x7,  #0
+    mov     x8,  #0
+    mov     x9,  #0
+    mov     x10, #0
+    mov     x11, #0
+    mov     x12, #0
+    mov     x13, #0
+    mov     x14, #0
+    mov     x15, #0
+    mov     x16, #0
+    mov     x17, #0
+    mov     x18, #0
+    mov     x19, #0
+    mov     x20, #0
+    mov     x21, #0
+    mov     x22, #0
+    mov     x23, #0
+    mov     x24, #0
+    mov     x25, #0
+    mov     x26, #0
+    mov     x27, #0
+    mov     x28, #0
+    mov     x29, #0
+    mov     x30, #0
     eret
 
 
@@ -169,7 +213,28 @@ __user_elf_start:
     .balign 4096
 .global __user_blob_start
 __user_blob_start:
-    // Before anything else: is the stack the shape a libc expects?
+    // Every register must arrive zero.
+    //
+    // The ABI says x0 at process entry is `rtld_fini`, a function the dynamic
+    // loader wants run at exit, and that it is zero when there is none. nk was
+    // leaving the entry address in it, so glibc registered `_start` with
+    // atexit and called it on the way out -- a real binary ran main, printed,
+    // and then re-entered itself. The rest are checked for the same reason
+    // Linux clears them: whatever the kernel leaves behind is handed to EL0.
+    orr     x0, x0, x1
+    orr     x0, x0, x2
+    orr     x0, x0, x3
+    orr     x0, x0, x4
+    orr     x0, x0, x5
+    orr     x0, x0, x6
+    orr     x0, x0, x7
+    orr     x0, x0, x19
+    orr     x0, x0, x20
+    orr     x0, x0, x29
+    orr     x0, x0, x30
+    cbnz    x0, 9f
+
+    // Then: is the stack the shape a libc expects?
     //
     // Nothing declares this interface. `_start` takes no arguments and reads
     // argc, argv, envp and the auxiliary vector off the stack at a layout the
@@ -448,7 +513,7 @@ __user_blob_start:
 7:  .ascii  "\n"
 10: .ascii  "  and again by readv, gathered back out with writev: "
 11:
-15: .ascii  "  stack: argc, argv, envp and a seeded auxv, as a libc expects\n"
+15: .ascii  "  stack: zeroed registers, argc, argv, envp and a seeded auxv\n"
 16:
 17: .ascii  "  memory: brk grew and holds a value, mmap gave a zeroed page\n"
 18:

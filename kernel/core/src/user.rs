@@ -548,6 +548,13 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
         let end = (s.address + s.memsz as u64).div_ceil(PAGE as u64) * PAGE as u64;
         for va in (base..end).step_by(PAGE) {
             let page = frames::alloc().expect("no memory for ELF");
+            // Zero first, always. A PT_LOAD's memsz runs past its filesz --
+            // that tail is the .bss -- and a frame handed back by the
+            // allocator holds whatever the last user of it left there. The
+            // fault this caused was a long way from here: glibc's exit path
+            // walks a btree rooted in .bss, so a program that touched none of
+            // its own uninitialised data still died on the way out.
+            unsafe { core::ptr::write_bytes(page, 0, PAGE) };
             let lo = va.max(s.address);
             let hi = (va + PAGE as u64).min(s.address + s.filesz as u64);
             if hi > lo {

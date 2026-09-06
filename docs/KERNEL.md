@@ -370,18 +370,21 @@ has no user space to exec into.
 
 `kernel/init/hello.c` is ordinary C. It is built with `gcc -static -O2`
 against ordinary glibc, by a compiler that has never heard of nk, and it is
-not modified in any way. It loads, runs, prints, reads its own `argv[0]` off
-the stack nk built, and exits with its own status:
+not modified in any way:
 
 ```
 $ docker run --rm -v "$PWD:/w" -w /w nethos-ldk \
-      gcc -static -O2 -o build/nk-hello kernel/init/hello.c
-$ scripts/run-kernel.sh --lkl --init build/nk-hello
+      gcc -static -O2 -o kernel/ldk/build/nk-hello kernel/init/hello.c
+$ scripts/run-kernel.sh --lkl --init kernel/ldk/build/nk-hello
   ...
-  hello from a real compiled binary, on nk
-  /nk-init
+  hello from a real compiled binary, on nk.
+    argv[0] is /nk-init, argc is 1, and the heap works too.
+  and its destructor ran on the way out.
   the process exited with status 7
 ```
+
+`printf` with arguments, `malloc`, `argv` read off the stack nk built, a
+destructor, and a return from `main` through glibc's `exit`.
 
 That is the thing the whole project is for. Everything before it ran code
 written for nk; this ran a Linux binary because nk answers Linux's numbers
@@ -421,24 +424,44 @@ Getting there needed, in the order the binary asked for them:
   place while another runs gives the second process the first one's heap
   bookkeeping -- and the crash lands in malloc, some distance from the switch.
 
+### The register that was not zero
+
+For a while a real binary could run `main` but not return from it. Returning
+sent glibc into `exit` and control arrived back at `_start`, where the program
+re-entered itself and died writing `__libc_stack_end` -- read-only by then,
+because RELRO had been applied on the first pass.
+
+**`x0` at process entry is `rtld_fini`.** The aarch64 ABI says so: a function
+the dynamic loader wants run at exit, and zero when there is none. Linux
+clears every register on `execve` for exactly this reason. nk's `enter_user`
+took the entry address in `x0` and never cleared it, so glibc read `_start`
+out of `x0`, registered it with `__cxa_atexit`, and called it on the way out.
+The program was doing precisely what it was told.
+
+Nothing in the failure pointed at the entry path. What found it was
+`run-kernel.sh --trace`, which is worth keeping for the next one: `-d
+exec,nochain` with `-dfilter` bounded to the binary's own address range logs
+every basic block executed **at EL0 and nothing else**, which is the one thing
+a kernel cannot see into by itself. Adding `cpu` to the log gives the register
+file before each block, and the value `0x400600` sitting in `x27` at the
+`blr` inside `__run_exit_handlers` -- one instruction after glibc's
+`PTR_DEMANGLE` -- named the bug in a line.
+
+Two notes on the tool. QEMU's own documentation offers `-dfilter start-last`;
+this build rejects it with "Invalid range" and wants `start+size`. And the log
+file is created lazily on the first matching write, so a filter that matches
+nothing is indistinguishable from a filter that is not being passed at all --
+which cost a run to notice, because the `--trace` block had been placed above
+the line that *creates* the argument array it appends to.
+
+Every register is cleared now, not just `x0`. The rest are kernel state, and
+handing them to EL0 is a leak whether or not anything reads them.
+
 ### What a real binary still cannot do
 
-**Return from `main`.** `hello.c` calls `_exit`, and that is nk's limitation
-rather than a choice. Returning from `main` sends glibc into `exit`, which
-walks its atexit handlers and tears stdio down, and somewhere in there control
-arrives back at `_start` -- the register state at the fault is unambiguous
-about it: `x30` is `_start`'s return address from `bl __libc_start_main`, and
-the argument registers are the prologue's, computed from a stack pointer that
-is wherever the program had got to rather than where nk put it.
-
-What is known: it happens with no syscall in between, so it is a wild jump
-inside glibc rather than anything nk returns; `TPIDR_EL0` is correct and
-unchanged at every syscall right up to the last one; it is not concurrency
-(one process alone does it); and it is not RELRO (ignoring the `mprotect`
-moves the crash later without preventing it). Both a `printf` binary and a
-`write` binary reach it, by different routes that meet in
-`_IO_file_doallocate` -- printf on the way in, `_IO_cleanup` on the way out.
-The next step is a TCG run under gdb with a breakpoint on `_start`.
+`fork`, `execve`, threads, signals, and any `mmap` of a file. The rootfs is
+memory-backed and `/nk-init` is seeded from the kernel image, so the binary
+travels inside `nk.bin` rather than being read from a disk.
 
 ### The process image: a stack, a heap, and mappings
 
