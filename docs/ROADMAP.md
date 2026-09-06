@@ -393,9 +393,12 @@ the one below it.
       would make a thread rather than quietly giving it its own memory. What
       is missing is descriptor inheritance: the child gets a fresh Linux task
       with an empty fd table, and a shell needs the parent's.
-- [ ] **Descriptor inheritance across fork**, then a console Linux owns so
-      fd 0/1/2 are real and `isatty` and termios work. nk still answers
-      writes to 1 and 2 itself.
+- [x] **Descriptor inheritance across fork**, with `pidfd_open` and
+      `pidfd_getfd` rather than a patch to LKL's task creation -- it clones
+      every task from its own init, never from the caller.
+- [ ] **A console Linux owns**, so fd 0/1/2 are ordinary descriptors and
+      redirection works. nk still answers writes to 1 and 2 itself, which
+      means a shell could not send its output to a file.
 - [ ] `mmap` of a file, `futex`, signals, `epoll` -- the long tail, and
       the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.
