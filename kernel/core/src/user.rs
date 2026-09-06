@@ -12,12 +12,9 @@
 //! Inventing a cleaner numbering would be inventing a system that nothing can
 //! be run on, which is the whole thing being avoided.
 //!
-//! **What this is not, yet.** One process, no fork, no exec, no scheduler
-//! involvement, no filesystem, no signals, and the program is a few
-//! instructions in the kernel image rather than an ELF file. The address
-//! space is built by hand and never torn down. Each of those is a real piece
-//! of work and each is separable; what is here is the mechanism they all
-//! attach to.
+//! One bootstrap process, no fork, exec replacement, signals or teardown.
+//! LKL builds load an ELF fixture through Linux's rootfs; standalone builds
+//! retain the raw smoke-test program. Neither supports a desktop runtime yet.
 
 use crate::frames::{self, PAGE};
 use crate::paging;
@@ -36,7 +33,7 @@ use crate::println;
 pub const USER_BASE: u64 = 0x80_0000_0000;
 pub const USER_STACK_TOP: u64 = USER_BASE + 0x10_0000;
 
-/// A process. One page of code, one of stack, and its own translation table.
+/// The bootstrap process entry state and its own translation table.
 pub struct Process {
     pub ttbr0: u64,
     pub entry: u64,
@@ -49,36 +46,45 @@ extern "C" {
     fn enter_user(entry: u64, stack: u64, ttbr0: u64) -> !;
 }
 
-/// Build an address space containing only the program.
-///
-/// Only the program: no kernel mapping at all. That is possible because the
-/// kernel runs from TTBR1's half in Linux, and in nk it works for a
-/// different reason -- exceptions from EL0 switch to SP_EL1 and run kernel
-/// code that is mapped by *the kernel's own* TTBR0, which is restored on the
-/// way out. It is a real constraint rather than a design: it means kernel
-/// code cannot currently read a user pointer directly, which is the first
-/// thing `write` would want to do.
+/// Build the standalone smoke-test address space, sharing EL1-only kernel
+/// mappings. Exceptions retain this TTBR0; AT S1E0R checks EL0 permissions.
 pub fn spawn() -> Process {
     let blob_start = &raw const __user_blob_start as usize;
     let blob_end = &raw const __user_blob_end as usize;
     let len = blob_end - blob_start;
-    assert!(len <= PAGE, "the user program outgrew one page: {len} bytes");
+    assert!(
+        len <= PAGE,
+        "the user program outgrew one page: {len} bytes"
+    );
 
     let code = frames::alloc().expect("no memory for the user program");
     let stack = frames::alloc().expect("no memory for the user stack");
     unsafe { core::ptr::copy_nonoverlapping(blob_start as *const u8, code, len) };
 
+    unsafe {
+        publish_code(code, PAGE);
+    }
     let ttbr0 = paging::new_address_space();
     unsafe {
         paging::map_user(ttbr0, USER_BASE, code as u64, PAGE as u64, true);
-        paging::map_user(ttbr0, USER_STACK_TOP - PAGE as u64, stack as u64, PAGE as u64, false);
+        paging::map_user(
+            ttbr0,
+            USER_STACK_TOP - PAGE as u64,
+            stack as u64,
+            PAGE as u64,
+            false,
+        );
     }
 
     println!(
         "  user:   {} bytes of program at {:#x}, stack at {:#x}, ttbr0 {:#x}",
         len, USER_BASE, USER_STACK_TOP, ttbr0
     );
-    Process { ttbr0, entry: USER_BASE, stack: USER_STACK_TOP }
+    Process {
+        ttbr0,
+        entry: USER_BASE,
+        stack: USER_STACK_TOP,
+    }
 }
 
 /// Run it. Does not return: every way out of EL0 is through a vector.
@@ -128,69 +134,50 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         crate::stop();
     }
 
-    // Process lifetime is nk's, everything else is Linux's.
+    // Process lifetime remains nk's.
     //
     // `exit` cannot go to Linux: it would end a *Linux* task, and nk's EL0
     // process is not one -- it is a set of nk page tables and an exception
     // frame that Linux has never heard of. Passing it through terminates
     // Linux's init instead and never returns, which is exactly what happened.
     //
-    // That split is the honest state of things. nk owns processes; Linux owns
-    // everything a process asks for. Joining the two properly means each nk
+    // nk owns processes and explicitly exposes selected Linux services.
+    // Joining the two properly means each nk
     // process being backed by a Linux task, which is what `fork` and `execve`
     // would need anyway.
     if matches!(frame.x[8], 93 | 94) {
         sys_exit(frame.x[0] as i32);
     }
 
-    // Where the rest joins up.
-    //
-    // With Linux linked in, the process's `svc` is answered by Linux itself --
-    // its own sys_getpid, its own VFS, its own network stack -- rather than by
-    // nk's two-entry table. That is the ABI: the numbers are Linux's because
-    // the binaries were compiled against Linux, and now so are the answers.
-    #[cfg(nk_lkl)]
-    let ret = {
-        let a = &frame.x;
-        crate::lkl::syscall(
-            frame.x[8] as i64,
-            [a[0] as i64, a[1] as i64, a[2] as i64, a[3] as i64, a[4] as i64, a[5] as i64],
-        )
+    // LKL treats user pointers as kernel pointers. Only reviewed scalar
+    // calls cross directly; pointer-bearing calls need explicit copying.
+    let ret = match frame.x[8] {
+        64 => sys_write(frame.x[0], frame.x[1], frame.x[2]),
+        #[cfg(nk_lkl)]
+        172 | 174 | 175 | 176 | 177 | 178 => crate::lkl::syscall(frame.x[8] as i64, [0; 6]),
+        _ => {
+            println!("  syscall {} is not implemented", frame.x[8]);
+            -38
+        }
     };
-    #[cfg(not(nk_lkl))]
-    let ret = syscall(frame.x[8], &frame.x[..6]);
 
     frame.x[0] = ret as u64;
 }
 
-/// nk's own syscall table, used when Linux is not linked in. Two entries,
-/// and the numbers are Linux's -- see the note at the top of this file.
-#[cfg(not(nk_lkl))]
-fn syscall(nr: u64, args: &[u64]) -> i64 {
-    match nr {
-        64 => sys_write(args[0], args[1], args[2]),
-        _ => {
-            // Named rather than silently refused: the interesting question
-            // from here on is *which* calls a real binary makes, and a log of
-            // the ones nk does not have is the list of what to do next.
-            println!("  syscall {} is not implemented", nr);
-            -38 // -ENOSYS
-        }
-    }
-}
-
 /// # write(fd, buf, count)
 ///
-/// The buffer is a *user* pointer, and the kernel is not running in the
-/// process's address space -- TTBR0 was restored to the kernel's on the way
-/// in. So it cannot simply be dereferenced, and the copy has to go through
-/// the process's own translation. That is `copy_from_user`, and this is the
-/// smallest possible version of it.
-#[cfg(not(nk_lkl))]
+/// The exception retains the process TTBR0. Translate with EL0 permissions
+/// before reading through the kernel identity map; an EL1 dereference alone
+/// would also allow the caller to read kernel pages.
 fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
     if fd != 1 && fd != 2 {
         return -9; // -EBADF
     }
+    if buf.checked_add(count).is_none() {
+        return -14;
+    }
+    // Bound time spent in the console path with exceptions masked.
+    let count = count.min(4096);
     let mut copied = 0usize;
     let uart = crate::uart::console();
     while copied < count as usize {
@@ -217,4 +204,97 @@ fn sys_exit(status: i32) -> ! {
     println!();
     println!("  the process exited with status {}", status);
     crate::stop()
+}
+
+/// Load the bootstrap ELF through Linux's existing rootfs and VFS. The file
+/// is seeded from the kernel image until a persistent root disk is attached.
+#[cfg(nk_lkl)]
+pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
+    extern "C" {
+        static __user_elf_start: u8;
+        static __user_elf_end: u8;
+    }
+    let start = &raw const __user_elf_start;
+    let size = (&raw const __user_elf_end as usize) - start as usize;
+    let fixture = unsafe { core::slice::from_raw_parts(start, size) };
+    crate::lkl::write_file(c"/nk-init", fixture).map_err(|_| "rootfs write failed")?;
+    let bytes = crate::lkl::read_file(c"/nk-init").map_err(|_| "rootfs read failed")?;
+    if bytes != fixture {
+        return Err("rootfs round trip differs");
+    }
+    println!(
+        "  rootfs: /nk-init read back through Linux VFS ({} bytes)",
+        bytes.len()
+    );
+    let image = crate::elf::parse(&bytes, USER_BASE, USER_STACK_TOP - 2 * PAGE as u64)?;
+    let ttbr0 = paging::new_address_space();
+    for s in &image.segments {
+        let base = s.address & !(PAGE as u64 - 1);
+        let end = (s.address + s.memsz as u64).div_ceil(PAGE as u64) * PAGE as u64;
+        for va in (base..end).step_by(PAGE) {
+            let page = frames::alloc().expect("no memory for ELF");
+            let lo = va.max(s.address);
+            let hi = (va + PAGE as u64).min(s.address + s.filesz as u64);
+            if hi > lo {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr().add(s.offset + (lo - s.address) as usize),
+                        page.add((lo - va) as usize),
+                        (hi - lo) as usize,
+                    );
+                }
+            }
+            if s.executable {
+                unsafe {
+                    publish_code(page, PAGE);
+                }
+            }
+            unsafe {
+                paging::map_user_permissions(
+                    ttbr0,
+                    va,
+                    page as u64,
+                    PAGE as u64,
+                    s.executable,
+                    s.writable,
+                );
+            }
+        }
+    }
+    let stack = frames::alloc().expect("no memory for ELF stack");
+    // Empty argc/argv/envp/auxv terminators. Dynamic libc startup is not yet
+    // supported; this fixture uses the syscall ABI directly.
+    unsafe {
+        paging::map_user(
+            ttbr0,
+            USER_STACK_TOP - PAGE as u64,
+            stack as u64,
+            PAGE as u64,
+            false,
+        );
+        core::arch::asm!("dsb ish", "ic iallu", "dsb ish", "isb", options(nostack));
+    }
+    println!(
+        "  ELF: {} PT_LOAD segment(s), entry {:#x}, zero-filled BSS",
+        image.segments.len(),
+        image.entry
+    );
+    Ok(Process {
+        ttbr0,
+        entry: image.entry,
+        stack: USER_STACK_TOP - 48,
+    })
+}
+
+/// Publish freshly copied instructions through the physical identity alias.
+/// D-cache writes must reach PoU before invalidating the I-cache; a barrier
+/// alone does not clean dirty cache lines on machines without IDC coherence.
+unsafe fn publish_code(start: *mut u8, len: usize) {
+    let ctr: u64;
+    core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nostack, nomem));
+    let line = 4usize << ((ctr >> 16) & 15);
+    for address in ((start as usize & !(line - 1))..start as usize + len).step_by(line) {
+        core::arch::asm!("dc cvau, {}", in(reg) address, options(nostack));
+    }
+    core::arch::asm!("dsb ish", "ic iallu", "dsb ish", "isb", options(nostack));
 }

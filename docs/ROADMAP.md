@@ -312,18 +312,17 @@ the one below it.
       tables, asks `getpid` and Linux answers 1. The chain from bare aarch64
       to the Linux ABI is closed. `exit` stays nk's, because nk's process is
       not a Linux task.
-- [ ] **An ELF loader and a filesystem.** The program is a hundred bytes of
-      assembly in the kernel image; Linux is looking for `/init` and there is
-      nothing to find.
+- [x] **Filesystem-backed ELF bootstrap.** Linux rootfs/VFS stores and reads
+      an embedded `/nk-init` ELF fixture; nk validates and maps its segments,
+      zero-fills BSS and runs it at EL0. Persistent storage, external binaries
+      and a complete process startup ABI are still outstanding.
 - [ ] **Back each nk process with a Linux task**, which is what `fork` and
       `execve` need anyway. Note that LKL believes it is in one flat address
       space -- its `copy_from_user` is a memcpy -- so every user pointer must
       be checked on nk's side before it is passed through.
-- [ ] **Route EL0 `svc` to `lkl_syscall`.** nk already runs a process at EL0
-      with its own address space; `lkl_syscall` already answers every Linux
-      call. Joining them is the ABI.
-- [ ] Then a filesystem, an ELF loader, and the desktop is configuration
-      rather than construction.
+- [ ] **Desktop runtime integration.** Normal binary addresses, dynamic
+      linking, checked syscall buffers, signals, shared memory, futexes and
+      DRM/device access must work before desktop configuration can be tested.
 
 **User space** -- nk's own, and the mechanism the above attaches to.
 

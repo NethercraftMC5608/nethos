@@ -40,3 +40,7 @@ making Linux system calls, with a `copy_from_user` that refuses a pointer into
 kernel memory. That is the gate for everything above the driver layer,
 including any hope of running the NETHOS desktop on nk rather than on Debian's
 kernel. `docs/KERNEL.md` is honest about how far that is.
+
+`--lkl` also loads an ELF fixture from Linux's memory-backed rootfs through
+its VFS. The fixture checks BSS and pointer rejection before printing at EL0.
+This is a bootstrap executable, not yet support for ordinary desktop binaries.

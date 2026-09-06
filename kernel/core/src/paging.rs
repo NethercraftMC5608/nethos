@@ -161,6 +161,14 @@ pub fn new_address_space() -> u64 {
 /// `ttbr0` is a table from `new_address_space`; the range is not already
 /// mapped and does not overlap the kernel's own top-level entries.
 pub unsafe fn map_user(ttbr0: u64, va: u64, pa: u64, size: u64, exec: bool) {
+    map_user_permissions(ttbr0, va, pa, size, exec, !exec);
+}
+
+/// Map an ELF segment with independent write and execute permissions.
+/// # Safety
+/// Same requirements as `map_user`; writable executable pages are forbidden.
+pub unsafe fn map_user_permissions(ttbr0: u64, va: u64, pa: u64, size: u64, exec: bool, writable: bool) {
+    assert!(!(exec && writable));
     let l0 = ttbr0 as *mut u64;
     let mut off = 0;
     while off < size {
@@ -172,14 +180,8 @@ pub unsafe fn map_user(ttbr0: u64, va: u64, pa: u64, size: u64, exec: bool) {
         // the descriptor a page rather than a reserved encoding. A level-3
         // entry without it is simply invalid, and the fault says nothing
         // about why.
-        let perms = if exec {
-            // Executable pages are read-only, and never executable by the
-            // kernel: PXN is what stops a bug in the kernel being turned into
-            // running whatever the process put in its own memory.
-            pte::AP_RO_ANY | pte::PXN
-        } else {
-            pte::AP_RW_ANY | pte::PXN | pte::UXN
-        };
+        let perms = (if writable { pte::AP_RW_ANY } else { pte::AP_RO_ANY })
+            | pte::PXN | if exec { 0 } else { pte::UXN };
         *l3.add(((v >> L3_SHIFT) & 511) as usize) = (pa + off)
             | pte::VALID
             | pte::TABLE

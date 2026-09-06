@@ -11,6 +11,8 @@ extern crate alloc;
 use core::arch::global_asm;
 
 pub mod dt;
+#[cfg(nk_lkl)]
+pub mod elf;
 pub mod exceptions;
 pub mod frames;
 pub mod gic;
@@ -146,7 +148,7 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             // EL0 makes an `svc`, nk catches it, and Linux answers.
             println!();
             println!("Now the same question from EL0:");
-            let p = user::spawn();
+            let p = user::spawn_from_rootfs().expect("cannot load rootfs executable");
             user::run(&p);
         }
         stop();

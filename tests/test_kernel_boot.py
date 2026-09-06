@@ -335,6 +335,17 @@ class LinuxOnNk(unittest.TestCase):
         self.assertIn('entering EL0', self.out)
         self.assertIn('the process exited with status 1', self.out)
 
+    def test_elf_is_loaded_through_linux_vfs(self):
+        self.assertRegex(self.out, r'rootfs: /nk-init read back through Linux VFS \(\d+ bytes\)')
+        self.assertIn('ELF: 1 PT_LOAD segment(s)', self.out)
+        # The program exits 99 if its BSS, EFAULT or ENOSYS assertions fail.
+        self.assertIn('the process exited with status 1', self.out)
+
+    def test_lkl_user_pointer_boundary(self):
+        self.assertIn('refused a user pointer into kernel memory (EFAULT)', self.out)
+        self.assertIn('syscall 56 is not implemented', self.out)
+        self.assertIn('hello from EL0 -- this is user space, on nk.', self.out)
+
     def test_nothing_faulted(self):
         self.assertNotIn('!!EXC', self.out)
         self.assertNotIn('!! kernel panic', self.out)

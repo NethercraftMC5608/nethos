@@ -33,7 +33,7 @@ run: $(BIN)
 	../scripts/run-kernel.sh --no-build
 
 test:
-	cd .. && python3 -m unittest discover -s tests -p 'test_kernel_boot.py' -v
+	cd .. && python3 -m unittest discover -s tests -p 'test_kernel_*.py' -v
 
 fmt:
 	cargo fmt

@@ -96,6 +96,25 @@ enter_user:
 // result in x0. These are the real numbers, not nk's own: the entire point of
 // user space here is to be the ABI that existing binaries were compiled for.
 .section ".rodata.user", "a"
+// A real ELF file fixture. Linux's rootfs stores these bytes; nk reads the
+// file through the VFS and maps PT_LOAD, rather than copying a raw program.
+.balign 4096
+.global __user_elf_start
+__user_elf_start:
+    .byte 0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0
+    .zero 8
+    .short 2, 183
+    .long 1
+    .quad 0x8000000000
+    .quad 64, 0
+    .long 0
+    .short 64, 56, 1, 0, 0, 0
+    .long 1, 5
+    .quad 4096, 0x8000000000, 0
+    .quad __user_blob_end - __user_blob_start
+    .quad 4096
+    .quad 4096
+    .balign 4096
 .global __user_blob_start
 __user_blob_start:
     // Ask who we are. With Linux linked in this is answered by Linux's own
@@ -114,6 +133,19 @@ __user_blob_start:
     mov     x8, #64                 // __NR_write
     svc     #0
     neg     x20, x0
+    cmp     x20, #14
+    b.ne    9f
+
+    // Pointer-bearing calls without a marshaller must never enter LKL.
+    mov     x8, #56                 // openat
+    svc     #0
+    cmn     x0, #38
+    b.ne    9f
+
+    // The ELF file ends before this word; PT_LOAD's memory tail must be zero.
+    adr     x1, __user_blob_start
+    ldr     x0, [x1, #4000]
+    cbnz    x0, 9f
 
     // And something it should allow.
     mov     x0, #1                  // fd 1
@@ -129,12 +161,18 @@ __user_blob_start:
 
     // Not reached. If exit ever returns, stopping here is better than
     // running into the string as instructions.
+9:  mov     x0, #99                 // failed an isolation/BSS assertion
+    mov     x8, #93
+    svc     #0
 0:  b       0b
 1:  .ascii  "hello from EL0 -- this is user space, on nk.\n"
 2:
 .balign 4
 .global __user_blob_end
 __user_blob_end:
+.global __user_elf_end
+__user_elf_end:
+.section ".text", "ax"
 
 
 // nk_setjmp / nk_longjmp

@@ -272,7 +272,7 @@ state across one.
 `exit` is nk's, not Linux's. Passing it through ends a *Linux* task, and nk's
 EL0 process is not one -- it is a set of nk page tables and an exception frame
 Linux has never heard of. That split is the honest state of things: nk owns
-processes, Linux owns everything a process asks for.
+processes; Linux provides the services nk explicitly exposes.
 
 And a real limitation worth stating before it is discovered: **Linux, under
 LKL, believes it is in a single flat address space.** Its `copy_from_user` is
@@ -280,14 +280,50 @@ a `memcpy`. So the user/kernel separation nk enforces with `AT S1E0R` is
 nk's alone -- Linux will not check a pointer for us, and every syscall that
 takes one has to be checked on nk's side before it is passed through.
 
+### Filesystem-backed ELF bootstrap
+
+`--lkl` now creates `/nk-init` in Linux's existing memory-backed rootfs,
+closes it, reopens it, and reads it through Linux VFS calls. No filesystem
+implementation was added to nk. The seed is an embedded ELF fixture; this is
+not yet a disk-backed root or an externally supplied init binary.
+
+nk validates ELF64 little-endian AArch64 ET_EXEC headers before mapping
+PT_LOAD segments, copies file bytes, zero-fills the memory tail, preserves
+write/execute permissions, and enters the file's entry point at EL0. It
+rejects dynamic images, overlapping load pages, overflowing/truncated ranges,
+kernel addresses and entries outside executable file data. The current user
+window is still at 512GiB; ordinary low-address Linux binaries need the
+kernel mapping moved first. The bootstrap stack has empty argument and
+auxiliary-vector terminators, not the full libc startup contract.
+
+The fixture checks zero-filled memory, rejects a kernel pointer with EFAULT,
+and checks that an unimplemented pointer-bearing syscall returns ENOSYS.
+It then prints via nk's checked console write and exits with Linux's getpid.
+Only reviewed identity calls pass directly to LKL. Forwarding arbitrary
+syscalls would bypass nk's memory protection because LKL copies pointers
+without checking EL0 access permissions.
+
+Validation: `python3 -m unittest discover -s tests -p 'test_kernel_elf.py'`
+compiles the actual parser for host tests, including every truncated prefix
+of a valid file. `test_kernel_boot.py` exercises the VFS-to-ELF-to-EL0 chain
+and keeps the standalone and driver-shim boot paths covered.
+
 ### What is next
 
-An ELF loader and a filesystem, so the program is a file rather than a hundred
-bytes of assembly in the kernel image. Then each nk process needs to be backed
-by a Linux task, which is what `fork` and `execve` need anyway. After that the
-desktop is configuration rather than construction.
+Attach a persistent root device to LKL, support normal executable addresses
+and startup state, marshal file and memory syscalls, and give processes
+independent Linux state. Dynamic linking, signals, shared memory, futexes,
+thread register state and DRM/device access still require integration and
+validation. A working PID call and ELF fixture do not establish desktop
+compatibility or GPU acceleration.
 
-## The 203 symbols: what borrowing everything actually costs
+## Historical symbol survey
+
+The following survey is not a complete porting contract: unresolved symbol
+counts exclude inline architecture code, configuration dependencies and
+runtime semantics. The LKL host interface above is the implemented route.
+
+### The 203 symbols: initial estimate
 
 This measurement changed the plan, and it was made because the question was
 asked twice and the answer given was wrong. It is recorded in full because it
