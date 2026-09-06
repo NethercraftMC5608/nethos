@@ -242,6 +242,46 @@ class Stage3(unittest.TestCase):
         self.assertNotIn('!! kernel panic', self.out)
 
 
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class UserSpace(unittest.TestCase):
+    """A program at EL0, in its own address space, making Linux syscalls.
+
+    Runs in the build with no Linux port linked, which is where the demo is.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot()
+
+    def test_a_process_gets_its_own_address_space(self):
+        m = re.search(r'user:\s+(\d+) bytes of program at (0x[0-9a-f]+).*ttbr0 (0x[0-9a-f]+)',
+                      self.out)
+        self.assertIsNotNone(m, f'no user process:\n{self.out}')
+        # Its own translation table, not the kernel's.
+        self.assertNotEqual(int(m.group(3), 16), 0)
+
+    def test_the_program_runs_at_el0_and_write_reaches_the_console(self):
+        # Printed by the kernel on behalf of the process, through syscall 64
+        # with a pointer the kernel had to translate itself.
+        self.assertIn('hello from EL0 -- this is user space, on nk.', self.out)
+
+    def test_the_kernel_refuses_a_user_pointer_into_kernel_memory(self):
+        # The whole point of two privilege levels. The process asks the kernel
+        # to write out eight bytes of the kernel image; user_to_phys
+        # translates with EL0's permissions, the translation fails, and write
+        # returns -EFAULT. The process carries that to exit, so the refusal is
+        # observable rather than merely believed.
+        #
+        # 14 is EFAULT. A status of 0 here would mean the kernel had happily
+        # printed its own memory to a process that asked for it.
+        self.assertIn('the process exited with status 14', self.out)
+
+    def test_exit_ends_the_process_cleanly(self):
+        self.assertNotIn('fault in user space', self.out)
+        self.assertNotIn('!!EXC', self.out)
+        self.assertIn('nk: done.', self.out)
+
+
 NET_LIB = ROOT / 'kernel/ldk/build/virtio-net/libnklinux.a'
 
 

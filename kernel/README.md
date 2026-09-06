@@ -26,5 +26,11 @@ Stage 2 is done too: `ldk` compiles unmodified Linux drivers against Linux's
 own headers and reports what they need. virtio-blk asks for 108 symbols;
 virtio-net asks for 207, of which only 139 are new. See `ldk/README.md`.
 
-Next is Stage 3: implement whichever of those 108 stubs virtio-blk actually
-reaches, and read a sector off a disk.
+Stages 3 and 4 are done too: unmodified `virtio_blk` reads a sector off a
+disk, and unmodified `virtio_net` sends an ARP request and receives the reply.
+
+And nk now runs **user space** -- a program at EL0, in its own address space,
+making Linux system calls, with a `copy_from_user` that refuses a pointer into
+kernel memory. That is the gate for everything above the driver layer,
+including any hope of running the NETHOS desktop on nk rather than on Debian's
+kernel. `docs/KERNEL.md` is honest about how far that is.

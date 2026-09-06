@@ -34,6 +34,11 @@ mod pte {
     pub const UXN: u64 = 1 << 54; // never executable at EL0
     pub const PXN: u64 = 1 << 53; // never executable at EL1
 
+    /// AP[2:1] at bits 7:6. EL0 can only reach a page that says so; there is
+    /// no separate user page table, only this bit.
+    pub const AP_RW_ANY: u64 = 1 << 6; // read/write at EL1 and EL0
+    pub const AP_RO_ANY: u64 = 3 << 6; // read-only at EL1 and EL0
+
     /// AttrIndx, an index into MAIR_EL1 rather than a description of the
     /// memory -- the attributes themselves live in that register.
     pub const fn attr(idx: u64) -> u64 {
@@ -125,6 +130,98 @@ pub unsafe fn map_normal(va: u64, pa: u64, size: u64) {
         "isb",
         options(nostack)
     );
+}
+
+const L3_SHIFT: u64 = 12;
+
+/// A fresh address space for a process.
+///
+/// It starts as a copy of the kernel's top-level table, so that kernel code
+/// and data stay mapped while the process runs -- and, more to the point,
+/// while the kernel handles the process's exceptions. An exception from EL0
+/// does not change TTBR0, so the very first instruction of the handler is
+/// fetched through the *process's* tables; a table without the kernel in it
+/// faults before anything can report why.
+///
+/// A kernel in TTBR1's half needs none of this, and that is the reason to
+/// move there. Until then, every process carries a copy of the kernel's
+/// mappings and `USER_BASE` sits in a top-level slot the kernel does not use,
+/// so that adding to one address space cannot alter another.
+pub fn new_address_space() -> u64 {
+    let table = crate::frames::alloc().expect("no memory for an address space") as *mut u64;
+    unsafe {
+        core::ptr::copy_nonoverlapping(&raw const L0 as *const Table as *const u64, table, 512);
+    }
+    table as u64
+}
+
+/// Map user-accessible pages into `ttbr0`, in 4KB pages.
+///
+/// # Safety
+/// `ttbr0` is a table from `new_address_space`; the range is not already
+/// mapped and does not overlap the kernel's own top-level entries.
+pub unsafe fn map_user(ttbr0: u64, va: u64, pa: u64, size: u64, exec: bool) {
+    let l0 = ttbr0 as *mut u64;
+    let mut off = 0;
+    while off < size {
+        let v = va + off;
+        let l1 = next_table(l0.add(((v >> L0_SHIFT) & 511) as usize));
+        let l2 = next_table(l1.add(((v >> L1_SHIFT) & 511) as usize));
+        let l3 = next_table(l2.add(((v >> L2_SHIFT) & 511) as usize));
+        // At level 3 the TABLE bit does not mean "table" -- it is what makes
+        // the descriptor a page rather than a reserved encoding. A level-3
+        // entry without it is simply invalid, and the fault says nothing
+        // about why.
+        let perms = if exec {
+            // Executable pages are read-only, and never executable by the
+            // kernel: PXN is what stops a bug in the kernel being turned into
+            // running whatever the process put in its own memory.
+            pte::AP_RO_ANY | pte::PXN
+        } else {
+            pte::AP_RW_ANY | pte::PXN | pte::UXN
+        };
+        *l3.add(((v >> L3_SHIFT) & 511) as usize) = (pa + off)
+            | pte::VALID
+            | pte::TABLE
+            | pte::AF
+            | pte::SH_INNER
+            | pte::attr(ATTR_NORMAL)
+            | perms;
+        off += 4096;
+    }
+    core::arch::asm!("dsb ishst", "tlbi vmalle1", "dsb ish", "isb", options(nostack));
+}
+
+/// Translate a user virtual address, exactly as EL0 would see it.
+///
+/// Through the hardware rather than by walking the tables in software. `AT
+/// S1E0R` asks the MMU to perform the translation with EL0's permissions and
+/// leaves the answer in PAR_EL1 -- so a page the kernel can reach but the
+/// process cannot correctly fails here, which is the entire point of checking
+/// a user pointer rather than dereferencing it. A software walk would have to
+/// reimplement the permission rules to get that right.
+///
+/// This is the smallest honest `copy_from_user`. It is also slow: one
+/// translation per byte in the caller above. Batching by page is the obvious
+/// next step and needs no new mechanism.
+pub fn user_to_phys(va: u64) -> Option<u64> {
+    let par: u64;
+    unsafe {
+        core::arch::asm!(
+            "at s1e0r, {va}",
+            "isb",
+            "mrs {par}, par_el1",
+            va = in(reg) va,
+            par = out(reg) par,
+            options(nostack)
+        );
+    }
+    // PAR_EL1.F: set means the translation faulted, and the rest of the
+    // register is then a fault status rather than an address.
+    if par & 1 != 0 {
+        return None;
+    }
+    Some((par & 0x0000_ffff_ffff_f000) | (va & 0xfff))
 }
 
 /// Map the machine and switch the MMU on.

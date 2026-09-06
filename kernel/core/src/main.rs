@@ -23,6 +23,7 @@ pub mod psci;
 pub mod sched;
 pub mod selftest;
 pub mod stub;
+pub mod user;
 pub mod timer;
 pub mod uart;
 
@@ -31,6 +32,7 @@ pub mod uart;
 // handles it and no separate binutils cross-toolchain is needed to build the
 // kernel at all -- rustup and nothing else.
 global_asm!(include_str!("boot.s"));
+global_asm!(include_str!("user.s"));
 
 /// Where boot.s hands over. `dtb` is whatever x0 held at reset: on QEMU's
 /// `virt` that is the physical address of the flattened device tree, which is
@@ -174,7 +176,12 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
         while timer::ticks() < deadline {
             sched::yield_now();
         }
-        stop();
+
+        println!();
+        println!("Now user space.");
+        println!();
+        let p = user::spawn();
+        user::run(&p);
     }
 }
 
@@ -183,7 +190,7 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
 /// Powering down rather than spinning matters for the tests. A kernel killed
 /// by a watchdog looks exactly like one that hung -- both end with a signal
 /// after N seconds -- and that ambiguity cost real time on one silent hang.
-fn stop() -> ! {
+pub fn stop() -> ! {
     println!();
     println!("nk: done.");
     psci::poweroff();

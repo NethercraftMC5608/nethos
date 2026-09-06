@@ -151,6 +151,12 @@ one boots.
 - **5** — decide with `ldk report`'s numbers whether USB, DRM or WiFi is worth
   attempting. Genode is funded and staffed and still does not do GPU.
 
+And, separately from the driver stages, the beginning of the only road to a
+desktop:
+
+- **User space — started.** A program runs at EL0 in its own address space and
+  makes Linux system calls. See below.
+
 ## What can be borrowed, measured rather than argued
 
 "Why write any of this -- why not take existing modules?" is the right
@@ -216,6 +222,73 @@ virtio-gpu's 2D protocol is a short list of commands -- create a resource,
 attach backing pages, set the scanout, transfer, flush. No DRM core, no
 userspace, no Mesa: nk drawing to a screen by itself. That is weeks, not years,
 and it is the next real milestone after the vmemmap.
+
+## User space, and why it is the gate
+
+```
+  user:   108 bytes of program at 0x8000000000, stack at 0x8000100000, ttbr0 0x4000d000
+  entering EL0...
+
+hello from EL0 -- this is user space, on nk.
+
+  the process exited with status 14
+```
+
+Everything nk had done until this point lived entirely inside the kernel and
+was reachable only by nk's own code calling it. A desktop is not that. It is
+several hundred existing binaries, compiled years ago against Linux's syscall
+ABI, that nobody is going to recompile. **Nothing above the driver layer is
+possible until a program can run at EL0 and be answered.** One now can.
+
+The numbers are Linux's -- `write` is 64, `exit` is 93 -- because that is what
+those binaries contain. Inventing a cleaner numbering would be inventing a
+system nothing can be run on.
+
+**That status of 14 is the interesting part.** It is `EFAULT`, and it is the
+privilege boundary being demonstrated rather than asserted. The program asks
+the kernel to write out eight bytes *of the kernel's own image*; the kernel
+refuses, the program carries the errno to `exit`, and it is visible from
+outside. A status of 0 there would mean the kernel had cheerfully printed its
+own memory to whoever asked.
+
+The refusal costs one instruction. `user_to_phys` translates a user pointer
+with `AT S1E0R`, which asks the MMU to do the translation **as EL0 would** and
+leaves the answer in `PAR_EL1`. A page the kernel can reach but the process
+cannot fails there, which is the entire point of checking a user pointer
+rather than dereferencing it -- a software table walk would have to
+reimplement the permission rules to get the same answer. It is the smallest
+honest `copy_from_user`, and it is also slow: one translation per byte.
+Batching by page needs no new mechanism.
+
+### What it cost, and the constraint that is still there
+
+An exception from EL0 does **not** change `TTBR0`. So the first instruction of
+the handler is fetched through the *process's* tables, and a table without the
+kernel in it faults before anything can report why. Every address space
+therefore starts as a copy of the kernel's top-level table, and `USER_BASE` is
+512GiB -- a top-level slot the kernel does not use -- so that building one
+process's mappings cannot alter another's.
+
+A kernel in `TTBR1`'s half needs none of that, and **that is the next
+structural change.** It is also what user space at address zero requires: nk
+is identity-mapped across the bottom of the address space, so processes
+currently live at 512GiB because the obvious addresses are taken.
+
+`SP_EL0` is the other cost, and it is Linux's design for Linux's reason. In
+kernel mode it holds the current task, because that is where the stack-canary
+lives for every Linux file the shim compiles (`-mstack-protector-guard-reg=
+sp_el0`). In user mode it is the user's stack pointer. So it is saved into the
+exception frame on the way in and put back on the way out.
+
+### What is deliberately absent
+
+One process. No `fork`, no `exec`, no ELF loader -- the program is a hundred
+bytes of assembly in the kernel image, because nk has no filesystem to load
+one from. No signals, no threads, no `mmap`, no scheduler involvement. Each of
+those is a real piece of work and each is separable; what is here is the
+mechanism they all attach to, and an unimplemented syscall now logs its own
+number, which makes the list of what to do next something a real binary can
+be asked to produce.
 
 ## Stage 4, and the vmemmap
 

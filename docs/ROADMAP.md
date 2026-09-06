@@ -290,6 +290,23 @@ The shim is discovered, not designed.
 - [ ] **Stage 5.** Decide against `ldk report`'s numbers whether USB, DRM or
       WiFi is worth attempting. Genode still does not do GPU.
 
+**User space** -- separate from the driver stages, and the only road to
+running the NETHOS desktop on nk rather than on Debian's kernel.
+
+- [x] **A process at EL0.** Own address space, own translation table, Linux's
+      syscall numbers (`write` 64, `exit` 93), and a `copy_from_user` that
+      translates with `AT S1E0R` so a pointer into kernel memory is refused
+      with `EFAULT` -- demonstrated, not asserted: the demo carries the errno
+      out through the exit status.
+- [ ] **The kernel into TTBR1's half.** Required before processes can live at
+      the low addresses every real binary is linked for, and it removes the
+      copy of the kernel's tables every address space currently carries.
+- [ ] **An ELF loader and a filesystem to load from.** The program is
+      currently assembly in the kernel image.
+- [ ] `fork`, `exec`, `mmap`, `futex`, signals, `epoll` -- the long tail, and
+      the actual size of the problem. `docs/KERNEL.md` has the measurement of
+      what a desktop needs and why borrowing stops helping here.
+
 ### Not started, and honest about why
 
 - [ ] **ARM.** `build-image.sh` targets arm64 and `build-arm.sh` exists, so

@@ -85,6 +85,12 @@ pub fn init() {
     }
 }
 
+/// Put SP_EL0 back to the current task's shadow after a return from EL0,
+/// where it held the user stack pointer instead.
+pub fn restore_task_ptr() {
+    unsafe { set_shadow((*(&raw const TASKS))[CURRENT].shadow) };
+}
+
 /// Point SP_EL0 at this task's shadow page. Must happen before any Linux code
 /// runs on the task, and before every switch to it.
 #[inline]

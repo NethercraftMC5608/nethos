@@ -139,6 +139,14 @@ park:
     b       irq_entry
 .endm
 
+// A system call, or a fault in user space. Its own entry rather than
+// irq_entry's because it must also save SP_EL0 -- which holds the user's
+// stack pointer on the way in and the current task pointer on the way out.
+.macro VENTRY_EL0_SYNC
+.balign 0x80
+    b       el0_sync_entry
+.endm
+
 .global __vectors
 .balign 2048
 __vectors:
@@ -150,7 +158,7 @@ __vectors:
     VENTRY_IRQ      // current EL, SPx:  IRQ  <- the only one that fires
     VENTRY 6        // current EL, SPx:  FIQ
     VENTRY 7        // current EL, SPx:  SError
-    VENTRY 8        // lower EL, AArch64: synchronous
+    VENTRY_EL0_SYNC // lower EL, AArch64: synchronous  <- system calls
     // Deliberately not irq_entry. An interrupt from a lower EL arrives with
     // SP still pointing at the user stack, and irq_entry pushes its frame
     // wherever SP happens to be. There is no EL0 yet, so this cannot fire --
