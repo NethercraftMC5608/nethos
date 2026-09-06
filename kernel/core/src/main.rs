@@ -124,6 +124,12 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
         // Before Linux starts: its timer callbacks run here, in thread
         // context, not in the interrupt that noticed they were due.
         hostops::start_timer_thread();
+        // A watchdog rather than a timeout. Linux either finishes booting or
+        // deadlocks, and the difference between the two from outside is
+        // nothing at all -- both are a machine that has stopped printing. The
+        // watchdog prints what every task is doing, which turns "it hung"
+        // into a wait graph.
+        sched::spawn("watchdog", watchdog, 0);
         if lkl::boot() {
             println!();
             println!("Linux is up on nk. Asking it something:");
@@ -209,6 +215,31 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
         let p = user::spawn();
         user::run(&p);
     }
+}
+
+/// Report what the machine is doing, four times, then stop.
+#[cfg(nk_lkl)]
+extern "C" fn watchdog(_: usize) {
+    for round in 0..4 {
+        let until = timer::ticks() + timer::HZ;
+        while timer::ticks() < until {
+            sched::yield_now();
+        }
+        println!();
+        unsafe {
+            println!(
+                "  watchdog {} at {} ticks: armed={} due={} fired={} last_deadline={}",
+                round,
+                timer::ticks(),
+                hostops::N_ARMED,
+                hostops::N_DUE,
+                hostops::N_FIRED,
+                hostops::LAST_DEADLINE
+            );
+        }
+        sched::report();
+    }
+    stop();
 }
 
 /// Finish: say so, and ask the machine to switch itself off.

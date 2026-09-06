@@ -67,16 +67,26 @@ impl Semaphore {
     pub fn up(&mut self) {
         let flags = irq_save();
         self.count += 1;
-        // Wake every waiter rather than choosing one. With a bitmask that is
-        // one pass and no bookkeeping; the cost is that n-1 of them re-check
-        // and block again, which on one CPU is a handful of switches and is
-        // simpler than a queue that has to stay in order.
-        let waiting = core::mem::take(&mut self.waiters);
+        // Exactly one waiter, not all of them.
+        //
+        // Waking all of them and letting the losers re-check looks harmless
+        // and is not. A caller that counts its own sleepers -- one `up` per
+        // sleeper, which is how LKL's CPU lock is written -- sees each
+        // spurious wakeup re-enter its wait loop and increment that count
+        // again. The bookkeeping inflates, the ups and downs stop matching,
+        // and the result is a set of threads that are each certain somebody
+        // else holds the thing they are waiting for.
+        let waiting = self.waiters;
+        let woken = if waiting != 0 {
+            let id = waiting.trailing_zeros();
+            self.waiters &= !(1 << id);
+            Some(id as usize)
+        } else {
+            None
+        };
         unsafe { irq_restore(flags) };
-        for id in 0..32 {
-            if waiting & (1 << id) != 0 {
-                sched::wake(id);
-            }
+        if let Some(id) = woken {
+            sched::wake(id);
         }
     }
 }
@@ -134,12 +144,20 @@ impl Mutex {
             return;
         }
         self.owner = None;
-        let waiting = core::mem::take(&mut self.waiters);
+        // One waiter here too: only one of them can take the mutex, and
+        // waking the rest to discover that is churn a single-CPU scheduler
+        // pays for in full.
+        let waiting = self.waiters;
+        let woken = if waiting != 0 {
+            let id = waiting.trailing_zeros();
+            self.waiters &= !(1 << id);
+            Some(id as usize)
+        } else {
+            None
+        };
         unsafe { irq_restore(flags) };
-        for id in 0..32 {
-            if waiting & (1 << id) != 0 {
-                sched::wake(id);
-            }
+        if let Some(id) = woken {
+            sched::wake(id);
         }
     }
 }

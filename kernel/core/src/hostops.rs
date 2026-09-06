@@ -330,6 +330,8 @@ pub extern "C" fn nk_timer_set_oneshot(id: usize, delta_ns: u64) -> i32 {
         if let Some(t) = (*(&raw mut TIMERS))[id].as_mut() {
             t.deadline = crate::timer::ticks() + ticks;
             t.armed = true;
+            N_ARMED += 1;
+            LAST_DEADLINE = t.deadline;
         }
     }
     0
@@ -342,6 +344,12 @@ pub extern "C" fn nk_timer_free(id: usize) {
 
 static mut DUE: u32 = 0;
 static mut TIMER_TASK: usize = usize::MAX;
+
+// PROBE
+pub static mut N_ARMED: u64 = 0;
+pub static mut N_DUE: u64 = 0;
+pub static mut N_FIRED: u64 = 0;
+pub static mut LAST_DEADLINE: u64 = 0;
 
 /// Called from the timer interrupt. Marks what is due and wakes the thread
 /// that will run it -- it does not run anything itself.
@@ -365,6 +373,7 @@ pub fn tick_timers() {
             }
         }
         if due != 0 {
+            N_DUE += 1;
             DUE |= due;
             let task = core::ptr::read(&raw const TIMER_TASK);
             if task != usize::MAX {
@@ -401,6 +410,7 @@ extern "C" fn timer_thread(_: usize) {
                 })
             };
             if let Some(f) = fire {
+                unsafe { N_FIRED += 1 };
                 f();
             }
         }

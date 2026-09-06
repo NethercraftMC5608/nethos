@@ -90,15 +90,38 @@ static void host_mutex_free(struct lkl_mutex *m)   { nk_mutex_free((struct nk_mu
 static void host_mutex_lock(struct lkl_mutex *m)   { nk_mutex_lock((struct nk_mutex *)m); }
 static void host_mutex_unlock(struct lkl_mutex *m) { nk_mutex_unlock((struct nk_mutex *)m); }
 
+/*
+ * Thread identifiers are nk's task slot plus one, and the plus one is
+ * load-bearing.
+ *
+ * LKL uses zero as "nobody owns the CPU": lkl_cpu_get tests `if (cpu.owner &&
+ * !thread_equal(cpu.owner, self))` before deciding whether the CPU is taken.
+ * nk numbers its tasks from zero, so the boot task -- the one that calls
+ * lkl_start_kernel and takes the CPU first -- was indistinguishable from no
+ * owner at all. Every later acquisition then believed the CPU was free,
+ * cpu.count went wrong, and the machine deadlocked with every thread blocked
+ * and the clock never re-armed.
+ *
+ * Nothing reports a sentinel collision. It presents as a kernel that stops.
+ */
 static lkl_thread_t host_thread_create(void (*f)(void *), void *arg)
 {
-	return (lkl_thread_t)nk_thread_create(f, arg);
+	unsigned long id = nk_thread_create(f, arg);
+
+	return (lkl_thread_t)(id + 1);
 }
 
 static void host_thread_detach(void) { }
 static void host_thread_exit(void) { nk_thread_exit(); }
-static int host_thread_join(lkl_thread_t tid) { return nk_thread_join((unsigned long)tid); }
-static lkl_thread_t host_thread_self(void) { return (lkl_thread_t)nk_thread_self(); }
+static int host_thread_join(lkl_thread_t tid)
+{
+	return nk_thread_join((unsigned long)tid - 1);
+}
+
+static lkl_thread_t host_thread_self(void)
+{
+	return (lkl_thread_t)(nk_thread_self() + 1);
+}
 static int host_thread_equal(lkl_thread_t a, lkl_thread_t b) { return a == b; }
 
 static struct lkl_tls_key *host_tls_alloc(void (*destructor)(void *))

@@ -228,12 +228,57 @@ for a long timeout, and the wrapped deadline lands in the past or the far
 future. Neither fires, and a Linux whose clock has stopped does not report
 anything -- it just stops.
 
-### Where it stops
+### Where it stops, and what is known about it
 
-Linux boots far enough to create its threads, allocate memory, use nk's locks
-and arm and re-arm its clock, and then makes no further progress without
-reaching printk. The next step is finding out where -- most likely the console
-is not registered, or something waits on a subsystem nk has not provided.
+Linux reaches `rest_init` -- it creates `kernel_init`, `kthreadd` and
+`idle_host_task`, which is nearly the end of `start_kernel` -- and then every
+thread blocks and nothing moves again:
+
+```
+  watchdog 0 at 100 ticks: armed=1 due=1 fired=1
+          [0] boot       blocked   0 slices
+          [1] timers     blocked   2 slices
+          [2] watchdog   running   3 slices
+          [3] linux      blocked   1 slices     <- lkl_run_kernel
+          [4] linux      blocked   1 slices
+          [5] linux      blocked   1 slices
+          [6] linux      blocked   1 slices
+```
+
+There is no console output because LKL registers its console at
+`early_initcall`, which runs inside `kernel_init` -- and `kernel_init` is one
+of the threads that never runs. `CONFIG_LKL_EARLY_CONSOLE=y` is set and does
+not help for the same reason: it is early relative to `initcalls`, not to
+`start_kernel`.
+
+Three real bugs were found and fixed on the way here, and none of them was
+this one:
+
+**LKL uses thread ID zero as "nobody owns the CPU".** `lkl_cpu_get` tests `if
+(cpu.owner && !thread_equal(cpu.owner, self))`. nk numbers tasks from zero, so
+the boot task -- the one that takes the CPU first -- was indistinguishable
+from no owner at all. `nk-host.c` offsets every thread id by one. Nothing
+reports a sentinel collision; it presents as a kernel that stops.
+
+**A counting semaphore must wake exactly one waiter.** nk's woke all of them
+and let the losers re-check, which looks harmless. It is not: a caller that
+counts its own sleepers -- one `up` per sleeper, which is exactly how LKL's
+CPU lock is written -- sees every spurious wakeup re-enter the wait loop and
+increment that count again, until the ups and downs no longer match.
+
+**A timer callback must not run in interrupt context.** Linux's callback
+re-enters Linux and Linux takes mutexes; a mutex nk cannot grant blocks the
+caller, and blocking inside an interrupt handler marks the *interrupted* task
+blocked and switches away from a stack halfway through an exception.
+
+What is left is a wait graph, not a mystery: every thread is blocked on a
+semaphore and the question is which, and who was supposed to raise it. nk's
+`Semaphore` needs to record its waiters' identities so the watchdog can print
+that graph. Likely candidates in order: LKL switches Linux tasks by
+`sem_up`ing the next task's `sched_sem` and `sem_down`ing its own, so a lost
+wakeup there stops everything; `thread_stack` is a host operation nk does not
+provide; and `jmp_buf_set`/`longjmp`, which `lkl_cpu_put` uses to hand the CPU
+between host threads, is nk's own assembly and has never been exercised.
 
 None of that is the hard part any more. The hard part was whether the whole
 Linux kernel would link into nk at all, and it does.

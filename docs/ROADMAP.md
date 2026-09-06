@@ -298,10 +298,16 @@ the one below it.
       nk-host.c` is 288 lines and supplies the machine. nk is 14MB with Linux
       inside it, and Linux runs: threads on nk's scheduler, nk's semaphores
       and mutexes, nk's frame allocator, nk's timer.
-- [ ] **Finish the boot.** It stalls before printk. Cost so far: Linux's
-      sections had to be gathered rather than discarded, FP/SIMD enabled at
-      EL1, timer callbacks moved out of interrupt context, and an overflow in
-      the deadline arithmetic fixed.
+- [ ] **Finish the boot.** Linux reaches `rest_init` -- it creates
+      `kernel_init`, `kthreadd` and `idle_host_task` -- and then every thread
+      blocks. No console output because LKL registers its console inside
+      `kernel_init`, which is one of the threads that never runs. Fixed on the
+      way: Linux's sections gathered rather than discarded, FP/SIMD enabled at
+      EL1, timer callbacks moved out of interrupt context, a deadline
+      overflow, LKL's use of thread id 0 as a sentinel, and a semaphore that
+      woke every waiter instead of one. Next: make nk's semaphores record who
+      is waiting, so the watchdog prints the wait graph instead of the fact
+      that there is one.
 - [ ] **Route EL0 `svc` to `lkl_syscall`.** nk already runs a process at EL0
       with its own address space; `lkl_syscall` already answers every Linux
       call. Joining them is the ABI.

@@ -613,7 +613,15 @@ command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq git;
 cd /src
 [ -d linux ] || git clone --depth 1 https://github.com/lkl/linux.git
 cd linux
-[ -f .config ] || make ARCH=lkl defconfig >/dev/null
+if [ ! -f .config ]; then
+  make ARCH=lkl defconfig >/dev/null
+  # The ordinary console registers at core_initcall, which is a long way into
+  # start_kernel -- so a boot that fails before it produces no output at all,
+  # which is indistinguishable from one that never started. The early console
+  # registers at early_initcall and prints the whole log.
+  echo "CONFIG_LKL_EARLY_CONSOLE=y" >> .config
+  make ARCH=lkl olddefconfig >/dev/null
+fi
 # -mno-outline-atomics: without it gcc emits calls to __aarch64_*_sync
 # helpers that live in libgcc, and nk has no libgcc. Inline atomics are
 # what a kernel wants anyway -- an out-of-line call per atomic on a
