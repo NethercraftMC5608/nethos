@@ -25,6 +25,17 @@ pub enum State {
     Unused,
     Ready,
     Running,
+    /// Waiting for something. The scheduler will not pick it until somebody
+    /// calls `wake`.
+    ///
+    /// Everything in nk until now waited by yielding in a loop, which works
+    /// and is wrong in a way that matters as soon as there is more than a
+    /// demo running: a spinning task is indistinguishable from a busy one, so
+    /// the machine can never be idle and a lock held across a long operation
+    /// burns every remaining slice. A real block is what a semaphore, a mutex
+    /// and a wait queue are all built from, and Linux's core assumes all
+    /// three.
+    Blocked,
     Finished,
 }
 
@@ -133,8 +144,6 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
     }
 }
 
-/// Pick the next ready task and go to it. Safe to call with nothing else
-/// runnable: it returns immediately, and the caller carries on.
 pub fn schedule() {
     unsafe {
         let tasks = &mut *(&raw mut TASKS);
@@ -172,6 +181,52 @@ pub fn schedule() {
 /// Give up the rest of this slice.
 pub fn yield_now() {
     schedule();
+}
+
+/// Which task is running. The identity a semaphore or a join needs.
+pub fn current_id() -> usize {
+    unsafe { core::ptr::read(&raw const CURRENT) }
+}
+
+/// Stop running until somebody calls `wake`.
+///
+/// The caller must have arranged to be woken *before* calling this, and with
+/// interrupts masked across both, or the wake can land in the gap between
+/// deciding to sleep and sleeping -- the classic lost-wakeup, and the reason
+/// this takes the saved interrupt state rather than masking it itself.
+pub fn block(flags: u64) {
+    unsafe {
+        (*(&raw mut TASKS))[CURRENT].state = State::Blocked;
+        // Interrupts come back on before the switch: the task is already
+        // marked blocked, so a wake arriving now sets it Ready again rather
+        // than being lost.
+        core::arch::asm!("msr daif, {}", in(reg) flags, options(nomem, nostack));
+        schedule();
+    }
+}
+
+/// Make a blocked task runnable. Safe from interrupt context.
+pub fn wake(id: usize) {
+    unsafe {
+        let tasks = &mut *(&raw mut TASKS);
+        if id < MAX_TASKS && tasks[id].state == State::Blocked {
+            tasks[id].state = State::Ready;
+        }
+    }
+}
+
+/// Wait for a task to finish.
+pub fn join(id: usize) {
+    loop {
+        let done = unsafe {
+            let t = &(*(&raw const TASKS))[id];
+            t.state == State::Finished || t.state == State::Unused
+        };
+        if done {
+            return;
+        }
+        yield_now();
+    }
 }
 
 /// Called by task_start when a task's entry function returns.
@@ -212,6 +267,7 @@ pub fn report() {
                 let s = match t.state {
                     State::Running => "running",
                     State::Ready => "ready",
+                    State::Blocked => "blocked",
                     State::Finished => "finished",
                     State::Unused => "",
                 };

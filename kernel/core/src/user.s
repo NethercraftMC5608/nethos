@@ -129,3 +129,49 @@ __user_blob_start:
 .balign 4
 .global __user_blob_end
 __user_blob_end:
+
+
+// nk_setjmp / nk_longjmp
+//
+// LKL asks the host for these by name: `jmp_buf_set` and `jmp_buf_longjmp`
+// are two of its forty host operations, and it uses them where Linux would
+// unwind -- to get out of a context that cannot return normally.
+//
+// Only the callee-saved registers, SP and the return address, which is all
+// AAPCS makes the callee's problem: everything else the caller has either
+// already saved or does not care about. No floating point, because the whole
+// kernel is built -mgeneral-regs-only and there is none to save.
+//
+// nk_setjmp returns 0 when it is called and whatever nk_longjmp was given
+// when it is returned to -- and the discipline that makes that safe is the
+// same as C's: the function that called nk_setjmp must not have returned.
+
+.global nk_setjmp
+nk_setjmp:
+    stp     x19, x20, [x0, #16 * 0]
+    stp     x21, x22, [x0, #16 * 1]
+    stp     x23, x24, [x0, #16 * 2]
+    stp     x25, x26, [x0, #16 * 3]
+    stp     x27, x28, [x0, #16 * 4]
+    stp     x29, x30, [x0, #16 * 5]
+    mov     x1, sp
+    str     x1,       [x0, #16 * 6]
+    mov     x0, #0
+    ret
+
+.global nk_longjmp
+nk_longjmp:
+    ldp     x19, x20, [x0, #16 * 0]
+    ldp     x21, x22, [x0, #16 * 1]
+    ldp     x23, x24, [x0, #16 * 2]
+    ldp     x25, x26, [x0, #16 * 3]
+    ldp     x27, x28, [x0, #16 * 4]
+    ldp     x29, x30, [x0, #16 * 5]
+    ldr     x2,       [x0, #16 * 6]
+    mov     sp, x2
+    // longjmp(buf, 0) must still look like a non-zero return from setjmp, or
+    // the caller cannot tell the two paths apart. C requires this and it is
+    // the one piece of the contract that is easy to leave out.
+    cmp     w1, #0
+    csinc   w0, w1, wzr, ne
+    ret

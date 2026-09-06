@@ -68,6 +68,7 @@ import npkg_elf  # noqa: E402
 
 IMAGE = "nethos-ldk"
 SRC_VOLUME = "nethos-ldk-src"
+LKL_VOLUME = "nethos-lkl-src"
 DEFAULT_VERSION = "7.2"
 
 # Symbols the toolchain provides, not the kernel. Stubbing these would be
@@ -590,6 +591,50 @@ done
     docker(script, mounts=[(str(out), "/out"), (str(KERNEL / "linux"), "/shim")])
 
 
+# ------------------------------------------------------------------ lkl --
+
+def cmd_lkl(args):
+    """Fetch LKL and build it into a single relocatable object.
+
+    LKL is `arch/lkl` in the Linux tree: a real, maintained architecture port
+    whose "machine" is a set of function pointers the host fills in. It is
+    5,168 lines -- against 26,636 for arch/um and 179,127 for arch/arm64 --
+    because it delegates rather than implements.
+
+    The output is `lkl.o`: the entire Linux kernel, for aarch64, as one
+    object. Its undefined symbols are the whole of what nk must supply.
+    """
+    (void := None)
+    say("Fetching lkl/linux (shallow; a few minutes the first time)")
+    subprocess.run(["docker", "volume", "create", LKL_VOLUME],
+                   check=True, stdout=subprocess.DEVNULL)
+    script = """
+set -e
+command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq git; } >/dev/null 2>&1
+cd /src
+[ -d linux ] || git clone --depth 1 https://github.com/lkl/linux.git
+cd linux
+[ -f .config ] || make ARCH=lkl defconfig >/dev/null
+make ARCH=lkl -j$(nproc) >/tmp/build.log 2>&1 || { tail -30 /tmp/build.log; exit 1; }
+cp lkl.o /out/lkl.o
+cp arch/lkl/include/uapi/asm/host_ops.h /out/
+cp arch/lkl/include/uapi/lkl.h /out/ 2>/dev/null || true
+echo "  lkl.o: $(stat -c%s /out/lkl.o) bytes"
+echo "  needs from the host:"
+nm --undefined-only /out/lkl.o | awk '{print "    " $2}' | sort -u
+"""
+    out = BUILD / "lkl"
+    out.mkdir(parents=True, exist_ok=True)
+    cmd = ["docker", "run", "--rm", "-v", f"{LKL_VOLUME}:/src",
+           "-v", f"{out}:/out", IMAGE, "sh", "-c", script]
+    subprocess.run(cmd, check=True)
+    say(f"{(out / 'lkl.o').relative_to(ROOT)}")
+    print()
+    print("  That object is a complete Linux kernel: VFS, ext4, the network")
+    print("  stack, and every system call. What it wants from nk is the list")
+    print("  above plus a struct lkl_host_operations -- see kernel/lkl/.")
+
+
 # --------------------------------------------------------------- report --
 
 def cmd_report(args):
@@ -652,6 +697,9 @@ def main():
     p = sub.add_parser("shim", help="compile the shim and archive it with the drivers")
     p.add_argument("port")
     p.set_defaults(func=cmd_shim)
+
+    p = sub.add_parser("lkl", help="fetch and build LKL: the whole Linux kernel as one object")
+    p.set_defaults(func=cmd_lkl)
 
     p = sub.add_parser("report", help="coverage across every port")
     p.set_defaults(func=cmd_report)

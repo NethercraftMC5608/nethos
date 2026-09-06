@@ -23,6 +23,7 @@ pub mod psci;
 pub mod sched;
 pub mod selftest;
 pub mod stub;
+pub mod sync;
 pub mod user;
 pub mod timer;
 pub mod uart;
