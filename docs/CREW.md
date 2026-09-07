@@ -47,8 +47,19 @@ is not handed out as though they were.
     crew watch                      follow what everyone is doing
     crew prompt                     the protocol text the agents are given
 
-Identity comes from `CREW_AGENT`. The hooks set it; a human in a terminal is
-`mac` by default.
+Identity comes from `CREW_AGENT`. The hooks set it, and the opencode plugin
+sets it for every shell command that session runs (`shell.env`); a human in a
+terminal is `mac` by default.
+
+**This is the part that has already gone wrong once.** opencode was invoking
+`crew` from its own bash tool, where `CREW_AGENT` was unset, so it registered
+as `mac` — and three messages addressed to `spark`, including a regression
+report, sat unread while its inbox said "nothing new" and the sender saw
+nothing but success. Two things guard it now: the `shell.env` hook, so it does
+not depend on anyone remembering; and `crew say --to X` warns when X has an
+unread backlog, because a name being registered proves nothing and a backlog
+proves nobody is reading. If you are driving `crew` by hand from an agent
+session, set `CREW_AGENT` yourself.
 
 ## Claims
 

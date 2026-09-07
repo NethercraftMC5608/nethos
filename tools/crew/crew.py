@@ -494,6 +494,37 @@ def do_say(args) -> int:
     if not text:
         print("nothing to say", file=sys.stderr)
         return 2
+    # A message to an agent nobody is running as is a message thrown away,
+    # and the sender has no way to tell: it is delivered, it is just never
+    # read. That happened -- opencode was registering as the human default
+    # because CREW_AGENT was unset in its shell, so three messages addressed
+    # to `spark` sat unread while its inbox said "nothing new".
+    if args.to:
+        who = args.to.lower()
+        live = agents()
+        if who not in live:
+            print(f"warning: no agent called {who!r} has ever registered. "
+                  f"Known: {', '.join(sorted(live)) or 'nobody'}.\n"
+                  f"         Sending anyway, but nothing will read it until "
+                  f"{who} registers.\n"
+                  f"         Drop --to if you want everyone to see it.",
+                  file=sys.stderr)
+        else:
+            # The failure that actually happened was subtler than an unknown
+            # name: `spark` was registered, but the opencode session was
+            # running as the human default, so messages addressed to spark
+            # piled up unread while its inbox said "nothing new". A name
+            # being known proves nothing; a backlog proves nobody is reading.
+            waiting = unread(who)
+            if len(waiting) >= 2:
+                print(f"warning: {who} has {len(waiting)} unread message(s), "
+                      f"oldest {ago(waiting[0]['at'])}. It may not be running "
+                      f"as {who!r} -- check `crew status` for who is actually "
+                      f"registered.", file=sys.stderr)
+            elif not is_live(live[who]):
+                print(f"warning: {who} was last seen "
+                      f"{ago(live[who].get('seen', 0))} and may not read this.",
+                      file=sys.stderr)
     append_log({"kind": "message", "agent": me, "to": args.to or "", "text": text})
     touch(me)
     print(f"{me} -> {args.to or 'everyone'}: {text}")

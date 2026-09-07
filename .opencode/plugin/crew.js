@@ -97,6 +97,21 @@ export const CrewPlugin = async ({ project, directory, worktree, $ }) => {
       }
     },
 
+    /**
+     * Every command this session runs in a shell knows who it is.
+     *
+     * Without this, `crew` invoked from the model's own bash tool has no
+     * CREW_AGENT, falls back to the human default, and registers as `mac`.
+     * That is not a cosmetic mislabel: a message sent `--to spark` then
+     * goes to an agent nobody is running as, and the recipient's inbox says
+     * "nothing new" forever. It cost three messages, including a regression
+     * report, before anyone noticed.
+     */
+    "shell.env": async (_input, output) => {
+      output.env.CREW_AGENT = AGENT;
+      if (installed) output.env.CREW_ROOT = root;
+    },
+
     /** Refuse a write to something another agent is in the middle of. */
     "tool.execute.before": async (input, output) => {
       if (!WRITES.test(input.tool)) return;

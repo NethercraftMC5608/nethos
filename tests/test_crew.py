@@ -147,6 +147,31 @@ class Messages(CrewCase):
         self.crew('spark', 'inbox')
         self.assertIn('nothing new', self.crew('spark', 'inbox').stdout)
 
+    def test_an_unknown_recipient_is_flagged(self):
+        # A message to an agent nobody runs as is delivered and never read,
+        # and the sender cannot tell the difference from success.
+        r = self.crew('opus', 'say', 'hello', '--to', 'ghost')
+        self.assertIn('no agent called', r.stderr)
+        self.assertEqual(r.returncode, 0)        # still sent
+
+    def test_a_backlog_is_flagged(self):
+        # The failure that actually happened: the recipient's name was
+        # registered, but the session was running under a different identity,
+        # so messages piled up unread while its inbox said "nothing new".
+        self.crew('spark', 'register')
+        self.crew('opus', 'say', 'one', '--to', 'spark')
+        self.crew('opus', 'say', 'two', '--to', 'spark')
+        r = self.crew('opus', 'say', 'three', '--to', 'spark')
+        self.assertIn('unread message', r.stderr)
+        self.assertIn('may not be running', r.stderr)
+
+    def test_a_recipient_that_is_reading_is_not_flagged(self):
+        self.crew('spark', 'register')
+        self.crew('opus', 'say', 'one', '--to', 'spark')
+        self.crew('spark', 'inbox')
+        r = self.crew('opus', 'say', 'two', '--to', 'spark')
+        self.assertNotIn('warning', r.stderr)
+
     def test_a_directed_message_goes_only_there(self):
         self.crew('opus', 'say', 'just for you', '--to', 'spark')
         self.assertIn('nothing new', self.crew('mac', 'inbox').stdout)
@@ -344,6 +369,14 @@ class Prompt(CrewCase):
         out = self.crew('mac', 'prompt').stdout
         self.assertIn('crew ask', out)
         self.assertIn('expected, not a failure', out)
+
+    def test_the_plugin_tells_the_shell_who_it_is(self):
+        # Without this, crew run from opencode's own bash tool has no
+        # CREW_AGENT and registers as the human, which silently loses every
+        # message addressed to the agent by name.
+        src = (ROOT / '.opencode/plugin/crew.js').read_text()
+        self.assertIn('"shell.env"', src)
+        self.assertIn('CREW_AGENT', src)
 
     def test_it_covers_the_handoff(self):
         self.assertIn('crew handoff', self.crew('mac', 'prompt').stdout)
