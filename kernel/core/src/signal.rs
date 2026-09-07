@@ -325,8 +325,16 @@ pub fn post(pid: i64, sig: u64) -> i64 {
     };
     sched::add_signal_pending(id, bit(sig));
     // A pending unblocked signal must interrupt a wait: `futex`, `wait4`,
-    // `sigsuspend` all check pending on wake and return `-EINTR`.
-    sched::wake(id);
+    // `sigsuspend` all check pending on wake and return `-EINTR`. Those are
+    // nk's own waits and block on token 0, so this reaches them.
+    //
+    // It deliberately does not reach a task blocked inside Linux. Waking one
+    // there returns it from a semaphore it was never given, which LKL
+    // survives by retrying and pays for by losing count of its sleepers.
+    // The signal stays pending either way and is delivered when the task
+    // comes back to EL0 of its own accord -- later than Linux would, and
+    // correct, which is the better half of that trade.
+    sched::wake_on(id, 0);
     0
 }
 

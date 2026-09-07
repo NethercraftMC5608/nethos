@@ -1606,7 +1606,13 @@ pub fn sys_exit(status: i32) -> ! {
                     128, // SI_KERNEL: from the kernel, not a kill
                     crate::sched::linux_pid(me) as i32,
                 );
-                crate::sched::wake(parent);
+                // Only if the parent is in a wait of nk's own. `wait4`
+                // polls with yield_now and is never blocked here, so this
+                // wake exists to shake a parent out of a generic sleep --
+                // and a parent blocked inside Linux must be left where it
+                // is. The signal stays pending and is delivered when it
+                // next returns to EL0.
+                crate::sched::wake_on(parent, 0);
             }
         }
     }

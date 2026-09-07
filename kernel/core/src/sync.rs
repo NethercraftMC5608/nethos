@@ -221,7 +221,9 @@ impl Semaphore {
         };
         unsafe { irq_restore(flags) };
         if let Some(id) = woken {
-            sched::wake(id);
+            // Targeted: this task is blocked in *this* primitive, and a
+            // task blocked in some other one is none of our business.
+            sched::wake_on(id, self.id);
         }
     }
 }
@@ -305,7 +307,9 @@ impl Mutex {
         };
         unsafe { irq_restore(flags) };
         if let Some(id) = woken {
-            sched::wake(id);
+            // Targeted: this task is blocked in *this* primitive, and a
+            // task blocked in some other one is none of our business.
+            sched::wake_on(id, self.id);
         }
     }
 }

@@ -993,7 +993,42 @@ pub fn block_on(flags: u64, what: u32) {
 /// happens -- it fails later, as a machine where everything is waiting.
 pub static mut LOST_WAKEUPS: u64 = 0;
 
-/// Make a blocked task runnable. Safe from interrupt context.
+/// Make a task runnable only if it is waiting on `what`.
+///
+/// `wake` does not look at what a task is blocked on, which is safe only
+/// while every wait is nk's own. It is not: a task inside a system call is
+/// often blocked in one of Linux's semaphores, and waking it there returns
+/// it from `sem_down` without the semaphore having been given to it. LKL
+/// then retries -- its `lkl_cpu_get` loops -- and increments `cpu.sleepers`
+/// again on the way round, so the count of sleepers and the semaphore's own
+/// count drift apart until a real `sem_up` is absorbed by a sleeper that was
+/// never asleep. What comes out is a machine where everything is waiting,
+/// with no single lost wakeup to point at.
+///
+/// The token is the rule: 0 is nk's own generic wait and may be interrupted
+/// by anyone, and anything else names a primitive that only its owner may
+/// wake a task out of.
+pub fn wake_on(id: usize, what: u32) {
+    unsafe {
+        let tasks = &mut *(&raw mut TASKS);
+        if id >= MAX_TASKS {
+            return;
+        }
+        if tasks[id].state == State::Blocked && tasks[id].waiting_on != what {
+            // Not ours to wake. Deliberately not counted as a lost wakeup:
+            // nothing was lost, and the signal or event that prompted this
+            // stays pending for whenever the task comes back on its own.
+            return;
+        }
+        wake(id);
+    }
+}
+
+/// Make a blocked task runnable, whatever it is waiting on.
+///
+/// Use `wake_on` unless you are the primitive the task is blocked in. See
+/// the note there for what waking a task out of somebody else's semaphore
+/// does.
 pub fn wake(id: usize) {
     unsafe {
         let tasks = &mut *(&raw mut TASKS);
