@@ -548,6 +548,11 @@ struct Forked {
     /// The failure path has to know: freeing it would take the address space
     /// out from under the threads still running in it.
     shares_mm: bool,
+    /// Whether the forking process had a real `/dev/console` on 0, 1 and 2.
+    /// A child that inherits those descriptors has one too, and must be told
+    /// so: without it nk answers the child's writes to 1 and 2 itself, which
+    /// sends them to the UART no matter what they were redirected to.
+    has_console: bool,
     /// Addresses the clone asked to have the new thread id written to, or 0.
     /// Written by the thread itself rather than by its creator: the creator
     /// only regains control after the thread is already running, by which
@@ -620,6 +625,7 @@ fn fork(frame: &Frame) -> i64 {
         tpidr,
         parent_pid: crate::sched::linux_pid(crate::sched::current_id()),
         shares_mm: false,
+        has_console: crate::sched::has_console(),
         set_tid: (0, 0),
         ready,
         pid,
@@ -673,6 +679,15 @@ extern "C" fn forked_entry(arg: usize) {
     // Before the parent is told the child exists, so the parent cannot close
     // a descriptor between forking and the child copying it.
     let inherited = crate::lkl::inherit_fds(f.parent_pid);
+    // A child with the parent's 0, 1 and 2 has a console in exactly the way
+    // the parent did, and saying otherwise is not a missing feature but a
+    // wrong answer: nk's fallback writes descriptor 1 to the UART, so a
+    // child's `> file` would be honoured by Linux and then bypassed by nk.
+    // That is why `dd of=... ` and `2>/dev/null` in a forked shell had been
+    // printing to the console regardless.
+    if f.has_console && inherited >= 3 {
+        crate::sched::set_has_console(true);
+    }
     f.pid.store(pid, Ordering::Release);
     f.ready.up();
     if inherited > 0 && !f.shares_mm {
@@ -747,6 +762,7 @@ fn thread(frame: &Frame) -> i64 {
         tpidr: if flags_arg & CLONE_SETTLS != 0 { tls } else { mine },
         parent_pid: crate::sched::linux_pid(crate::sched::current_id()),
         shares_mm: true,
+        has_console: crate::sched::has_console(),
         set_tid: (
             if flags_arg & CLONE_PARENT_SETTID != 0 { parent_tid } else { 0 },
             if flags_arg & CLONE_CHILD_SETTID != 0 { child_tid } else { 0 },

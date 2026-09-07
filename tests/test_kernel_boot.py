@@ -1201,5 +1201,75 @@ class Mesa(unittest.TestCase):
         self.assertIn('MESA_OK', self.out)
 
 
+NPKG_IMG = ROOT / 'kernel/ldk/build/npkg.img'
+NPKG_CPIO = ROOT / 'kernel/ldk/build/npkg.cpio'
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+@unittest.skipUnless(NPKG_IMG.exists() and NPKG_CPIO.exists(),
+                     'run scripts/build-npkg-disk.sh first')
+class Npkg(unittest.TestCase):
+    """NETHOS's package manager, on NETHOS's kernel.
+
+    npkg is pure-stdlib Python, so this is really a CPython port -- and
+    CPython is a harder test of a kernel than anything else nk runs. It
+    dlopens forty extension modules, threads through concurrent.futures,
+    maps its stdlib, and installs signal handlers on the way up. nk has no
+    signals; Linux records the handler and nk never delivers one, which for
+    a package manager means no Ctrl-C and nothing else.
+
+    The repository is a local directory, so the install is entirely offline
+    and still the real thing: resolve dependencies, verify sha256, unpack,
+    record in the database. nk has no network, and this does not need one.
+
+    The one thing that had to change was not in nk at all. Debian's python3
+    is ET_EXEC rather than a PIE, so it must land at the 0x400000 baked into
+    it -- and invoking the loader by hand, `ld.so /path/to/python3`, puts the
+    loader there first and the mapping fails. Executed directly it works,
+    because nk reads PT_INTERP and places the interpreter out of the way.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot('--lkl', '--disk', str(NPKG_IMG),
+                       '--initrd', str(NPKG_CPIO), timeout=400, watchdog=200)
+
+    def test_cpython_runs(self):
+        self.assertRegex(self.out, r'PYTHON_OK 3\.\d+\.\d+')
+
+    def test_npkg_reads_an_empty_database(self):
+        self.assertIn('no packages installed', self.out)
+
+    def test_it_resolves_a_dependency_and_orders_the_install(self):
+        # nk-tools depends on nk-greeting and only nk-tools was asked for, so
+        # a package manager that cannot solve prints one name here, not two.
+        self.assertIn('Installing: nk-greeting-1.0, nk-tools-2.1', self.out)
+        self.assertLess(self.out.index('installed nk-greeting'),
+                        self.out.index('installed nk-tools'))
+
+    def test_both_packages_are_installed(self):
+        self.assertIn('installed nk-greeting-1.0-1 (1 files)', self.out)
+        self.assertIn('installed nk-tools-2.1-1 (2 files)', self.out)
+
+    def test_the_database_can_be_read_back(self):
+        self.assertIn('nk-tools', self.out)
+        self.assertIn('/usr/share/nk/notes/README', self.out)
+
+    def test_it_knows_which_package_owns_a_path(self):
+        self.assertIn('/usr/share/nk/greeting is owned by nk-greeting',
+                      self.out)
+
+    def test_the_installed_files_verify(self):
+        self.assertIn('all packages verify', self.out)
+
+    def test_the_unpacked_file_is_really_there(self):
+        # The end of it: bytes that came out of a tarball npkg unpacked,
+        # read back off the filesystem by something that is not npkg.
+        self.assertIn('installed by npkg, running on nk', self.out)
+
+    def test_it_ran_to_the_end(self):
+        self.assertIn('npkg: exit 0', self.out)
+
+
 if __name__ == '__main__':
     unittest.main()

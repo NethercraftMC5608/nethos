@@ -70,7 +70,10 @@ cat > "$R/nk-init" <<'INIT'
 busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null
 busybox mount -t proc proc /proc 2>/dev/null
 busybox mount -t sysfs sysfs /sys 2>/dev/null
-busybox mount -t ext4 /dev/vda /mnt || { echo "mesa: mount failed"; exit 1; }
+# Read-only: nothing here writes, and a filesystem left mounted dirty needs
+# journal recovery on the next boot -- which is a slow, occasionally
+# surprising start to a test that has nothing to do with journals.
+busybox mount -t ext4 -o ro /dev/vda /mnt || { echo "mesa: mount failed"; exit 1; }
 echo "mesa: disk mounted"
 # /proc is not decoration: LLVM reads /proc/cpuinfo to pick its code path and
 # says so loudly when it cannot.
@@ -87,6 +90,7 @@ export GALLIUM_DRIVER=llvmpipe
 export LIBGL_ALWAYS_SOFTWARE=1
 /mnt/lib/ld-linux-aarch64.so.1 --library-path /mnt/lib /mnt/eglprobe
 echo "mesa: exit $?"
+busybox umount /mnt
 INIT
 chmod +x "$R/nk-init"
 ( cd "$R" && find . -print | LC_ALL=C sort | cpio -o -H newc 2>/dev/null ) \
