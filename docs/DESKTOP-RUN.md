@@ -108,6 +108,59 @@ These rules exist because breaking them cost this project a day.
 - **Three outcomes from one binary and one image is a race**, not a
   threshold. Stop looking for a size or content trigger.
 
+## When you need to look something up
+
+There is nobody to ask, so research is your escalation path for anything you
+do not know. You have web tools; use them properly.
+
+**Discovery, then fetch.** `hound_mcp_smart_search` runs ten backends in
+parallel and neural-reranks the results, but it returns **URLs, scores and
+snippets — not page content**. Never answer from a snippet. Search, then
+`hound_mcp_smart_fetch` the top one or two with `focus='<your question>'` so
+you get the relevant blocks rather than the whole page. `site:`,
+`exclude_sites` and `freshness` are there when a search is too noisy.
+
+**Multi-page documentation** — a Wayland protocol reference, a WebKit build
+guide, an API surface — is `hound_mcp_smart_crawl`, not repeated fetches. The
+cheap shape is two phases: `sitemap=true` to map the URLs in one request, then
+`crawl_urls=[...]` for only the pages you actually want, with `focus=` to
+prioritise and filter. A single page is always `smart_fetch`; do not crawl for
+one page.
+
+**Check `content_ok` before you believe anything.** If it is false, the
+content is not the page — branch on `next_action` and `page_type` instead of
+reading a bot wall and concluding the API changed. PDFs (specifications,
+papers) come back as structured markdown; use `pages='1-5'` and the
+`table_of_contents` rather than pulling a 400-page document into context.
+`cache_ttl=0` forces a fresh fetch of one URL; `hound_cache_clear` is for when
+the whole cache is stale.
+
+`hound_mcp_screenshot` is for visual layout questions only. You are a text
+agent for almost everything here — fetch the page.
+
+**What is actually worth researching in this project**, and what is not:
+
+Worth it — Wayland protocol semantics and what a compositor must implement;
+weston or wlroots backend options for a machine with no input devices and a
+DRM dumb-buffer display; WebKit/WPE build requirements and which of them nk
+cannot satisfy; the exact contract of a Linux interface you are implementing;
+decoding an ESR or a descriptor bit you are not certain of.
+
+Not worth it — anything about *this* kernel. nk is ours and nothing on the web
+knows how it behaves. A blog post cannot tell you why `poll` wedges after a
+UDP round trip on nk; only a measurement can.
+
+**The ordering that keeps you honest:**
+
+1. This repository's own docs. `docs/KERNEL.md` has cost people days already.
+2. The primary source — the Linux tree in the docker volume, the glibc
+   binary, the protocol XML. Read the code, not an article about the code.
+3. The web, for things genuinely outside this machine.
+
+A measurement on this machine beats a web page every time. If a documented
+behaviour and an observed one disagree, the observation is what is true here,
+and the disagreement itself is the finding — write it down.
+
 ## Tooling traps that will waste your time
 
 - The test suite is **already red on `Npkg`** at HEAD with no local changes.
@@ -135,6 +188,10 @@ These rules exist because breaking them cost this project a day.
 - If you are out of ideas on the hard bug, go and get more data. Add
   instrumentation, bisect, write a smaller repro. "No ideas" means "not
   enough measurements".
+- If you are out of ideas because you do not know something — how a protocol
+  works, what a library needs, what a bit means — that is a research problem,
+  not a dead end. Search it, read the primary source, and come back with the
+  fact. See "When you need to look something up".
 - Every ten iterations: update `docs/DESKTOP-PLAN.md`, commit, and re-plan
   against what you now know.
 - **Never claim a milestone you have not verified with its own command.**
