@@ -28,6 +28,8 @@ pub mod heap;
 pub mod hostops;
 #[cfg(nk_lkl)]
 pub mod lkl;
+#[cfg(nk_lkl)]
+pub mod lklirq;
 #[cfg(nk_linux)]
 pub mod linux;
 pub mod mmio;
@@ -155,7 +157,7 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
         // Before Linux starts: its timer callbacks run here, in thread
         // context, not in the interrupt that noticed they were due.
         hostops::start_timer_thread();
-        console::start_input_thread();
+        lklirq::start();
         // A watchdog rather than a timeout. Linux either finishes booting or
         // deadlocks, and the difference between the two from outside is
         // nothing at all -- both are a machine that has stopped printing. The
@@ -173,6 +175,16 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             println!("  getpid()  -> {}", lkl::syscall(172, [0; 6]));
             println!("  gettid()  -> {}", lkl::syscall(178, [0; 6]));
             println!("  getuid()  -> {}", lkl::syscall(174, [0; 6]));
+
+            // Every virtio transport that has anything behind it, handed to
+            // Linux. arch/lkl has no bus to enumerate and no device tree, so
+            // it is told: virtio_mmio_device_add registers a platform device
+            // at the address, and Linux's ordinary virtio_mmio driver probes
+            // whatever is there. Reading the magic first because QEMU's virt
+            // provides thirty-two transports and a machine usually has two or
+            // three devices; registering the empty ones would work and would
+            // print thirty failed probes.
+            attach_virtio(&fdt);
 
             // And from user space, which is the whole point: a process at
             // EL0 makes an `svc`, nk catches it, and Linux answers.
@@ -568,6 +580,46 @@ fn map_vmemmap(ram_base: u64, ram_size: u64) {
 /// QEMU happens to put the DTB above the kernel; U-Boot does not always, and
 /// a boot that hands out the pages the kernel is executing from fails in a
 /// way that has no useful symptom at all.
+/// Give Linux every virtio-mmio device the machine actually has.
+#[cfg(nk_lkl)]
+fn attach_virtio(fdt: &dt::Fdt) {
+    const MAGIC: u32 = 0x7472_6976; // "virt", little-endian
+    let mut found = 0;
+    fdt.each_compatible("virtio,mmio", |node| {
+        let Some((base, size)) = node.reg(0) else { return };
+        let Some((_, spi, _)) = node.interrupt(0) else { return };
+        // The transport is there whether or not anything is plugged into it;
+        // the device id is what says which.
+        let magic = unsafe { crate::mmio::readl(base as usize) };
+        let id = unsafe { crate::mmio::readl(base as usize + 8) };
+        if magic != MAGIC || id == 0 {
+            return;
+        }
+        // Routed before it is registered, because registering it probes it
+        // and the probe waits for the device to answer.
+        let Some(irq) = (unsafe { lklirq::reserve(c"virtio-mmio") }) else {
+            return;
+        };
+        lklirq::map_gic(spi + 32, irq);
+        unsafe { gic::enable_spi(spi + 32) };
+        if !lkl::add_virtio_mmio(base, size, irq) {
+            println!("  virtio: Linux refused the device at {:#x}", base);
+            return;
+        }
+        println!(
+            "  virtio: device {} at {:#x} -> Linux, GIC {} as LKL irq {}",
+            id,
+            base,
+            spi + 32,
+            irq
+        );
+        found += 1;
+    });
+    if found == 0 {
+        println!("  virtio: no devices behind the transports");
+    }
+}
+
 unsafe fn claim_memory(fdt: &dt::Fdt, ram_start: usize, ram_end: usize) {
     extern "C" {
         static __image_end: u8;

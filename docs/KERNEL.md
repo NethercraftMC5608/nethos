@@ -788,6 +788,81 @@ when Linux asks nk for input -- and it printed, which killed both guesses at
 once and pointed at the tty. The next line printed what the tty did with the
 bytes, and `tty=NULL` was the answer.
 
+### Linux on nk driving real hardware
+
+Until now every device Linux touched under `--lkl` was one LKL invented for
+itself. This is the other thing: nk hands Linux a device that is really there,
+at a real address, with a real interrupt.
+
+```
+  virtio: device 2 at 0xa003e00 -> Linux, GIC 79 as LKL irq 3
+  ...
+NETHOS-DISK-MARKER
+```
+
+That is busybox `dd` reading a disk, through Linux's block layer, through the
+unmodified `virtio_blk` driver, over real MMIO, with real interrupts, on nk.
+
+Almost all of the mechanism already existed and I had assumed it did not:
+
+- **`lkl_host_ops` has `ioremap` and `iomem_access`.** nk is identity mapped
+  and the devices are already Device memory, so `ioremap` returns the address
+  and `iomem_access` is a load or a store of exactly the right width.
+- **`arch/lkl` has a private `virtio_mmio_device_add(base, size, irq)`
+  syscall.** It registers a platform device with those resources and Linux's
+  ordinary `virtio_mmio` driver binds to it. There is no bus to enumerate and
+  no device tree, so the kernel is simply told.
+
+nk reads the transports out of its own device tree and checks each one's magic
+and device id before registering it: QEMU's `virt` provides thirty-two and a
+machine usually has two or three, so registering the empty ones would work and
+would print thirty failed probes.
+
+Two orderings had to be right, and both stopped the machine dead:
+
+**The interrupt must be routed before the device is registered.** Registering
+it probes it, and a probe that waits for the device to answer waits inside
+that syscall. Enabling the line afterwards is a boot that stops with no
+message, in a driver doing exactly what it should.
+
+**A device interrupt must be masked until Linux has acknowledged it.** The
+line is level-triggered: it stays asserted until the driver acknowledges it
+*at the device*, and only Linux's driver can. nk cannot service it and must
+not simply return, because the GIC offers it again immediately -- several
+hundred thousand times a second, with the thread that would have told Linux
+starved by the very interrupt it was trying to deliver. So it is masked on
+arrival and unmasked once Linux has had it, which is what Linux itself does
+for a threaded handler and for the same reason.
+
+`lklirq.rs` exists because this is the third device to need it. Raising
+Linux's interrupt takes LKL's CPU lock, and a handler must not take a lock --
+the timer learned that, then the console, and now every virtio device. A
+handler marks a bit; one thread raises them.
+
+**It is not reliable yet.** The first read succeeds; a second, or a second
+process reading concurrently, can hang. The suspicion is the unmask handshake
+-- nk unmasks when `lkl_trigger_irq` returns, which is not the same instant as
+Linux's handler having acknowledged the device -- but that is a suspicion and
+the measurement has not been done.
+
+### What this means for graphics
+
+The path above is the path a GPU takes. `CONFIG_DRM` is present in
+`arch/lkl`'s configuration and switched off; virtio-gpu is a virtio-mmio
+device like the disk. What stands between here and Mesa is not the device
+plumbing:
+
+- **Threads.** `CLONE_THREAD` is refused, and Mesa is threaded throughout.
+- **Shared file-backed `mmap`, with writeback.** DRM buffers are `MAP_SHARED`
+  on `/dev/dri/card0`. Private file mappings work; shared ones do not.
+- Then a userland with `libdrm` and Mesa, which is a rootfs problem rather
+  than a kernel one, and `llvmpipe` for software rendering.
+
+Accelerated Mesa through virgl is a further question and an uncertain one,
+because the uncertainty is on the *host* side: it needs `virtio-gpu-gl` and
+virglrenderer with a working host GL context under HVF on macOS. That is worth
+settling with an experiment on QEMU alone before any of it involves nk.
+
 ### What a real binary still cannot do
 
 Threads, signals, and any `mmap` of a file. Nothing survives a reboot:

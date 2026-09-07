@@ -21,6 +21,7 @@ use crate::println;
 const GICD_CTLR: usize = 0x0000;
 const GICD_IGROUPR: usize = 0x0080;
 const GICD_ISENABLER: usize = 0x0100;
+const GICD_ICENABLER: usize = 0x0180;
 const GICD_IPRIORITYR: usize = 0x0400;
 const GICD_IROUTER: usize = 0x6000;
 
@@ -142,6 +143,35 @@ pub unsafe fn enable_spi(intid: u32) {
     let aff = mpidr & 0x00ff_ffff_ff00_ffff;
     core::ptr::write_volatile((gicd + GICD_IROUTER + i * 8) as *mut u64, aff);
 
+    w32(gicd + GICD_ISENABLER + (i / 32) * 4, 1 << (i % 32));
+}
+
+/// Stop offering a shared interrupt, and start again.
+///
+/// A device interrupt is level-triggered: the line stays asserted until the
+/// driver acknowledges it *at the device*, and only Linux's driver can do
+/// that. nk cannot service it and must not simply return, because the GIC
+/// will offer it again immediately and the machine does nothing else ever
+/// again -- which is what happened, at several hundred thousand interrupts a
+/// second, with the thread that would have told Linux starved by the very
+/// interrupt it was trying to deliver.
+///
+/// So it is masked on arrival and unmasked once Linux has had it. This is
+/// what Linux itself does for a threaded handler, for the same reason.
+///
+/// # Safety
+/// `init` must have run.
+pub unsafe fn mask_spi(intid: u32) {
+    let gicd = (*(&raw const GIC)).gicd;
+    let i = intid as usize;
+    w32(gicd + GICD_ICENABLER + (i / 32) * 4, 1 << (i % 32));
+}
+
+/// # Safety
+/// `init` must have run.
+pub unsafe fn unmask_spi(intid: u32) {
+    let gicd = (*(&raw const GIC)).gicd;
+    let i = intid as usize;
     w32(gicd + GICD_ISENABLER + (i / 32) * 4, 1 << (i % 32));
 }
 

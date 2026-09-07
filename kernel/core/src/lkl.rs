@@ -75,6 +75,32 @@ pub fn write_file(path: &core::ffi::CStr, bytes: &[u8]) -> Result<(), i64> {
     let close = syscall(57, [fd, 0, 0, 0, 0, 0]);
     result.and(if close < 0 { Err(close) } else { Ok(()) })
 }
+/// Hand Linux a virtio-mmio device at a real address.
+///
+/// This is the whole of how a device nk can see becomes a device Linux drives.
+/// `arch/lkl` has no bus to enumerate and no device tree, so it takes the
+/// address as an argument: `virtio_mmio_device_add` registers a platform
+/// device with the memory and interrupt resources given, and Linux's ordinary
+/// `virtio_mmio` driver binds to it and probes whatever is behind. The MMIO
+/// itself reaches the hardware through `lkl_host_ops.iomem_access`, which nk
+/// already implements, because nk is identity mapped and a physical address
+/// is a pointer.
+///
+/// Returns the LKL interrupt number the device was given, which nk raises
+/// when the GIC tells it that device spoke.
+/// The interrupt must already be routed when this is called: registering the
+/// device probes it, and a probe that has to wait for the device to answer
+/// waits inside this call. Enabling the line afterwards is a boot that stops
+/// with no message, in a driver that is doing exactly what it should.
+pub fn add_virtio_mmio(base: u64, size: u64, irq: i32) -> bool {
+    /// `__NR_arch_specific_syscall`, which is 244 on asm-generic, plus zero.
+    const VIRTIO_MMIO_DEVICE_ADD: i64 = 244;
+    syscall(
+        VIRTIO_MMIO_DEVICE_ADD,
+        [base as i64, size as i64, irq as i64, 0, 0, 0],
+    ) >= 0
+}
+
 /// Create `/dev/console` and open it as descriptors 0, 1 and 2.
 ///
 /// Linux's `/dev/console` is major 5 minor 1, and what it reaches is decided

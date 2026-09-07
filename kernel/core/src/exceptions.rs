@@ -99,6 +99,19 @@ pub extern "C" fn rust_irq() {
         return;
     }
 
+    // A device nk handed to Linux. Marked here and raised by a thread, for
+    // the reason lklirq exists.
+    #[cfg(nk_lkl)]
+    if let Some(lkl) = crate::lklirq::for_gic(intid) {
+        // Masked until Linux's driver has acknowledged it at the device.
+        // Level-triggered means the line is still asserted on the way out of
+        // here, and an unmasked one is offered again immediately.
+        unsafe { crate::gic::mask_spi(intid) };
+        crate::lklirq::raise(lkl);
+        crate::gic::eoi(intid);
+        return;
+    }
+
     if intid == crate::timer::intid() {
         unsafe { crate::timer::rearm() };
         crate::timer::on_tick();

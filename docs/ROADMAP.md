@@ -376,6 +376,14 @@ the one below it.
       the archive and writes it into Linux's rootfs through the same VFS
       syscalls everything else uses. An initrd's `/nk-init` wins over the
       built-in fixture.
+- [x] **Linux on nk driving real hardware.** nk hands Linux a virtio-mmio
+      device at a real address with a real interrupt, using host ops and a
+      private syscall `arch/lkl` already had; busybox `dd` reads a disk
+      through the unmodified `virtio_blk` driver. Needs the interrupt routed
+      *before* the device is registered, and masked until Linux acknowledges
+      it -- a level-triggered line nk cannot service is an interrupt storm
+      that starves the thread trying to report it. Not yet reliable past the
+      first read.
 - [ ] **A persistent root.** The rootfs is still memory-backed: an initrd is
       unpacked into RAM and nothing survives a reboot. virtio-blk works under
       the shim; giving Linux a real block device under LKL is the next step.
