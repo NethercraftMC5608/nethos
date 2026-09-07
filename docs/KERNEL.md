@@ -896,14 +896,22 @@ Legacy virtio never noticed, because it bypasses the DMA API and uses
 dereference. Without `CONFIG_PCI`, Linux uses dma-direct, which is exactly
 right now that its linear map is identity with real physical memory.
 
-**Nothing is scanned out yet.** Writing to `/dev/fb0` fills a shadow buffer;
-something has to set a mode on the CRTC before the device scans any of it out,
-and QEMU reports "Display output is not active" until it does. `fbcon` does
-that on an ordinary Linux and was tried and backed out: with `CONFIG_VT` it
-also takes the system console, so the kernel log stopped reaching nk's serial
-port -- every test's only view of a boot -- and the guest hung after drawing.
-The right way is a KMS modeset from userspace, one ioctl against `card0`,
-changing nothing else.
+**Turning the display on is one ioctl.** Writing to `/dev/fb0` fills a shadow
+buffer; something has to set a mode on the CRTC before the device scans any of
+it out, and QEMU reports "Display output is not active" until it does.
+`FBIOPUT_VSCREENINFO` is how fbdev asks for that -- the DRM fbdev helper turns
+it into `drm_fb_helper_set_par`, which does the modeset -- so `fbtest.c` sends
+it after drawing, and the screen shows the gradient.
+
+`fbcon` does the same thing on an ordinary Linux and was tried and backed out:
+with `CONFIG_VT` it also takes the system console, so the kernel log stopped
+reaching nk's serial port -- every test's only view of a boot -- and the guest
+hung after drawing. One ioctl from userspace costs nothing and changes nothing
+else.
+
+`NK_MONITOR=/tmp/mon scripts/run-kernel.sh --lkl --gpu ...` then `screendump`
+on that socket produces a picture of what the device is scanning out, which is
+the only way to check this from outside the guest.
 
 After that, Mesa needs two things nk does not have: **threads**
 (`CLONE_THREAD` and `futex`) and **shared file-backed `mmap`**, since DRM

@@ -700,6 +700,13 @@ class Gpu(unittest.TestCase):
         self.assertRegex(self.out, r'fb: \d+x\d+ at 32 bpp')
         self.assertRegex(self.out, r'fb: drew \d+ lines')
 
+    def test_the_display_is_turned_on(self):
+        # Writing pixels fills a shadow buffer; nothing is scanned out until a
+        # mode is set on the CRTC. FBIOPUT_VSCREENINFO is how fbdev asks for
+        # that -- the DRM helper turns it into a modeset -- and without it
+        # QEMU reports "Display output is not active" over a black screen.
+        self.assertIn('fb: mode set, display should be active', self.out)
+
     def test_nothing_faulted(self):
         self.assertNotIn('fault in user space', self.out)
         self.assertNotIn('kernel panic', self.out)

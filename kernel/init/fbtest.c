@@ -58,6 +58,27 @@ int main(void)
 		}
 	}
 	printf("fb: drew %u lines\n", var.yres);
+
+	/* Turn the display on.
+	 *
+	 * Writing pixels fills a shadow buffer and nothing scans it out until
+	 * a mode has been set on the CRTC -- QEMU says "Display output is not
+	 * active" until then. FBIOPUT_VSCREENINFO is how fbdev asks for that:
+	 * the DRM fbdev helper turns it into drm_fb_helper_set_par, which
+	 * does the modeset. fbcon does the same thing on an ordinary Linux,
+	 * and dragging fbcon in costs the system console.
+	 */
+	var.activate = FB_ACTIVATE_NOW;
+	if (ioctl(fd, FBIOPUT_VSCREENINFO, &var) < 0)
+		perror("fb: FBIOPUT_VSCREENINFO");
+	else
+		printf("fb: mode set, display should be active\n");
+
+	/* And ask for it to be sent to the device: the helper flushes damage
+	 * from a worker, so a program that exits immediately can beat it. */
+	if (ioctl(fd, FBIOPAN_DISPLAY, &var) < 0)
+		perror("fb: FBIOPAN_DISPLAY");
+
 	close(fd);
 	return 0;
 }

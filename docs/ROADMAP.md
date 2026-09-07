@@ -389,8 +389,9 @@ the one below it.
       connector with real modes, and a program writing pixels into
       `/dev/fb0`. Needed Linux to have virtual memory of its own, a modern
       virtio transport, and LKL's PCI DMA ops out of the way.
-- [ ] **A KMS modeset**, so the pixels are scanned out. One ioctl against
-      card0; until then QEMU says "Display output is not active".
+- [x] **Pixels on screen.** `FBIOPUT_VSCREENINFO` makes the DRM fbdev helper
+      set the mode, and a screendump from QEMU's monitor shows the gradient a
+      program at EL0 drew.
 - [ ] **A persistent root.** The rootfs is still memory-backed: an initrd is
       unpacked into RAM and nothing survives a reboot. virtio-blk works under
       the shim; giving Linux a real block device under LKL is the next step.
