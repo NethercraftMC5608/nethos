@@ -960,21 +960,32 @@ def do_hook(args) -> int:
 
     if event in ("sessionstart", "userpromptsubmit"):
         touch(me, available=True)
-        text = board(brief=(event == "userpromptsubmit"))
+        start = event == "sessionstart"
+
+        # The protocol once, at the start; the board every turn. They change
+        # at different rates -- the rules never, the board constantly -- and
+        # repeating three thousand characters of unchanging instruction on
+        # every prompt buys nothing.
+        #
+        # The protocol is sent at all because CLAUDE.md is a summary and the
+        # agents need the same text, not two paraphrases of it. opencode gets
+        # this through a system-prompt transform; this is the other half.
+        text = PROMPT + "\n\n" if start else ""
+        text += ("## The board, right now\n\n" if start else "") \
+            + board(brief=not start)
+
         new = unread(me)
         if new:
             text += "\n\nmessages for you:\n" + "\n".join(
                 f"  {m['agent']}: {m['text']}" for m in new)
             mark_read(me)
-        if not new and event == "userpromptsubmit" and not claims():
+        if not start and not new and not claims():
             # Nothing to say. Staying quiet keeps the noise out of a session
             # where nobody else is working.
             return 0
-        key = "SessionStart" if event == "sessionstart" else "UserPromptSubmit"
         print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": key,
-            "additionalContext":
-                "crew board (other agents share this checkout):\n" + text,
+            "hookEventName": "SessionStart" if start else "UserPromptSubmit",
+            "additionalContext": text,
         }}))
         return 0
 

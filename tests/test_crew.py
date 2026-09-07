@@ -283,6 +283,29 @@ class Hooks(CrewCase):
         self.assertIn('a/b.rs', ctx)
         self.assertIn('spark', ctx)
 
+    def test_session_start_also_hands_over_the_protocol(self):
+        # Both agents must be given the same text, not two paraphrases of it.
+        # opencode gets it through a system-prompt transform; this is the
+        # other half, and it was missing -- Claude Code had only the board
+        # and whatever CLAUDE.md happened to summarise.
+        ctx = json.loads(self.hook('opus', 'sessionstart', {}).stdout)
+        ctx = ctx['hookSpecificOutput']['additionalContext']
+        for rule in ('crew claim', 'crew ask', 'crew handoff'):
+            self.assertIn(rule, ctx)
+
+    def test_a_mid_session_prompt_does_not_repeat_the_protocol(self):
+        # The rules never change and the board changes constantly. Resending
+        # three thousand characters of unchanging instruction every turn buys
+        # nothing.
+        self.crew('spark', 'claim', 'a/b.rs', '-m', 'mine')
+        ctx = json.loads(self.hook('opus', 'userpromptsubmit', {}).stdout)
+        ctx = ctx['hookSpecificOutput']['additionalContext']
+        self.assertIn('a/b.rs', ctx)
+        self.assertNotIn('crew handoff', ctx)
+
+    def test_a_quiet_repository_says_nothing(self):
+        self.assertEqual(self.hook('opus', 'userpromptsubmit', {}).stdout.strip(), '')
+
     def test_session_end_releases(self):
         self.crew('opus', 'claim', 'a/b.rs')
         self.hook('opus', 'sessionend', {})
