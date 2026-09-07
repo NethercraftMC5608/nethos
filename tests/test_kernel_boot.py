@@ -1271,5 +1271,65 @@ class Npkg(unittest.TestCase):
         self.assertIn('npkg: exit 0', self.out)
 
 
+SOAK_CPIO = ROOT / 'kernel/ldk/build/soak.cpio'
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+@unittest.skipUnless(SOAK_CPIO.exists(),
+                     'run scripts/build-soak-test.sh first')
+class SyscallSoak(unittest.TestCase):
+    """The desktop's syscalls, before the desktop.
+
+    socketpair and SCM_RIGHTS are the Wayland socket, epoll is the
+    compositor's event loop, eventfd wakes its threads, memfd is wl_shm,
+    poll is everything that waits the other way. All of them forward to
+    Linux untouched -- nk owns none of these numbers -- except the memfd
+    mmap, which is nk's sys_mmap and refuses MAP_SHARED. That refusal is
+    the test working: the one marker that must fail until MAP_SHARED
+    exists, proving the probe can see the gap it was built to find.
+
+    arch/lkl's defconfig leaves CONFIG_UNIX off, so the first run of
+    this failed at socketpair with EAFNOSUPPORT. The forwarding was
+    fine; the family was simply not compiled in. kernel/lkl/nk.config
+    now switches on UNIX, TMPFS and MEMFD_CREATE.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot('--lkl', '--initrd', str(SOAK_CPIO),
+                       timeout=120, watchdog=30)
+
+    def test_socketpair_sends_and_receives(self):
+        self.assertEqual(self.out.count('SOAK_SOCKETPAIR_OK'), 1, self.out)
+
+    def test_scm_rights_passes_a_live_fd(self):
+        self.assertEqual(self.out.count('SOAK_SCM_RIGHTS_OK'), 1, self.out)
+
+    def test_epoll_wakes_on_a_pipe(self):
+        self.assertEqual(self.out.count('SOAK_EPOLL_OK'), 1, self.out)
+
+    def test_eventfd_counts(self):
+        self.assertEqual(self.out.count('SOAK_EVENTFD_OK'), 1, self.out)
+
+    def test_memfd_mmap_needs_shared(self):
+        # MAP_SHARED is blocker #1. The probe reaches the mmap, nk
+        # refuses it with EOPNOTSUPP, and the marker stays absent --
+        # while everything around it passes. When MAP_SHARED lands,
+        # this becomes an assertEqual on SOAK_MEMFD_OK like the rest.
+        self.assertIn('mmap memfd: Operation not supported', self.out)
+        self.assertNotIn('SOAK_MEMFD_OK', self.out)
+
+    def test_poll_waits_on_a_pipe(self):
+        # poll sits after memfd in soak.c, so it is not reached until
+        # MAP_SHARED exists. Asserted absent for the same reason: the
+        # run must stop exactly where the missing feature is.
+        self.assertNotIn('SOAK_POLL_OK', self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('!!EXC', self.out)
+        self.assertNotIn('!! kernel panic', self.out)
+        self.assertIn('nk: done.', self.out)
+
+
 if __name__ == '__main__':
     unittest.main()
