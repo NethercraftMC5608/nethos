@@ -141,6 +141,13 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
         println!("  pl011:  receive on SPI {} (INTID {})", spi, spi + 32);
     }
 
+    // Before any process exists, because every address space nk creates
+    // copies the top of the kernel's tables and Linux must be in all of them.
+    #[cfg(nk_lkl)]
+    unsafe {
+        paging::reserve_linux_window()
+    };
+
     sched::init();
 
     psci::init(&fdt);

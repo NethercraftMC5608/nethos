@@ -217,6 +217,30 @@ static int host_iomem_access(const volatile void *addr, void *val, int size,
 	return 0;
 }
 
+/* Linux's own address space, when it is built with CONFIG_MMU. nk does the
+ * mapping itself: it is the kernel, so there is no host to ask. */
+void nk_shmem_init(unsigned long size);
+void *nk_shmem_mmap(unsigned long addr, unsigned long pg_off,
+		    unsigned long size, unsigned int prot);
+void *nk_mmap(unsigned long addr, unsigned long size, unsigned int prot);
+int nk_munmap(unsigned long addr, unsigned long size);
+
+static void *host_shmem_mmap(void *addr, unsigned long pg_off,
+			     unsigned long size, enum lkl_prot prot)
+{
+	return nk_shmem_mmap((unsigned long)addr, pg_off, size, prot);
+}
+
+static void *host_mmap(void *addr, unsigned long size, enum lkl_prot prot)
+{
+	return nk_mmap((unsigned long)addr, size, prot);
+}
+
+static int host_munmap(void *addr, unsigned long size)
+{
+	return nk_munmap((unsigned long)addr, size);
+}
+
 static void host_jmp_buf_set(struct lkl_jmp_buf *jmpb, void (*f)(void))
 {
 	if (!nk_setjmp(jmpb->buf))
@@ -270,6 +294,11 @@ struct lkl_host_operations lkl_host_ops = {
 
 	.ioremap = host_ioremap,
 	.iomem_access = host_iomem_access,
+
+	.mmap = host_mmap,
+	.munmap = host_munmap,
+	.shmem_init = nk_shmem_init,
+	.shmem_mmap = host_shmem_mmap,
 
 	.jmp_buf_set = host_jmp_buf_set,
 	.jmp_buf_longjmp = host_jmp_buf_longjmp,

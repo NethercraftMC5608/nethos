@@ -459,3 +459,91 @@ pub fn start_timer_thread() {
     let id = sched::spawn("timers", timer_thread, 0);
     unsafe { TIMER_TASK = id };
 }
+
+// --- Linux's own address space -------------------------------------------
+//
+// Only used when `arch/lkl` is built with CONFIG_MMU, where Linux manages
+// virtual memory instead of living in one flat block. It asks the host for
+// two things: a region of physical memory (the "shared memory object") and
+// the ability to map pages of it at addresses of Linux's choosing -- more
+// than one address for the same page, which is the whole point of an MMU and
+// the one thing nk had never had to offer it.
+//
+// On every other LKL host these are a shm object and `mmap`. nk is not a
+// process and has no host to ask, so it does the mapping itself, in a window
+// of virtual address space reserved before any process exists so that every
+// process sees the same Linux.
+
+/// The physical memory Linux was given, and how much of it.
+static mut SHMEM: (u64, u64) = (0, 0);
+
+/// `shmem_init(size)`: set aside the memory Linux will treat as its own
+/// physical address space. Contiguous, because Linux's page frame numbers are
+/// offsets into it and a gap would be a frame that is not where Linux thinks.
+#[no_mangle]
+pub extern "C" fn nk_shmem_init(size: usize) {
+    let pages = size.div_ceil(crate::frames::PAGE);
+    let base = crate::frames::alloc_contiguous(pages)
+        .expect("no contiguous memory for Linux's own address space");
+    unsafe {
+        core::ptr::write_bytes(base, 0, pages * crate::frames::PAGE);
+        SHMEM = (base as u64, (pages * crate::frames::PAGE) as u64);
+    }
+}
+
+/// `shmem_mmap(addr, pg_off, size, prot)`: map `size` bytes from byte offset
+/// `pg_off` of that region at `addr`. Returns `addr`, or null.
+///
+/// Linux calls this once at boot for its linear map and then once per page it
+/// maps thereafter, including for the same physical page at a second address.
+#[no_mangle]
+pub extern "C" fn nk_shmem_mmap(addr: usize, pg_off: usize, size: usize, _prot: u32) -> *mut u8 {
+    let (base, len) = unsafe { SHMEM };
+    if base == 0 || pg_off as u64 + size as u64 > len {
+        return core::ptr::null_mut();
+    }
+    let ok = unsafe { crate::paging::map_linux(addr as u64, base + pg_off as u64, size as u64) };
+    if ok {
+        addr as *mut u8
+    } else {
+        core::ptr::null_mut()
+    }
+}
+
+/// `mmap(addr, size, prot)`: anonymous memory at a fixed address, which is
+/// what Linux's vmalloc arena is made of. Backed page by page, because
+/// nothing requires it to be contiguous and a large contiguous request is the
+/// one that fails when memory is fragmented.
+#[no_mangle]
+pub extern "C" fn nk_mmap(addr: usize, size: usize, _prot: u32) -> *mut u8 {
+    let mut done = 0;
+    while done < size {
+        let Some(page) = crate::frames::alloc() else {
+            unsafe { crate::paging::unmap_linux(addr as u64, done as u64) };
+            return core::ptr::null_mut();
+        };
+        unsafe {
+            core::ptr::write_bytes(page, 0, crate::frames::PAGE);
+            if !crate::paging::map_linux(
+                (addr + done) as u64,
+                page as u64,
+                crate::frames::PAGE as u64,
+            ) {
+                crate::frames::free(page);
+                crate::paging::unmap_linux(addr as u64, done as u64);
+                return core::ptr::null_mut();
+            }
+        }
+        done += crate::frames::PAGE;
+    }
+    addr as *mut u8
+}
+
+/// `munmap(addr, size)`. The mapping goes; the pages do not, because a page
+/// mapped here may be one of Linux's own and mapped somewhere else too --
+/// which is precisely what it asked for.
+#[no_mangle]
+pub extern "C" fn nk_munmap(addr: usize, size: usize) -> i32 {
+    unsafe { crate::paging::unmap_linux(addr as u64, size as u64) };
+    0
+}

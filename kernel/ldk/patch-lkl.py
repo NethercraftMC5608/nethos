@@ -15,6 +15,15 @@ import os
 import shutil
 import sys
 
+# Four gigabytes of virtual address space for Linux's vmalloc arena, starting
+# at four. nk's paging reserves the same window; the two have to agree.
+VMALLOC_BASE = '0x100000000UL'
+VMALLOC_TOP = '0x17fffffffUL'
+# Linux's linear map at six gigabytes and its user mmap base at seven, both
+# inside the window nk reserves and clear of its vmalloc arena.
+MEMORY_START = '0x180000000'
+TASK_BASE = '0x1c0000000'
+
 UACCESS_H = '''/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * User access for a host that has a real user address space.
@@ -150,6 +159,85 @@ def host0_signals():
         say('host0 drops pending signals before creating a task')
 
 
+def linux_address_space():
+    """Put Linux's virtual addresses somewhere nk is not.
+
+    With CONFIG_MMU, arch/lkl wants an address space to itself: its vmalloc
+    arena is VMALLOC_START..VMALLOC_END, which it declares as 0..0xffffffff,
+    and its linear map starts at CONFIG_LKL_MEMORY_START, which defaults to
+    0x50000000. On every other LKL host that is a Unix process's address space
+    and the low four gigabytes are free. On nk they are not: nk's image, the
+    devices and the identity map of RAM are all in them, and Linux mapping
+    over them would be a kernel overwriting itself.
+
+    So Linux is moved above all of it -- its vmalloc arena at four gigabytes
+    and its linear map at six. Both are empty on this machine and both are
+    well under the 512GB a three-level page table can address, which matters
+    because arch/lkl uses three levels and a virtual address that does not fit
+    is one Linux indexes its own tables with out of range.
+
+    nk reserves the same window in `paging::reserve_linux_window`, and the two
+    have to agree.
+
+    Matched by tokens rather than by exact text: the file separates a #define
+    from its value with tabs, and a patch that has to reproduce them exactly
+    is a patch that breaks on whitespace nobody can see.
+    """
+    _vmalloc_arena()
+    _linear_map()
+
+
+def _vmalloc_arena():
+    path = 'arch/lkl/include/asm/pgtable.h'
+    s = open(path).read()
+    if VMALLOC_BASE in s:
+        return
+    out, seen = [], 0
+    for line in s.split(chr(10)):
+        word = line.split()
+        if len(word) >= 3 and word[0] == '#define' and word[1] == 'VMALLOC_START':
+            out.append('/* nk: above nk itself. See kernel/ldk/patch-lkl.py. */')
+            out.append('#define VMALLOC_START ' + VMALLOC_BASE)
+            seen += 1
+        elif len(word) >= 3 and word[0] == '#define' and word[1] == 'VMALLOC_END':
+            out.append('#define VMALLOC_END ' + VMALLOC_TOP)
+            seen += 1
+        else:
+            out.append(line)
+    if seen != 2:
+        sys.exit('patch-lkl: expected VMALLOC_START and VMALLOC_END in ' + path)
+    open(path, 'w').write(chr(10).join(out))
+    say("Linux's vmalloc arena moved above nk")
+
+
+def _linear_map():
+    # The linear map and the task mmap base are hex symbols with no prompt,
+    # so Kconfig takes their value from the `default` line and ignores any
+    # assignment in .config -- which is silent, and looks exactly like an
+    # assignment that worked until Linux asks the host to map its memory at
+    # the address it was always going to use.
+    path = 'arch/lkl/Kconfig'
+    s = open(path).read()
+    if MEMORY_START in s:
+        return
+    out, seen = [], 0
+    want = {'LKL_MEMORY_START': MEMORY_START, 'LKL_TASK_UNMAPPED_BASE': TASK_BASE}
+    symbol = None
+    for line in s.split(chr(10)):
+        word = line.split()
+        if len(word) == 2 and word[0] == 'config':
+            symbol = word[1]
+        if len(word) == 2 and word[0] == 'default' and symbol in want:
+            out.append(line.split('default')[0] + 'default ' + want[symbol])
+            seen += 1
+        else:
+            out.append(line)
+    if seen != 2:
+        sys.exit('patch-lkl: expected two defaults to move in ' + path)
+    open(path, 'w').write(chr(10).join(out))
+    say("Linux's linear map moved above nk")
+
+
 def console_driver(shim):
     """A console Linux owns.
 
@@ -168,6 +256,7 @@ def console_driver(shim):
 if __name__ == '__main__':
     shim = sys.argv[1] if len(sys.argv) > 1 else '/shim'
     arm64_open_flags()
+    linux_address_space()
     host_user_access()
     host0_signals()
     console_driver(shim)

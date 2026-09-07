@@ -186,6 +186,118 @@ pub unsafe fn map_normal(va: u64, pa: u64, size: u64) {
     );
 }
 
+/// Where Linux's own virtual addresses live, when Linux is managing memory.
+///
+/// `arch/lkl` with `CONFIG_MMU` wants an address space to itself. Its
+/// `__pa`/`__va` are the identity, its vmalloc arena is whatever
+/// `VMALLOC_START..VMALLOC_END` says, and its linear map starts at
+/// `CONFIG_LKL_MEMORY_START`. On every other LKL host that space is a Unix
+/// process's and the low four gigabytes are free; on nk they are not, because
+/// nk is *in* them -- its image, the devices and the identity map of RAM.
+///
+/// So Linux is given a window above all of that. Four gigabytes of virtual
+/// address space starting at four, which is empty on this machine and well
+/// under the 512GB a three-level page table can address -- `arch/lkl` uses
+/// three levels and a virtual address that does not fit is one Linux indexes
+/// its own tables with out of range.
+pub const LINUX_VA_BASE: u64 = 4 << 30;
+pub const LINUX_VA_SIZE: u64 = 4 << 30;
+
+/// Make the page tables for Linux's window exist, before any process does.
+///
+/// The tables below a level-1 entry are shared by pointer with every address
+/// space nk creates, because `new_address_space` copies the entry and not the
+/// subtree. So a mapping Linux makes later lands in every process's view --
+/// but only if the level-1 entry was there to be copied. Creating them all up
+/// front is what makes that true, and the alternative is a page that exists in
+/// the kernel and in every process created after it and in none created
+/// before.
+///
+/// # Safety
+/// The frame allocator is up and no process exists yet.
+pub unsafe fn reserve_linux_window() {
+    let l0 = &raw mut L0 as *mut u64;
+    let mut va = LINUX_VA_BASE;
+    while va < LINUX_VA_BASE + LINUX_VA_SIZE {
+        let l1 = next_table(l0.add(((va >> L0_SHIFT) & 511) as usize));
+        let l1e = l1.add(((va >> L1_SHIFT) & 511) as usize);
+        assert!(
+            *l1e & pte::VALID == 0 || *l1e & pte::TABLE != 0,
+            "Linux's window overlaps a block mapping at {va:#x}"
+        );
+        next_table(l1e);
+        va += 1 << L1_SHIFT;
+    }
+    core::arch::asm!("dsb ishst", "isb", options(nostack));
+}
+
+/// Map physical pages into Linux's window.
+///
+/// EL1 only: this is Linux's memory, not a process's, and a process that
+/// could read it could read the kernel. Executable because Linux maps its own
+/// module text through the same call and has no way to say so -- `arch/lkl`'s
+/// `mmap_pages_for_ptes` asks for read, write and execute together and leaves
+/// a note saying it should not.
+///
+/// # Safety
+/// `reserve_linux_window` has run and the range is inside it.
+pub unsafe fn map_linux(va: u64, pa: u64, size: u64) -> bool {
+    if va < LINUX_VA_BASE || va + size > LINUX_VA_BASE + LINUX_VA_SIZE {
+        return false;
+    }
+    let l0 = table_of(kernel_address_space()) as *mut u64;
+    let mut off = 0;
+    while off < size {
+        let v = va + off;
+        let l1 = next_table(l0.add(((v >> L0_SHIFT) & 511) as usize));
+        let l2 = next_table(l1.add(((v >> L1_SHIFT) & 511) as usize));
+        let l3 = next_table(l2.add(((v >> L2_SHIFT) & 511) as usize));
+        *l3.add(((v >> L3_SHIFT) & 511) as usize) = (pa + off)
+            | pte::VALID
+            | pte::TABLE
+            | pte::AF
+            | pte::SH_INNER
+            | pte::attr(ATTR_NORMAL)
+            // No AP bits at all: AP[1] clear is EL1 only and AP[2] clear is
+            // writable, which is exactly what Linux's own memory should be.
+            | pte::UXN;
+        off += 4096;
+    }
+    core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
+    true
+}
+
+/// Take a range of Linux's window out of the tables. The pages themselves
+/// belong to whoever allocated them; only the mapping goes.
+///
+/// # Safety
+/// `reserve_linux_window` has run.
+pub unsafe fn unmap_linux(va: u64, size: u64) {
+    let l0 = table_of(kernel_address_space()) as *mut u64;
+    let mut off = 0;
+    while off < size {
+        let v = va + off;
+        off += 4096;
+        let e0 = *l0.add(((v >> L0_SHIFT) & 511) as usize);
+        if !is_table(e0) {
+            continue;
+        }
+        let l1 = (e0 & ADDR) as *mut u64;
+        let e1 = *l1.add(((v >> L1_SHIFT) & 511) as usize);
+        if !is_table(e1) {
+            continue;
+        }
+        let l2 = (e1 & ADDR) as *mut u64;
+        let e2 = *l2.add(((v >> L2_SHIFT) & 511) as usize);
+        if !is_table(e2) {
+            continue;
+        }
+        let l3 = (e2 & ADDR) as *mut u64;
+        *l3.add(((v >> L3_SHIFT) & 511) as usize) = 0;
+    }
+    core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
+}
+
 const L3_SHIFT: u64 = 12;
 
 /// Mask for the output address in a descriptor or a TTBR value.
