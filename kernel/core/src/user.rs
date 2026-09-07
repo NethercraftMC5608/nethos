@@ -1002,7 +1002,16 @@ extern "C" fn forked_entry(arg: usize) {
     // a shell will need. It is a limitation, not a design.
     // A process that cannot fork is a failed fork, not a dead kernel: the
     // parent gets an errno and decides what to do about it.
-    let pid = match crate::lkl::attach_process() {
+    // A thread shares its creator's descriptors; a process gets its own.
+    // Both need a Linux task of their own -- two nk tasks cannot answer
+    // syscalls as one Linux task -- but only one of them wants a private
+    // table. See `attach_thread`.
+    let attach = if f.shares_mm {
+        crate::lkl::attach_thread(f.parent_pid)
+    } else {
+        crate::lkl::attach_process()
+    };
+    let pid = match attach {
         Ok(pid) => pid,
         Err(e) => {
             f.pid.store(e, Ordering::Release);
@@ -1025,7 +1034,9 @@ extern "C" fn forked_entry(arg: usize) {
     }
     // Before the parent is told the child exists, so the parent cannot close
     // a descriptor between forking and the child copying it.
-    let inherited = crate::lkl::inherit_fds(f.parent_pid);
+    // Copying descriptors is the process path only: a thread already has
+    // its creator's table, and copying into it would duplicate every entry.
+    let inherited = if f.shares_mm { 3 } else { crate::lkl::inherit_fds(f.parent_pid) };
     // A child with the parent's 0, 1 and 2 has a console in exactly the way
     // the parent did, and saying otherwise is not a missing feature but a
     // wrong answer: nk's fallback writes descriptor 1 to the UART, so a

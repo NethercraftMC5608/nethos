@@ -306,10 +306,110 @@ def console_driver(shim):
         say('arch/lkl builds nk-console.c')
 
 
+def thread_files():
+    """Let a thread share its creator's descriptor table.
+
+    `new_host_task()` clones every host task from host0, never from the
+    caller, so nk has to `unshare(CLONE_FILES)` to give a *process* a table of
+    its own. A thread needs the opposite and cannot get it the same way:
+    CLONE_FILES is part of what `pthread_create` asks for, and by the time nk
+    knows whose thread this is, the task already exists -- there is no clone
+    left to pass a flag to.
+
+    Two failures come out of a thread holding a private copy, and they look
+    nothing like each other. A descriptor opened after the thread started is
+    invisible to it (EBADF). And a close in one thread is not a close: the
+    creator's duplicate keeps the file open, so a socket a worker finished
+    with never sends FIN and the peer waits for an EOF that cannot arrive --
+    which is a hung HTTP response, and is what stopped a ThreadingHTTPServer
+    on nk while the identical single-threaded sequence completed.
+
+    So: adopt the table rather than copy it. One syscall, taking the pid to
+    share with, called by the new thread on its own way up.
+    """
+    if 'sys_share_files' in open('arch/lkl/kernel/syscalls.c').read():
+        return
+    edit('arch/lkl/include/uapi/asm/unistd.h',
+         '#define __NR_new_thread_group_leader\t(__NR_arch_specific_syscall + 1)',
+         '#define __NR_new_thread_group_leader\t(__NR_arch_specific_syscall + 1)\n'
+         '#define __NR_share_files\t\t(__NR_arch_specific_syscall + 2)',
+         'share_files syscall number')
+    edit('arch/lkl/include/asm/unistd.h',
+         '__SYSCALL(__NR_new_thread_group_leader, sys_new_thread_group_leader)',
+         '__SYSCALL(__NR_new_thread_group_leader, sys_new_thread_group_leader)\n'
+         '__SYSCALL(__NR_share_files, sys_share_files)',
+         'share_files in the syscall table')
+    edit('arch/lkl/kernel/syscalls.c',
+         'static asmlinkage long sys_new_thread_group_leader(void);',
+         'static asmlinkage long sys_new_thread_group_leader(void);\n\n'
+         'static asmlinkage long sys_share_files(long pid);',
+         'share_files declared')
+    edit('arch/lkl/kernel/syscalls.c',
+         '#include <linux/task_work.h>',
+         '#include <linux/task_work.h>\n#include <linux/fdtable.h>\n'
+         '#include <linux/sched/task.h>',
+         'share_files includes')
+    open('arch/lkl/kernel/syscalls.c', 'a').write(SHARE_FILES_C)
+    say('arch/lkl can share a descriptor table between threads')
+
+
+SHARE_FILES_C = chr(10) + chr(10) + """
+/*
+ * nk: adopt another task's descriptor table.
+ *
+ * The thread this runs in was cloned from host0 and then given a table of
+ * its own; what it needs is the one its creator is using. There is no clone
+ * left to pass CLONE_FILES to, so take a reference to theirs and drop ours.
+ *
+ * Refcount first, swap second, release last: the old table must not be freed
+ * while anything still points at it, and taking the reference before the swap
+ * means a creator that exits between the two cannot take the table with it.
+ */
+SYSCALL_DEFINE1(share_files, long, pid)
+{
+	struct task_struct *t;
+	struct files_struct *theirs, *mine;
+
+	rcu_read_lock();
+	t = find_task_by_pid_ns((pid_t)pid, &init_pid_ns);
+	if (t)
+		get_task_struct(t);
+	rcu_read_unlock();
+	if (!t)
+		return -ESRCH;
+
+	task_lock(t);
+	theirs = t->files;
+	if (theirs)
+		atomic_inc(&theirs->count);
+	task_unlock(t);
+	put_task_struct(t);
+
+	if (!theirs)
+		return -ESRCH;
+	if (theirs == current->files) {
+		/* Already sharing: give back the reference just taken. */
+		put_files_struct(theirs);
+		return 0;
+	}
+
+	task_lock(current);
+	mine = current->files;
+	current->files = theirs;
+	task_unlock(current);
+
+	if (mine)
+		put_files_struct(mine);
+	return 0;
+}
+"""
+
+
 if __name__ == '__main__':
     shim = sys.argv[1] if len(sys.argv) > 1 else '/shim'
     arm64_open_flags()
     linux_address_space()
     host_user_access()
     host0_signals()
+    thread_files()
     console_driver(shim)

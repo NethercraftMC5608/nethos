@@ -298,6 +298,51 @@ pub fn read_file(path: &core::ffi::CStr) -> Result<alloc::vec::Vec<u8>, i64> {
 /// Must be the first LKL call on a fresh nk thread. LKL's private syscall
 /// 245 (arch_specific_syscall + 1) creates a thread-group leader via TLS.
 /// It still shares fs/files with host0 until Linux unshare separates them.
+/// Attach a *thread*: a Linux task of its own that shares its creator's
+/// descriptor table.
+///
+/// The difference from `attach_process` is one line and the whole of
+/// `CLONE_FILES`. A process wants a table of its own, so it unshares the one
+/// it was cloned from; a thread must share its creator's, because that is
+/// what `pthread_create` asked for. A thread with a private copy cannot see
+/// descriptors opened after it started, and its `close` is not a close --
+/// the creator's duplicate holds the file open, so a socket a worker
+/// finished with never sends FIN and its peer waits for an EOF that never
+/// comes. That is a hung HTTP response, and it is what stopped Python's
+/// ThreadingHTTPServer on nk while the same sequence in one thread worked.
+///
+/// `share_files` is nk's, added to `arch/lkl` by `patch-lkl.py`: LKL clones
+/// every task from host0 rather than from the caller, so by the time nk
+/// knows whose thread this is there is no clone left to pass a flag to.
+///
+/// Still deliberately unshared: `CLONE_FS`. A thread gets its own cwd and
+/// root, which POSIX says it should not. Nothing has needed it yet and it is
+/// a separate change; this one is the descriptor table.
+pub fn attach_thread(creator: i64) -> Result<i64, i64> {
+    const SHARE_FILES: i64 = 246;
+    let rc = syscall(245, [0; 6]);
+    if rc < 0 {
+        crate::println!("  attach: new_thread_group_leader -> {}", rc);
+        return Err(rc);
+    }
+    // CLONE_FS only. Unsharing files here would undo the sharing below.
+    let rc = syscall(97, [0x200, 0, 0, 0, 0, 0]);
+    if rc < 0 {
+        crate::println!("  attach: unshare(fs) -> {}", rc);
+        return Err(rc);
+    }
+    let rc = syscall(SHARE_FILES, [creator, 0, 0, 0, 0, 0]);
+    if rc < 0 {
+        crate::println!("  attach: share_files({}) -> {}", creator, rc);
+        return Err(rc);
+    }
+    let pid = syscall(172, [0; 6]);
+    if pid <= 1 {
+        return Err(-22);
+    }
+    Ok(pid)
+}
+
 pub fn attach_process() -> Result<i64, i64> {
     let rc = syscall(245, [0; 6]);
     if rc < 0 {
