@@ -8,7 +8,17 @@
 
 int main(int argc, char **argv)
 {
-	char *bb[] = { "busybox", "ls", "-l", "/", NULL };
+	char *bb[] = { "busybox", "sh", "-c",
+		       /* A shell, a pipeline of its own children, a file it
+			* created, and output sent somewhere other than the
+			* console. Redirection is the point: `> /tmp/out` is a
+			* dup2 onto descriptor 1, and until Linux owned the
+			* console nk answered descriptor 1 by its number and
+			* the file would have stayed empty. */
+		       "echo redirected > /tmp/out; "
+		       "busybox ls -l /; "
+		       "busybox cat /tmp/out",
+		       NULL };
 	char *envp[] = { "PATH=/bin", "HOME=/", NULL };
 
 	(void)argc;

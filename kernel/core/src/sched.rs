@@ -89,6 +89,10 @@ pub struct Task {
     /// records -- Linux knows about its tasks but nk owns the address spaces
     /// and the exit statuses, so the relation has to live where those do.
     pub parent: usize,
+    /// Whether this process has descriptors 0, 1 and 2 open on a real
+    /// console. When it has not, nk answers writes to 1 and 2 itself, which
+    /// prints and cannot redirect.
+    pub has_console: bool,
     /// Whether this task is inside a system call made *from EL0*.
     ///
     /// Linux asks nk to copy user memory for it, and the same code path
@@ -126,6 +130,7 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     brk_min: 0,
     mmap_next: 0,
     parent: 0,
+    has_console: false,
     user_syscall: false,
     tpidr: 0,
 }; MAX_TASKS];
@@ -211,6 +216,7 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             brk_min: 0,
             mmap_next: 0,
             parent: 0,
+            has_console: false,
             user_syscall: false,
             tpidr: 0,
         };
@@ -285,6 +291,14 @@ pub fn set_user_syscall(on: bool) -> bool {
         TASKS[CURRENT].user_syscall = on;
         was
     }
+}
+
+pub fn set_has_console(on: bool) {
+    unsafe { TASKS[CURRENT].has_console = on }
+}
+
+pub fn has_console() -> bool {
+    unsafe { TASKS[CURRENT].has_console }
 }
 
 pub fn in_user_syscall() -> bool {

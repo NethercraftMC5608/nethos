@@ -15,6 +15,8 @@ use core::arch::global_asm;
 /// filesystem to unpack it into.
 static mut INITRD: Option<(u64, u64)> = None;
 
+#[cfg(nk_lkl)]
+pub mod console;
 pub mod cpio;
 pub mod dt;
 #[cfg(nk_lkl)]
@@ -207,11 +209,17 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             }
             assert_eq!(lkl::syscall(57, [fd,0,0,0,0,0]), 0);
             assert_eq!(lkl::syscall(166, [parent_mask,0,0,0,0,0]), 0o22);
-            assert_eq!(lkl::syscall(129, [pa,0,0,0,0,0]), -3);
-            assert_eq!(lkl::syscall(129, [pb,0,0,0,0,0]), -3);
-            println!("  processes: distinct PIDs, private files/fs, both Linux tasks reaped");
-            assert_eq!(lkl::syscall(172, [0;6]), 1);
-            println!("  parent: Linux init survived both exits");
+            // Also claims about the fixture, and about a *quiet* one: that
+            // both Linux tasks are gone is only checkable while nothing else
+            // has been created since. A real init forks, and a pid it has
+            // finished with is one Linux is free to hand out again.
+            if user::ran_fixture() {
+                assert_eq!(lkl::syscall(129, [pa,0,0,0,0,0]), -3);
+                assert_eq!(lkl::syscall(129, [pb,0,0,0,0,0]), -3);
+                println!("  processes: distinct PIDs, private files/fs, both Linux tasks reaped");
+                assert_eq!(lkl::syscall(172, [0;6]), 1);
+                println!("  parent: Linux init survived both exits");
+            }
             // The fixture spins long enough to be preempted several times on
             // purpose, which is how it demonstrates that address spaces
             // survive a switch. A real binary is simply too quick, so this

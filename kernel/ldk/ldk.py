@@ -614,92 +614,11 @@ cd /src
 [ -d linux ] || git clone --depth 1 https://github.com/lkl/linux.git
 cd linux
 
-# arch/lkl's userspace ABI is asm-generic's. The binaries nk runs are arm64's,
-# and arm64 overrides four of the open flags -- O_DIRECTORY is 1<<14 there and
-# O_DIRECT is 1<<14 in asm-generic, so a program opening a directory asks LKL
-# for direct I/O and gets EINVAL from a filesystem that has none. busybox's
-# `ls` fails with "can't open '/': Invalid argument" and nothing anywhere
-# mentions a flag.
-#
-# The fix belongs here rather than in nk. Translating constants per syscall is
-# a table that has to be right for every call that ever takes a flag; giving
-# arch/lkl arm64's header makes the kernel's ABI *be* the one the binaries
-# were compiled against, once, for all of them. A real arch/lkl for aarch64
-# would do exactly this.
-#
-# Only the file arm64 actually overrides. Its other uapi/asm headers describe
-# structures LKL defines for itself -- ptrace, sigcontext -- and copying those
-# would replace working definitions with ones for hardware LKL does not have.
-if [ ! -f arch/lkl/include/uapi/asm/fcntl.h ]; then
-  cp arch/arm64/include/uapi/asm/fcntl.h arch/lkl/include/uapi/asm/fcntl.h
-  rm -f arch/lkl/include/generated/uapi/asm/fcntl.h
-  echo "  patched: arch/lkl now uses arm64's open flags"
-fi
-
-# Let Linux do its own user access, instead of nk describing every syscall.
-#
-# arch/lkl selects UACCESS_MEMCPY: it assumes kernel and user share one flat
-# address space, so copy_from_user is a memcpy. On nk they do not share one --
-# EL0 has its own translation tables -- so every pointer-bearing syscall had to
-# be described in a table on nk's side and its buffers bounced across. That
-# table is a list of every system call a program might make, which is the
-# thing this project exists to avoid writing.
-#
-# Linux already knows which arguments are user pointers: it marks them __user
-# and reaches them through copy_from_user. Giving arch/lkl a real one -- a call
-# back into nk, which translates through the calling task's page tables with
-# the hardware's own AT S1E0R -- makes every syscall work for the same reason
-# it works on real hardware, and there is nothing left to enumerate.
-if [ ! -f arch/lkl/include/asm/uaccess.h ]; then
-  sed -i 's/^\tselect UACCESS_MEMCPY$/\t# UACCESS_MEMCPY dropped: see arch\/lkl\/include\/asm\/uaccess.h/' arch/lkl/Kconfig
-  cat > arch/lkl/include/asm/uaccess.h <<'EOF'
-/* SPDX-License-Identifier: GPL-2.0 */
-/*
- * User access for a host that has a real user address space.
- *
- * The stock arch/lkl assumes kernel and user memory are the same memory and
- * makes copy_from_user a memcpy. That is true of every host LKL was written
- * for and false of a host that runs its processes at EL0 with their own
- * translation tables. The host provides the three primitives below; every
- * other user accessor in the kernel is built out of them.
- */
-#ifndef _ASM_LKL_UACCESS_H
-#define _ASM_LKL_UACCESS_H
-
-#include <linux/string.h>
-#include <asm-generic/access_ok.h>
-
-/* All three return the number of bytes NOT transferred, as Linux expects. */
-unsigned long lkl_copy_from_user(void *to, const void *from, unsigned long n);
-unsigned long lkl_copy_to_user(void *to, const void *from, unsigned long n);
-unsigned long lkl_clear_user(void *to, unsigned long n);
-
-static inline unsigned long
-raw_copy_from_user(void *to, const void __user *from, unsigned long n)
-{
-	return lkl_copy_from_user(to, (__force const void *)from, n);
-}
-#define raw_copy_from_user raw_copy_from_user
-
-static inline unsigned long
-raw_copy_to_user(void __user *to, const void *from, unsigned long n)
-{
-	return lkl_copy_to_user((__force void *)to, from, n);
-}
-#define raw_copy_to_user raw_copy_to_user
-
-static inline unsigned long __clear_user(void __user *to, unsigned long n)
-{
-	return lkl_clear_user((__force void *)to, n);
-}
-#define __clear_user __clear_user
-
-#include <asm-generic/uaccess.h>
-
-#endif /* _ASM_LKL_UACCESS_H */
-EOF
-  echo "  patched: arch/lkl asks the host for user access"
-fi
+# Everything nk needs changed in arch/lkl, with the reasons. Kept in its own
+# file because it is real code with real explanations, and because escaping a
+# patch through a shell script inside a Python string is a way to spend an
+# afternoon on backslashes.
+python3 /shim/ldk/patch-lkl.py /shim
 
 if [ ! -f .config ]; then
   make ARCH=lkl defconfig >/dev/null

@@ -422,13 +422,13 @@ class LinuxOnNk(unittest.TestCase):
         self.assertEqual(self.out.count('rootfs: /nk-init read back through Linux VFS'), 2)
         self.assertEqual(self.out.count('ELF: 1 PT_LOAD segment(s)'), 2)
 
-    def test_lkl_user_pointer_boundary(self):
-        # This used to assert `syscall 56 is not implemented`, which was the
-        # old contract: pointer-bearing calls were refused outright. openat
-        # has a descriptor now, so the assertion had become a claim that the
-        # feature was absent. What still holds -- and what the boundary is
-        # actually for -- is that a *kernel* address is refused whoever asks.
-        self.assertIn('refused a user pointer into kernel memory (EFAULT)', self.out)
+    def test_a_kernel_pointer_is_refused_by_linux(self):
+        # The fixture writes to descriptor 1 from an address inside the kernel
+        # image and requires EFAULT. It used to be nk that refused it, by
+        # looking at the descriptor number; the process has a real console
+        # now, so the write is Linux's and the refusal comes back out of
+        # useraccess.rs. The fixture exits 99 if it does not.
+        self.assertNotIn('the process exited with status 99', self.out)
         self.assertIn('hello from EL0 -- this is user space, on nk.', self.out)
 
     def test_a_process_reads_a_file_through_linuxs_vfs(self):
@@ -538,6 +538,11 @@ class Busybox(unittest.TestCase):
         root = ROOT / 'kernel/ldk/build/busybox-root'
         shutil.rmtree(root, ignore_errors=True)
         (root / 'bin').mkdir(parents=True)
+        # /dev for nk to put the console node in, /tmp for the shell to
+        # redirect into. An empty directory has no other way into a cpio
+        # archive than being there when it is built.
+        (root / 'dev').mkdir()
+        (root / 'tmp').mkdir()
         shutil.copy(build_c('busybox-init', 'bbinit'), root / 'nk-init')
         shutil.copy(ROOT / 'kernel/ldk/build/busybox', root / 'bin/busybox')
         cls.out = boot('--lkl', '--initrd', str(make_cpio(root, 'busybox.cpio')),
@@ -545,6 +550,18 @@ class Busybox(unittest.TestCase):
 
     def test_execve_starts_it(self):
         self.assertIn('execve: replaced this process', self.out)
+
+    def test_the_shell_redirects_into_a_file(self):
+        # `echo redirected > /tmp/out` is a dup2 of a file onto descriptor 1.
+        # While nk answered descriptor 1 by its number the file stayed empty
+        # and the word went to the UART; the only way to tell the difference
+        # is to read the file back, which is what `busybox cat` here does.
+        self.assertIn('redirected', self.out)
+
+    def test_it_forks_children_that_inherit_the_console(self):
+        # sh runs each command in a child. They print, so they have the
+        # console; a child with an empty descriptor table would not.
+        self.assertRegex(self.out, r'fork: child \d+ inherited [3-9]\d* descriptors')
 
     def test_it_lists_the_filesystem(self):
         # Its own output, in its own format, from Linux's rootfs.

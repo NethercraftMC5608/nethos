@@ -75,6 +75,47 @@ pub fn write_file(path: &core::ffi::CStr, bytes: &[u8]) -> Result<(), i64> {
     let close = syscall(57, [fd, 0, 0, 0, 0, 0]);
     result.and(if close < 0 { Err(close) } else { Ok(()) })
 }
+/// Create `/dev/console` and open it as descriptors 0, 1 and 2.
+///
+/// Linux's `/dev/console` is major 5 minor 1, and what it reaches is decided
+/// by `console_device()`: it walks the registered consoles and asks each for
+/// the tty driver behind it. LKL's own console has no such driver, so the one
+/// `arch/lkl/drivers/nk-console.c` adds is the one that answers.
+///
+/// Returns whether the process now has a console. When it does not -- an
+/// initrd with no `/dev`, or a kernel built without the driver -- nk falls
+/// back to answering writes to 1 and 2 itself, which is enough to print and
+/// not enough to redirect.
+pub fn open_console() -> bool {
+    const MKNODAT: i64 = 33;
+    const S_IFCHR: i64 = 0o020000;
+    const DUP3: i64 = 24;
+    // Linux packs a device number oddly: minor bits 0..7 and 12..31, with
+    // major in between. For 5:1 it is just 0x501, but spelling it out is what
+    // makes that not a magic number.
+    let dev = (5i64 << 8) | 1;
+
+    let _ = mkdir(c"/dev", 0o755);
+    // Not an error when it is already there: an initrd may ship one.
+    syscall(MKNODAT, [-100, c"/dev/console".as_ptr() as i64, S_IFCHR | 0o600, dev, 0, 0]);
+
+    let fd = syscall(56, [-100, c"/dev/console".as_ptr() as i64, 0o2, 0, 0, 0]);
+    if fd < 0 {
+        return false;
+    }
+    // Onto 0, 1 and 2. dup3 refuses to duplicate a descriptor onto itself, so
+    // the one case that needs no work is also the one that would fail.
+    for want in 0..3 {
+        if want != fd && syscall(DUP3, [fd, want, 0, 0, 0, 0]) < 0 {
+            return false;
+        }
+    }
+    if fd > 2 {
+        syscall(57, [fd, 0, 0, 0, 0, 0]);
+    }
+    true
+}
+
 /// Give the calling task a copy of another task's open descriptors.
 ///
 /// A forked child should inherit its parent's descriptors -- redirection in a
@@ -234,10 +275,12 @@ pub fn read_file(path: &core::ffi::CStr) -> Result<alloc::vec::Vec<u8>, i64> {
 pub fn attach_process() -> Result<i64, i64> {
     let rc = syscall(245, [0; 6]);
     if rc < 0 {
+        crate::println!("  attach: new_thread_group_leader -> {}", rc);
         return Err(rc);
     }
     let rc = syscall(97, [0x200 | 0x400, 0, 0, 0, 0, 0]);
     if rc < 0 {
+        crate::println!("  attach: unshare -> {}", rc);
         return Err(rc);
     }
     let pid = syscall(172, [0; 6]);

@@ -188,7 +188,11 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
     // else -- including writes to a descriptor the process opened itself --
     // is Linux's. This is the one place nk still answers on Linux's behalf,
     // and it goes away when there is a real console device.
-    let console = frame.x[0] == 1 || frame.x[0] == 2;
+    // Only when the process has no real console. With one, descriptor 1 is an
+    // ordinary Linux descriptor and may well be a file -- `ls > out` is a
+    // dup2 onto it -- so answering by number would send a shell's output to
+    // the UART no matter what it had been redirected to.
+    let console = (frame.x[0] == 1 || frame.x[0] == 2) && !crate::sched::has_console();
     let ret = if frame.x[8] == 64 && console {
         sys_write(frame.x[0], frame.x[1], frame.x[2])
     } else if frame.x[8] == 66 && console {
@@ -531,7 +535,17 @@ extern "C" fn forked_entry(arg: usize) {
     // of the filesystem. This is *not* a copy of the parent's: descriptors
     // the parent had open are not inherited, which real fork does inherit and
     // a shell will need. It is a limitation, not a design.
-    let pid = crate::lkl::attach_process().expect("Linux process attach failed");
+    // A process that cannot fork is a failed fork, not a dead kernel: the
+    // parent gets an errno and decides what to do about it.
+    let pid = match crate::lkl::attach_process() {
+        Ok(pid) => pid,
+        Err(e) => {
+            f.pid.store(e, Ordering::Release);
+            f.ready.up();
+            unsafe { paging::destroy_user_address_space(f.ttbr0) };
+            return;
+        }
+    };
     crate::sched::bind_linux_pid(pid);
     // Before the parent is told the child exists, so the parent cannot close
     // a descriptor between forking and the child copying it.
@@ -1200,6 +1214,9 @@ extern "C" fn process_entry(arg: usize) {
         pid,
         crate::lkl::syscall(178, [0; 6])
     );
+    if crate::lkl::open_console() {
+        crate::sched::set_has_console(true);
+    }
     if let Some(prepare) = prepare {
         prepare(pid);
     }
