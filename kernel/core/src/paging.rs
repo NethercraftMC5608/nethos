@@ -788,6 +788,17 @@ pub unsafe fn init(ram_base: u64, ram_size: u64) {
     let mut sctlr: u64;
     core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack));
     sctlr |= (1 << 0) | (1 << 2) | (1 << 12);
+    // UCT and UCI: let EL0 read CTR_EL0 and run the cache maintenance
+    // instructions. Both are trapped by default, and the trap looks nothing
+    // like what it is -- an ESR with EC 0x18 and a FAR of zero, which reads
+    // as a null dereference rather than a system register nobody may touch.
+    //
+    // They are not optional for real programs. A libc reads CTR_EL0 to learn
+    // its cache line size, and anything that generates code -- LLVM's JIT
+    // inside Mesa, most obviously -- must clean it to the point of unification
+    // with DC CVAU and IC IVAU before it can jump to it. Linux sets both for
+    // exactly these reasons.
+    sctlr |= (1 << 15) | (1 << 26);
     // A: strict alignment checking. Left off on purpose now that the MMU is
     // on -- normal memory permits unaligned access, and the Rust side is
     // still built with +strict-align, so this only removes a restriction.

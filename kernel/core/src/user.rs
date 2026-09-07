@@ -31,7 +31,18 @@ use crate::println;
 /// half poisoned the process's translations, under HVF only. See
 /// docs/KERNEL.md.
 pub const USER_BASE: u64 = 0x0040_0000;
-pub const USER_STACK_TOP: u64 = 0x1000_0000;
+/// The top of the user address space, and so how much room a process has.
+///
+/// It was 256MB, which was room for anything nk had run. Mesa is not: a
+/// single `PT_LOAD` in `libLLVM.so.19.1` is 117MB, and with QEMU's devices
+/// still sitting in the low half at 0x08000000..0x0a200000 the largest
+/// contiguous run below 256MB was 124MB -- just too small, in the way that
+/// produces "failed to map segment from shared object" and nothing else.
+///
+/// 0x3000_0000 is 768MB, and the ceiling is RAM: QEMU's `virt` puts it at
+/// 0x4000_0000, which the kernel maps through these same tables. Anything
+/// below that and above the devices is the process's to use.
+pub const USER_STACK_TOP: u64 = 0x3000_0000;
 
 /// Where anonymous mappings start, growing downward.
 ///
@@ -332,10 +343,21 @@ fn sys_writev(fd: u64, iov: u64, count: u64) -> i64 {
     bytes.len() as i64
 }
 
-/// How much of the address space one process may claim. A runaway `brk` loop
-/// should be told no, not allowed to exhaust the machine's memory on behalf
-/// of a program that has already gone wrong.
+/// How far a process may grow its heap. A runaway `brk` loop should be told
+/// no, not allowed to exhaust the machine's memory on behalf of a program
+/// that has already gone wrong.
 const USER_MEM_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// How large a single mapping may be, which is a different question from how
+/// large a heap may be and was wrongly the same constant. A heap grows one
+/// small step at a time and a limit on it catches a loop; a mapping is asked
+/// for once, at a size the file decides, and refusing 117MB of libLLVM is
+/// refusing to run Mesa rather than catching a mistake.
+///
+/// nk maps eagerly -- a frame per page, read at map time -- so this is real
+/// memory, not address space. It is bounded by what the frame allocator has
+/// rather than by anything a program can talk nk into.
+const USER_MAP_LIMIT: u64 = 256 * 1024 * 1024;
 
 /// # brk(addr)
 ///
@@ -374,7 +396,7 @@ fn sys_brk(addr: u64) -> i64 {
 fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
     // Private file mappings are snapshots: Linux reads its filesystem into
     // nk-owned pages. Shared/writeback mappings need a different contract.
-    if length == 0 || length > USER_MEM_LIMIT || offset & 4095 != 0 || prot & !7 != 0 {
+    if length == 0 || length > USER_MAP_LIMIT || offset & 4095 != 0 || prot & !7 != 0 {
         return -22;
     }
     if flags & !(0x2 | 0x10 | 0x20 | 0x800 | 0x1000 | 0x20000) != 0 { return -95; }
@@ -391,27 +413,60 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
         return -12;
     }
     let anonymous = flags & 0x20 != 0;
-    let mut pages = Vec::new();
-    for off in (0..len).step_by(PAGE) {
-        let Some(page) = frames::alloc() else {
-            for page in pages { unsafe { frames::free(page); } }
-            return -12;
-        };
-        unsafe { core::ptr::write_bytes(page,0,PAGE); }
+
+    // A batch of pages per read, not a read per page.
+    //
+    // The frames a mapping is built from are scattered -- the allocator's
+    // free list is single pages in no order -- so a chunk cannot be one
+    // buffer. `preadv` is exactly the operation for that shape: one syscall,
+    // one iovec per page, filling memory that is not contiguous. It matters
+    // because a `pread64` per 4KB goes into LKL, through ext4 and out to
+    // virtio-blk, and libLLVM's text segment is 117MB: thirty thousand round
+    // trips, and minutes of wall clock before Mesa has even loaded.
+    //
+    // `alloc_contiguous` would have been the other answer and is the wrong
+    // one: it only ever bumps, because the free list cannot satisfy a run, so
+    // every unmapped file mapping would return pages it could never reuse.
+    const BATCH: usize = 256;
+    #[repr(C)]
+    struct IoVec { base: u64, len: u64 }
+
+    let mut pages: Vec<*mut u8> = Vec::new();
+    let mut iov: Vec<IoVec> = Vec::new();
+    let mut off = 0u64;
+    while off < len {
+        let want = core::cmp::min(BATCH as u64, (len - off) / PAGE as u64) as usize;
+        iov.clear();
+        let first = pages.len();
+        for _ in 0..want {
+            let Some(page) = frames::alloc() else {
+                for page in pages { unsafe { frames::free(page); } }
+                return -12;
+            };
+            // alloc() zeroes, which is what a mapping past the end of a file
+            // and the tail of a partial page both require.
+            iov.push(IoVec { base: page as u64, len: PAGE as u64 });
+            pages.push(page);
+        }
         if !anonymous {
+            // A short read is not an error: a mapping may legitimately run
+            // past the end of the file, and those pages must read as zero,
+            // which they already do.
             #[cfg(nk_lkl)]
-            let rc = crate::lkl::syscall(67, [fd, page as i64, PAGE as i64,
-                match offset.checked_add(off) { Some(v) if v <= i64::MAX as u64 => v as i64, _ => -1 },0,0]);
+            let rc = crate::lkl::syscall(69, [fd, iov.as_ptr() as i64, want as i64,
+                match offset.checked_add(off) { Some(v) if v <= i64::MAX as u64 => v as i64, _ => -1 },
+                0, 0]);
             #[cfg(not(nk_lkl))]
             let rc = -38;
             if rc < 0 {
-                unsafe { frames::free(page); }
                 for page in pages { unsafe { frames::free(page); } }
                 return rc;
             }
         }
-        if prot & 4 != 0 { unsafe { publish_code(page, PAGE); } }
-        pages.push(page);
+        if prot & 4 != 0 {
+            for page in &pages[first..] { unsafe { publish_code(*page, PAGE); } }
+        }
+        off += (want * PAGE) as u64;
     }
     let root = current_ttbr0();
     if fixed { unsafe { paging::unmap_user(root,at,len); } }

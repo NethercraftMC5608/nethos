@@ -1143,5 +1143,63 @@ class DrmDlopen(unittest.TestCase):
         self.assertIn('DRMPROBE_OK', self.out)
 
 
+MESA_IMG = ROOT / 'kernel/ldk/build/mesa.img'
+MESA_CPIO = ROOT / 'kernel/ldk/build/mesa.cpio'
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+@unittest.skipUnless(MESA_IMG.exists() and MESA_CPIO.exists(),
+                     'run scripts/build-mesa-disk.sh first')
+class Mesa(unittest.TestCase):
+    """Mesa on nk: a GL context, and something rendered in it.
+
+    Debian's own Mesa, unmodified, with llvmpipe. Software rasterisation is
+    not a consolation prize here -- it is the part of Mesa that leans hardest
+    on everything nk gained last (threads, dlopen, private file mappings, TLS
+    in dlopened libraries) and barely touches the GPU at all.
+
+    It lives on an ext4 disk rather than in the initrd because libLLVM is
+    118MB and Linux's pool on nk is 64. No switch_root was needed for that:
+    nk's execve and dynamic loader both go through Linux's VFS, so a binary
+    and its libraries on a mounted filesystem work as they are.
+
+    Three things had to change in nk. A single mapping was capped at 64MB and
+    libLLVM's text segment is 117MB. The user address space was 256MB with
+    QEMU's devices still in the middle of it, leaving no contiguous run big
+    enough. And file mappings were read a page at a time, which is thirty
+    thousand round trips through ext4 and virtio-blk for that one segment.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot('--lkl', '--gpu', '--disk', str(MESA_IMG),
+                       '--initrd', str(MESA_CPIO), timeout=600, watchdog=300)
+
+    def test_the_disk_mounts(self):
+        self.assertIn('mesa: disk mounted', self.out)
+
+    def test_mesa_loads_and_initialises_egl(self):
+        self.assertIn('EGL_INIT_OK', self.out)
+        self.assertIn('EGL_VENDOR Mesa Project', self.out)
+
+    def test_the_renderer_is_llvmpipe(self):
+        # Which means libLLVM mapped: 117MB in one PT_LOAD, and the reason
+        # for both the wider address space and the batched reads.
+        self.assertIn('GL_RENDERER llvmpipe', self.out)
+
+    def test_it_is_a_real_gles_context(self):
+        self.assertRegex(self.out, r'GL_VERSION OpenGL ES 3\.\d')
+
+    def test_it_rendered_and_the_pixels_came_back(self):
+        # A context that was created and never drawn to proves the loader
+        # worked, not the rasteriser. This is glReadPixels of a cleared
+        # framebuffer, and the colour is one no uninitialised buffer would
+        # plausibly hold.
+        self.assertIn('GL_PIXEL 64 128 191 255', self.out)
+
+    def test_it_ran_to_the_end(self):
+        self.assertIn('MESA_OK', self.out)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -447,10 +447,19 @@ the one below it.
       That is the whole mechanism Mesa loads by -- libEGL dlopens libEGL_mesa
       dlopens a _dri.so dlopens libgallium -- proven at 132KB instead of
       152MB.
-- [ ] **Mesa.** No kernel features left; two memory problems. `libgallium`
-      needs `libLLVM` (118MB) and nk's rootfs lives in Linux's 64MB pool, and
-      nk reads private file mappings eagerly instead of faulting them in. So:
-      a rootfs on the ext4 disk that already works, and demand paging.
+- [x] **Mesa.** Debian's own, unmodified: `llvmpipe (LLVM 19.1.7)`, OpenGL
+      ES 3.2, a framebuffer object cleared to a colour and `glReadPixels`
+      handing back the exact bytes. It lives on the ext4 disk and did **not**
+      need `switch_root` to -- nk's execve and dynamic loader both go through
+      Linux's VFS, so a binary on a mounted filesystem works as it is.
+      Needed: separating the single-mapping limit from the `brk` limit
+      (libLLVM's text is 117MB in one PT_LOAD), widening the user address
+      space past the device hole that left only 124MB contiguous, reading
+      file mappings with `preadv` in batches instead of a `pread64` per 4KB,
+      and `SCTLR_EL1.UCT`/`UCI` so EL0 may read `CTR_EL0` and clean its own
+      generated code -- a trap that arrives as ESR EC 0x18 with a FAR of zero
+      and reads exactly like a null dereference. Software rasterisation, not
+      GPU acceleration: virgl is a separate piece of work.
 - [ ] `MAP_SHARED` file mappings with writeback, signals, `epoll` -- the long
       tail, and the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.

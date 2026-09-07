@@ -1134,7 +1134,7 @@ make a real `DRM_IOCTL_VERSION` call against the virtio_gpu nk gave Linux.
 What comes back is `virtio_gpu 0.1.0`, from the unmodified driver. Everything
 Mesa needs from the loader is therefore present.
 
-What is left is size, and it is worth stating exactly:
+What was left was size, and it is worth stating exactly:
 
 | piece | size |
 | --- | --- |
@@ -1144,21 +1144,74 @@ What is left is size, and it is worth stating exactly:
 
 `libgallium` has `libLLVM.so.19.1` in its `DT_NEEDED`, so llvmpipe cannot be
 had without it -- `swrast_dri.so` is a 133KB stub that dlopens the real thing.
-Against that, nk's rootfs lives in Linux's memory pool, which is 64MB, and
-nk's private file mappings are read eagerly at map time rather than faulted
-in. Neither number is a law: the pool is a constant and QEMU has a gigabyte.
-But it does mean Mesa is now **two memory changes and no kernel features** --
-which is a different kind of problem from the one this document has been
-about, and the reason for measuring it before starting.
+Against that, nk's rootfs lives in Linux's memory pool, which is 64MB.
+
+### Mesa on nk
+
+It runs. `GL_RENDERER llvmpipe (LLVM 19.1.7, 128 bits)`, OpenGL ES 3.2, a
+framebuffer object cleared to a colour and `glReadPixels` handing back the
+exact bytes. Debian's own Mesa, unmodified.
+
+**It lives on the ext4 disk, and did not need `switch_root` to.** That was
+the expected blocker and it was not one: nk's `execve` and the dynamic loader
+both go through Linux's VFS, so a binary and its libraries on a filesystem
+mounted at `/mnt` work exactly as they would anywhere else. The initrd stays
+small -- busybox and an init that mounts the disk.
+
+Four things had to change, and each was found by the failure naming itself
+rather than by reasoning about it:
+
+- **A single mapping was capped at 64MB.** That constant was the `brk` limit,
+  reused for `mmap` because at the time no mapping was ever large. A heap
+  grows one small step at a time and a cap on it catches a runaway loop; a
+  mapping is asked for once, at a size the file decides. libLLVM's text
+  segment is 117MB in one `PT_LOAD`, and refusing it is refusing to run Mesa
+  rather than catching a mistake. They are separate constants now.
+- **The user address space was 256MB with QEMU's devices in the middle of
+  it.** The hole at `0x08000000..0x0a200000` left 124MB as the largest
+  contiguous run below the stack, and libLLVM needs about that with its data
+  segment. `USER_STACK_TOP` is `0x3000_0000` now; the ceiling is RAM at
+  `0x4000_0000`, which the kernel maps through the same tables.
+- **File mappings were read a page at a time.** A `pread64` per 4KB goes into
+  LKL, through ext4 and out to virtio-blk, and that segment alone is thirty
+  thousand round trips. It is `preadv` now, 256 iovecs at a time -- the right
+  operation precisely because the frames are *not* contiguous, the allocator's
+  free list being single pages in no order. `alloc_contiguous` was the other
+  candidate and is the wrong one: it only ever bumps, so every unmapped file
+  mapping would return pages it could never hand out again.
+- **`SCTLR_EL1.UCT` and `.UCI` were off**, so EL0 could not read `CTR_EL0` or
+  run cache maintenance instructions. This one is worth remembering for its
+  symptom: the trap arrives as an ESR with `EC 0x18` and a FAR of **zero**,
+  which reads exactly like a null dereference. It is not -- decode the ISS and
+  it names the register. A libc reads `CTR_EL0` for its cache line size, and
+  anything that generates code (LLVM's JIT, here) must clean it to the point
+  of unification before jumping to it. Linux sets both.
+
+Two smaller things, both configuration rather than kernel: `libEGL.so.1` is
+glvnd, a dispatch layer that finds Mesa by reading a JSON file out of a
+directory, and without it `eglGetDisplay` returns `EGL_NO_DISPLAY` and
+explains nothing; and LLVM reads `/proc/cpuinfo`, so `/proc` has to be
+mounted.
+
+llvmpipe rather than the GPU, and that is the honest target rather than a
+consolation prize: virtio-gpu without virgl gives Linux a display and dumb
+buffers, not a command stream a 3D driver could use. It is also the part of
+Mesa that leans hardest on everything nk gained last -- threads, `dlopen`,
+private file mappings, TLS in dlopened libraries -- and barely touches the
+GPU at all.
 
 ### What is next
 
-Room for Mesa: a rootfs that is not in Linux's 64MB pool (the ext4 disk
-already works; `switch_root` is the missing step) and file mappings that
-fault in rather than reading whole segments up front. Then signals and
-`MAP_SHARED` file mappings with writeback. Threads, dynamic linking, private
-file mappings, futexes, `dlopen` and DRM access are done and covered by
-tests; none of that establishes desktop compatibility or GPU acceleration.
+Signals, and `MAP_SHARED` file mappings with writeback -- which is also what
+a windowing system will want, since sharing a buffer with a compositor is
+exactly the contract nk still refuses. Demand paging rather than eager reads:
+Mesa works without it, but nk currently allocates a frame for every page of
+every mapping whether or not it is touched, and 190MB of Mesa is mostly not
+touched. Then `switch_root`, for a root filesystem rather than a mounted one.
+
+Mesa running does not mean GPU acceleration. llvmpipe is software; the GPU is
+still a display with dumb buffers, and virgl -- a command stream Mesa could
+target -- is a separate piece of work in both QEMU and the guest.
 
 ## Historical symbol survey
 
