@@ -98,6 +98,7 @@ pub fn map_shared(
     at: u64,
     writable: bool,
     executable: bool,
+    prot_none: bool,
 ) -> Result<usize, i64> {
     let key = file_key(fd)?;
     let mut st = [0u8; 128];
@@ -209,6 +210,11 @@ pub fn map_shared(
 
     // Map the pool's pages into the caller: the same physical pages every
     // holder of the region sees, which is the whole of the contract.
+    // PROT_NONE (`prot == 0`) is what `protect_user_none` is for -- it
+    // clears the access flag so the pages fault on any access. PROT_READ
+    // must not come here: it is a valid mapping with AP_RO_ANY already,
+    // and clearing it turns a readable page into an EL0 permission fault
+    // (DFSC 0b001111; measured 2026-09-08 on a wl_shm pool read).
     let root = crate::user::current_ttbr0_pub();
     for (i, page) in unsafe { (&*(&raw const REGIONS))[idx].pages.iter().enumerate() } {
         unsafe {
@@ -222,7 +228,7 @@ pub fn map_shared(
             );
         }
     }
-    if !writable && !executable {
+    if !writable && !executable && prot_none {
         unsafe {
             paging::protect_user_none(root, at, len);
         }
@@ -233,7 +239,7 @@ pub fn map_shared(
 /// Anonymous shared: same pages for every holder that maps them, no file
 /// behind them. The region is keyed nowhere -- it is found by the caller's
 /// VMA record, not by lookup -- so this just allocates and maps.
-pub fn map_anonymous_shared(len: u64, at: u64, writable: bool, executable: bool) -> usize {
+pub fn map_anonymous_shared(len: u64, at: u64, writable: bool, executable: bool, prot_none: bool) -> usize {
     let npages = (len / 4096) as usize;
     let mut pages: Vec<*mut u8> = Vec::with_capacity(npages);
     for _ in 0..npages {
@@ -274,7 +280,7 @@ pub fn map_anonymous_shared(len: u64, at: u64, writable: bool, executable: bool)
             );
         }
     }
-    if !writable && !executable {
+    if !writable && !executable && prot_none {
         unsafe {
             paging::protect_user_none(root, at, len);
         }

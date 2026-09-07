@@ -730,7 +730,7 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64,
         // key on, no `fstat`, no writeback. A shared mapping of a file with
         // fd < 0 is -EBADF, not anonymous -- the flag decides, not the fd.
         if anonymous {
-            let region = crate::shm::map_anonymous_shared(len, at, writable, executable);
+            let region = crate::shm::map_anonymous_shared(len, at, writable, executable, prot == 0);
             if region == usize::MAX {
                 return -12; // -ENOMEM
             }
@@ -744,7 +744,7 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64,
         if fd < 0 {
             return -9; // -EBADF: shared file mapping with no file
         }
-        let region = match crate::shm::map_shared(fd, offset, len, at, writable, executable) {
+        let region = match crate::shm::map_shared(fd, offset, len, at, writable, executable, prot == 0) {
             Ok(r) => r,
             Err(e) => return e,
         };
