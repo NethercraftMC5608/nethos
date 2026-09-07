@@ -441,6 +441,16 @@ the one below it.
       creator writing the tid back, and the join waited forever on a thread
       that had already exited. Linux writes both tids before the child runs,
       for exactly this reason; nk does now too.
+- [x] **`dlopen`, and a library talking to the GPU.** `kernel/init/drmprobe.c`
+      opens `libdrm.so.2` at runtime, resolves out of it, and makes a real
+      DRM ioctl that the unmodified `virtio_gpu` answers with its own name.
+      That is the whole mechanism Mesa loads by -- libEGL dlopens libEGL_mesa
+      dlopens a _dri.so dlopens libgallium -- proven at 132KB instead of
+      152MB.
+- [ ] **Mesa.** No kernel features left; two memory problems. `libgallium`
+      needs `libLLVM` (118MB) and nk's rootfs lives in Linux's 64MB pool, and
+      nk reads private file mappings eagerly instead of faulting them in. So:
+      a rootfs on the ext4 disk that already works, and demand paging.
 - [ ] `MAP_SHARED` file mappings with writeback, signals, `epoll` -- the long
       tail, and the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.

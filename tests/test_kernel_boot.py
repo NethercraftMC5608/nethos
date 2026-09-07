@@ -1098,5 +1098,50 @@ class Stage4(unittest.TestCase):
         self.assertIn('nk: done.', self.out)
 
 
+ARCHIVE = ROOT / 'kernel/ldk/build/drm.cpio'
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+@unittest.skipUnless(ARCHIVE.exists(), 'run scripts/build-drm-test.sh first')
+class DrmDlopen(unittest.TestCase):
+    """The mechanism Mesa loads by, at a size that fits in memory.
+
+    Mesa is not one library: libEGL dlopens libEGL_mesa, which dlopens a
+    _dri.so, which dlopens libgallium, which needs libLLVM. Every step is a
+    runtime open, mmap, relocate and TLS allocation. libLLVM alone is 118MB
+    and Linux's pool on nk is 64, so Mesa itself cannot be in a rootfs that
+    lives in RAM -- but that is a memory problem, and it is only worth
+    solving if the loading works at all.
+
+    So this proves the loading with libdrm, which is 132KB: a library that was
+    never on the link line, opened at runtime, and used to make a real DRM
+    ioctl against the virtio_gpu nk gave Linux. What comes back is the
+    driver's own name.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot('--lkl', '--gpu', '--initrd', str(ARCHIVE),
+                       timeout=240, watchdog=120)
+
+    def test_a_program_can_mount_devtmpfs(self):
+        # Not decoration: without it /dev is empty and the GPU that
+        # demonstrably exists has no node to open.
+        self.assertIn('DEVTMPFS_OK', self.out)
+
+    def test_dlopen_finds_and_maps_a_library(self):
+        self.assertIn('DLOPEN_OK', self.out)
+
+    def test_symbols_resolve_out_of_it(self):
+        self.assertIn('DLSYM_OK', self.out)
+
+    def test_the_library_talks_to_the_gpu(self):
+        # DRM_IOCTL_VERSION, answered by the unmodified virtio_gpu driver.
+        self.assertIn('DRM_DRIVER virtio_gpu', self.out)
+
+    def test_it_ran_to_the_end(self):
+        self.assertIn('DRMPROBE_OK', self.out)
+
+
 if __name__ == '__main__':
     unittest.main()

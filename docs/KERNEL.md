@@ -1121,13 +1121,44 @@ that task to start.
 `shares_mm` and reaping a thread no longer tears down page tables its
 siblings are still executing from.
 
+### Mesa, measured rather than estimated
+
+Mesa is not one library. `libEGL` dlopens `libEGL_mesa`, which dlopens a
+`_dri.so`, which dlopens `libgallium`, which needs `libLLVM`. Every arrow is
+a runtime open, mmap, relocation and TLS allocation, so the first question is
+not how big Mesa is but whether that mechanism works on nk at all.
+
+It does. `kernel/init/drmprobe.c` dlopens `libdrm.so.2` -- a library that was
+never on its link line -- resolves `drmGetVersion` out of it, and uses it to
+make a real `DRM_IOCTL_VERSION` call against the virtio_gpu nk gave Linux.
+What comes back is `virtio_gpu 0.1.0`, from the unmodified driver. Everything
+Mesa needs from the loader is therefore present.
+
+What is left is size, and it is worth stating exactly:
+
+| piece | size |
+| --- | --- |
+| `libLLVM.so.19.1` | 118 MB |
+| `libgallium-25.0.7.so` | 34 MB |
+| `libdrm` + `libEGL` + `libgbm` + `dri` | under 1 MB |
+
+`libgallium` has `libLLVM.so.19.1` in its `DT_NEEDED`, so llvmpipe cannot be
+had without it -- `swrast_dri.so` is a 133KB stub that dlopens the real thing.
+Against that, nk's rootfs lives in Linux's memory pool, which is 64MB, and
+nk's private file mappings are read eagerly at map time rather than faulted
+in. Neither number is a law: the pool is a constant and QEMU has a gigabyte.
+But it does mean Mesa is now **two memory changes and no kernel features** --
+which is a different kind of problem from the one this document has been
+about, and the reason for measuring it before starting.
+
 ### What is next
 
-Signals, `MAP_SHARED` file mappings with writeback, and `switch_root` for a
-genuine root filesystem. Threads, dynamic linking, private file mappings,
-futexes and DRM/device access are done and covered by tests; a working thread
-and a framebuffer still do not establish desktop compatibility or GPU
-acceleration -- Mesa is now a rootfs problem rather than a kernel one.
+Room for Mesa: a rootfs that is not in Linux's 64MB pool (the ext4 disk
+already works; `switch_root` is the missing step) and file mappings that
+fault in rather than reading whole segments up front. Then signals and
+`MAP_SHARED` file mappings with writeback. Threads, dynamic linking, private
+file mappings, futexes, `dlopen` and DRM access are done and covered by
+tests; none of that establishes desktop compatibility or GPU acceleration.
 
 ## Historical symbol survey
 
