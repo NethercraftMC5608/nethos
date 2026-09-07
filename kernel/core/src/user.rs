@@ -39,10 +39,19 @@ pub const USER_BASE: u64 = 0x0040_0000;
 /// contiguous run below 256MB was 124MB -- just too small, in the way that
 /// produces "failed to map segment from shared object" and nothing else.
 ///
-/// 0x3000_0000 is 768MB, and the ceiling is RAM: QEMU's `virt` puts it at
-/// 0x4000_0000, which the kernel maps through these same tables. Anything
-/// below that and above the devices is the process's to use.
-pub const USER_STACK_TOP: u64 = 0x3000_0000;
+/// The ceiling is RAM: QEMU's `virt` puts it at 0x4000_0000, which the kernel
+/// maps through these same tables. Anything below that and above the devices
+/// is the process's to use, so 768MB left 256MB of address space unused for
+/// no reason -- and WebKit is the first thing to want it. nethosd alone was
+/// measured peaking at ~730MB live against a ~732MB window, which is not a
+/// margin, it is a coincidence.
+///
+/// 0x3F00_0000 is 1008MB, keeping 16MB clear of RAM. That is a ceiling, not
+/// a solution: mappings are still populated eagerly, a frame per page whether
+/// the page is ever touched or not, so a process cannot map more than the
+/// machine has. Demand paging is what actually lifts this, and this constant
+/// is what buys the room to find out whether WebKit needs it.
+pub const USER_STACK_TOP: u64 = 0x3F00_0000;
 
 /// Where anonymous mappings start, growing downward.
 ///
@@ -657,7 +666,15 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64,
     if flags & 3 == 0 || flags & 3 == 3 {
         return -22; // -EINVAL: neither, or both
     }
-    if flags & !(0x1 | 0x2 | 0x10 | 0x20 | 0x800 | 0x1000 | 0x20000) != 0 {
+    // MAP_NORESERVE (0x4000) is accepted and ignored, which is what it means
+    // on Linux too: it says "do not account this against commit limits",
+    // advice to an overcommit policy nk does not have. Refusing it is not
+    // conservative, it is wrong -- a caller reserving address space gets
+    // -EOPNOTSUPP for a flag that asks for nothing. WebKit reserves that way,
+    // and an unrecognised flag here is invisible in a log that only reports
+    // -ENOMEM.
+    const MAP_NORESERVE: u64 = 0x4000;
+    if flags & !(0x1 | 0x2 | 0x10 | 0x20 | 0x800 | 0x1000 | MAP_NORESERVE | 0x20000) != 0 {
         return -95; // -EOPNOTSUPP: an unknown flag, not a guess
     }
     if prot & 6 == 6 { return -13; }

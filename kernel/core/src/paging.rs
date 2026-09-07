@@ -871,6 +871,29 @@ pub unsafe fn init(ram_base: u64, ram_size: u64) {
     // with DC CVAU and IC IVAU before it can jump to it. Linux sets both for
     // exactly these reasons.
     sctlr |= (1 << 15) | (1 << 26);
+
+    // CNTKCTL_EL1: let EL0 read the counters.
+    //
+    // The same shape of trap as UCT above and it arrives just as
+    // misleadingly: an ESR with EC 0x18 and a FAR of zero, which reads like a
+    // null dereference until the ISS is decoded and names a register. WebKit
+    // was the first thing to hit it -- `MRS x2, CNTVCT_EL0`, trapped at its
+    // reset value because nk had never written this register at all.
+    //
+    // EL0VCTEN (bit 1) is the one that matters: the virtual counter is what a
+    // libc's clock_gettime reads without a syscall, and on Linux the vDSO
+    // makes that the normal path, so anything with a fast clock finds it.
+    // EL0PCTEN (bit 0) comes along because CNTFRQ_EL0 -- how a program learns
+    // the counter's frequency, and useless without it -- is readable at EL0
+    // only when one of the two is set.
+    //
+    // The timer controls (bits 8 and 9) stay trapped. Reading a counter is
+    // harmless; programming a timer from EL0 is not something a process
+    // should be doing behind the kernel's back, and leaving it trapped is the
+    // honest default rather than an oversight.
+    let cntkctl: u64 = (1 << 0) | (1 << 1);
+    core::arch::asm!("msr cntkctl_el1, {}", in(reg) cntkctl, options(nomem, nostack));
+
     // A: strict alignment checking. Left off on purpose now that the MMU is
     // on -- normal memory permits unaligned access, and the Rust side is
     // still built with +strict-align, so this only removes a restriction.

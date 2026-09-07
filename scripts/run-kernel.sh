@@ -96,7 +96,10 @@ if [ "$LKL" -eq 1 ]; then
     export NK_LKL_LIB="$LIB"
     # The kernel image alone is 14MB and Linux wants its own memory on top,
     # from nk's frame allocator through the host's page_alloc.
-    [ "$MEM" -lt 1024 ] && MEM=1024
+    # 2GB, not 1: user mappings are populated eagerly -- a frame per page --
+    # so a process that maps a large closure needs the machine to have it,
+    # and the user window is now 1008MB on its own.
+    [ "$MEM" -lt 2048 ] && MEM=2048
     say "Linking Linux ($(du -h "$LIB" | cut -f1))"
 fi
 
