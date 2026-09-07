@@ -124,6 +124,29 @@ still undetermined — needs one `println!` per `sys_mmap` -12 return). The
 rare early face (frozen `armed=224`, child stuck pre-python in execve/fork
 handshake) is still open. M1 still red.
 
+**Update 2026-09-08 later the same session (`1cc1803`, `193ce5d`): M1 IS
+GREEN, 3x.** The serve wedge was address-space exhaustion, not a hang:
+full nethosd peaks at ~730MB of live anonymous reservations against a
+~732MB usable window (`USER_MMAP_TOP` 0x2F000000 minus brk ~0x13a6000);
+the red boot's extra 128MB arena from elr `0x2edd9c40` (glibc, anon
+`flags 0x22` fd -1) was refused and CPython's 128MB/64MB retry loop
+printed ~2700 `mmapfail` lines with ~581MB of frames still free. Whether
+the last arena fits is thread-interleaving timing — a race, 3/4 green in
+the final probes. The `mmapfail` lines are kept as diagnostics (no
+behaviour change). M1 proof, client-printed in the serial log of a
+`run-kernel.sh --lkl --disk npkg.img --initrd nethosd-e2e-full.cpio`
+boot (`/tmp/m1-main2.log`, `/tmp/m1-main3.log`, `/tmp/mmap7.log`):
+
+```
+NETHOSD_OK   statusline HTTP/1.1 200 OK
+NETHOSD_OK   request 405 bytes
+NETHOSD_OK   status-shape keys: battery,generation,host,kernel,load,mem,nethos,subscribers,time,uptime,user
+NETHOSD_STATUS_OK kernel=6.12.0+ uptime=3.41
+```
+
+Next: M2 (compositor). Device MAP_SHARED for dumb buffers is still the
+known-absent display path; wl_shm memfd MAP_SHARED is green.
+
 **The live lead:** the serve wedge + the `MemoryError`: which `sys_mmap`
 -12 site fires under the real `nethosd.main()`, and whether the parked
 server `ppoll` is cause or consequence. Cheapest next step: clean

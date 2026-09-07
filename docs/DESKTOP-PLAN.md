@@ -113,6 +113,32 @@ boot (`cp kernel/ldk/build/npkg.img /tmp/<lane>.img`). Integrate (merge to
   M2 needs device MAP_SHARED or a wl_shm-only compositor path; M3 needs
   M2 + WebKit closure work.
 
+## 7. M1 GREEN 2026-09-08 (main checkout, `1cc1803` + `193ce5d`)
+
+mmap follow-up closed the serve wedge by measurement, not by fix:
+`mmapfail` logging (kept, diagnostic-only) showed the red boot's extra
+128MB anon arena (elr `0x2edd9c40`, glibc `flags 0x22` fd -1) refused at
+lowest base `0x1782000` — ~730MB live vs ~732MB usable window — with
+frames ~581MB free and CPython's 128MB/64MB retry loop firing ~2700
+times. No kernel change needed: whether the last arena fits is thread
+timing, and green boots serve. M1 proof is client-printed, 3x
+(`/tmp/mmap7.log`, `/tmp/m1-main2.log`, `/tmp/m1-main3.log`):
+
+```
+NETHOSD_OK   statusline HTTP/1.1 200 OK
+NETHOSD_OK   request 405 bytes
+NETHOSD_OK   status-shape keys: battery,generation,host,kernel,load,mem,nethos,subscribers,time,uptime,user
+NETHOSD_STATUS_OK kernel=6.12.0+ uptime=3.41
+```
+
+`nethosd-e2e.py` now asserts the status line is `HTTP/1.x 200`
+(`NETHOSD_OK statusline`), so the marker is the protocol's own words.
+Margin note for M2/M3: the window is 99.5% full at nethosd scale —
+demand paging or a higher `USER_MMAP_TOP` will be needed before WebKit
+(500MB+ eager) fits. The 584 green-boot munmaps free 326MB but the
+largest single range is 64MB and arenas are never freed, so free-list
+reuse alone cannot fit a 128MB arena either.
+
 ## 4. Riskiest unknown + cheapest experiment per lane
 
 - kernel: unknown = WHERE the wedge lives (nk timers? LKL CPU-lock
