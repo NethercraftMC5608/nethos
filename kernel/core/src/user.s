@@ -42,6 +42,18 @@ el0_sync_entry:
     mov     x0, sp
     bl      rust_el0_sync
 
+    // A signal may have redirected the frame: elr is the handler, sp the
+    // signal stack, x0-x2 the handler arguments. The restore below is
+    // exactly what delivers them -- it is the same path as a syscall
+    // return, which is why delivery costs no second exception.
+    //
+    // Barriers, because the frame was written by Rust and is read here:
+    // the stores have to be visible before eret consumes them. Plain
+    // instructions, not a call: this runs with the kernel stack borrowed
+    // by the frame, and a `bl` would clobber x30 -- which is the handler's
+    // return address, restored two instructions later.
+    dsb     ishst
+    isb
     ldp     x1,  x2,  [sp, #16 * 16]
     msr     spsr_el1, x1
     msr     sp_el0, x2

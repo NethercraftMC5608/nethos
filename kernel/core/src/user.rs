@@ -177,7 +177,12 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         println!();
         let far: u64;
         unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
-        println!("!! fault in user space: esr {:#x} ec {:#b} far {:#x}", esr, ec, far);
+        // ESR decoded: EC (top 6 bits), IL (bit 25: 32 or 16-bit insn),
+        // ISS low 6 bits for aborts (DFSC: 0b100001 alignment, 0b100100
+        // translation L0, 0b100101 L1, 0b100110 L2, 0b100111 L3, 0b101001
+        // access-flag L1...). A translation fault at L3 on a handler
+        // address is an unmapped page; an alignment fault is the pc itself.
+        println!("!! fault in user space: esr {:#x} ec {:#b} il {} iss {:#x} far {:#x}", esr, ec, (esr >> 25) & 1, esr & 0x1ffffff, far);
         println!("   pc {:#x}  sp {:#x}  lr {:#x}", frame.elr, frame.sp, frame.x[30]);
         // The process is what should die here, not the machine. nk has
         // nothing else to run yet, so it stops -- but reporting it as a user
@@ -205,7 +210,23 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
     // dup2 onto it -- so answering by number would send a shell's output to
     // the UART no matter what it had been redirected to.
     let console = (frame.x[0] == 1 || frame.x[0] == 2) && !crate::sched::has_console();
-    let ret = if frame.x[8] == 64 && console {
+    // Signal syscalls are nk's: dispositions live in the scheduler, and EL0
+    // never returns through Linux, so forwarding them would record what
+    // nothing acts on. 129 kill, 130 tkill, 131 tgkill, 132 sigaltstack,
+    // 133 sigsuspend, 134 sigaction, 135 sigprocmask, 136 sigpending,
+    // 137 sigtimedwait, 139 sigreturn. 138 (sigqueueinfo) carries data nk
+    // has no queue for and is refused. The 4th arg of rt_sigaction and
+    // rt_sigprocmask is the sigset size -- always 8 on this ABI -- and is
+    // checked, not ignored: a caller passing anything else is not speaking
+    // the same struct layout.
+    let ret = if matches!(frame.x[8], 129 | 130 | 131 | 132 | 133 | 134 | 135 | 136 | 137 | 139) && cfg!(nk_lkl) {
+        if (frame.x[8] == 134 || frame.x[8] == 135) && frame.x[3] != 8 {
+            crate::println!("  signal: syscall {} with sigsetsize {}, expected 8", frame.x[8], frame.x[3]);
+            -22
+        } else {
+            signal_dispatch(frame)
+        }
+    } else if frame.x[8] == 64 && console {
         sys_write(frame.x[0], frame.x[1], frame.x[2])
     } else if frame.x[8] == 66 && console {
         // The same rule as `write`, and it has to be here too because this is
@@ -227,7 +248,7 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // either it replaces the program or it fails and says why. It needs
         // Linux only to read the file; the replacing is nk's own.
         exec(frame.x[0], frame.x[1], frame.x[2])
-    } else if matches!(frame.x[8], 214 | 222 | 215 | 226 | 96 | 99 | 293 | 261) {
+    } else if matches!(frame.x[8], 214 | 222 | 215 | 226 | 96 | 99 | 293 | 261 | 227) {
         // The process's address space is nk's, not Linux's. LKL is one flat
         // region with no user half at all, so forwarding these would move
         // Linux's own break and hand back an address this process cannot
@@ -236,9 +257,25 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
             214 => sys_brk(frame.x[0]),
             222 => sys_mmap(frame.x[0], frame.x[1], frame.x[2], frame.x[3], frame.x[4] as i64, frame.x[5]),
             215 => sys_munmap(frame.x[0], frame.x[1]),
-            226 => sys_mprotect(frame.x[0], frame.x[1], frame.x[2]),
+            226 => {
+                let r = sys_mprotect(frame.x[0], frame.x[1], frame.x[2]);
+                // One line per mprotect while the restorer fault is open:
+                // which caller (elr) asks for what range with what prot.
+                // A range covering the restorer page with prot R (no X)
+                // sets UXN on it -- that is the suspect for NOT-EXEC.
+                crate::println!(
+                    "  mprotect {:#x} len {:#x} prot {:#x} elr {:#x} -> {}",
+                    frame.x[0],
+                    frame.x[1],
+                    frame.x[2],
+                    frame.elr,
+                    r
+                );
+                r
+            }
             96 => sys_set_tid_address(),
             261 => sys_prlimit64(frame.x[2], frame.x[3]),
+            227 => sys_msync(frame.x[0], frame.x[1], frame.x[2]),
             // set_robust_list and rseq. Both are optimisations a libc asks
             // for and does without: glibc checks the return and falls back,
             // so -ENOSYS is the honest answer and pretending to have
@@ -249,7 +286,190 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         forward(frame.x[8], &frame.x[..6].try_into().unwrap())
     };
 
+    // Delivering a signal redirects the frame to the handler: `x0` is then
+    // the signal number, not the syscall return, and must not be
+    // overwritten. `rt_sigreturn` restores `x0` itself and returns a
+    // sentinel for the same reason.
+    if ret == -512 {
+        return;
+    }
+    #[cfg(nk_lkl)]
+    if crate::signal::deliver(frame) {
+        return;
+    }
     frame.x[0] = ret as u64;
+}
+
+/// Signal syscalls, dispatched from `rust_el0_sync`. All numbers and
+/// behaviours are Linux's; the state is nk's.
+#[cfg(nk_lkl)]
+fn signal_dispatch(frame: &mut Frame) -> i64 {
+    match frame.x[8] {
+        // kill(pid, sig): tkill is kill-to-self, tgkill names the thread
+        // group explicitly. nk has one thread per Linux task and no groups
+        // beyond parentage, so all three post to a Linux pid.
+        129 => {
+            let rc = crate::signal::kill(frame.x[0] as i64, frame.x[1]);
+            if rc == 0 {
+                record_signal_sender(frame.x[0] as i64, frame.x[1], 0);
+            }
+            rc
+        }
+        130 => {
+            let me = crate::sched::linux_pid(crate::sched::current_id());
+            let rc = crate::signal::post(me, frame.x[0]);
+            if rc == 0 {
+                record_signal_sender(me, frame.x[0], 0);
+            }
+            rc
+        }
+        131 => {
+            // tgkill(tgid, tid, sig): the group is ignored, the tid names
+            // the task. A `tid` of -1 or 0 is -EINVAL, like Linux.
+            let (tgid, tid, sig) = (frame.x[0] as i64, frame.x[1] as i64, frame.x[2]);
+            if tid <= 0 {
+                return -22;
+            }
+            let _ = tgid;
+            let rc = crate::signal::post(tid, sig);
+            if rc == 0 {
+                record_signal_sender(tid, sig, 0);
+            }
+            rc
+        }
+        132 => sys_sigaltstack(frame.x[0], frame.x[1]),
+        // sigsuspend: replace the mask, wait for a signal, return EINTR.
+        // nk has no resume-other-than-EINTR: any delivered signal wakes,
+        // and waking without one cannot happen, because nothing else wakes
+        // this wait.
+        133 => {
+            let mut buf = [0u8; 8];
+            if frame.x[0] != 0
+                && crate::uaccess::copy_from_user(&mut buf, frame.x[0]).is_err()
+            {
+                return crate::uaccess::EFAULT;
+            }
+    let me = crate::sched::current_id();
+    let saved = crate::sched::signal_mask(me);
+    if frame.x[0] != 0 {
+        let mut bits = u64::from_le_bytes(buf);
+        bits &= !((1 << (crate::signal::SIGKILL - 1)) | (1 << (crate::signal::SIGSTOP - 1)));
+                crate::sched::set_signal_mask(me, bits);
+            }
+            // A signal already pending is returned without sleeping: the
+            // wait is over before it starts, which is what makes a blocked
+            // mask plus a pending signal a poll rather than a hang.
+            loop {
+                if crate::signal::interrupt_pending() {
+                    crate::sched::set_signal_mask(me, saved);
+                    return -4; // -EINTR
+                }
+                crate::sched::yield_now();
+            }
+        }
+        134 => crate::signal::sigaction(frame.x[0], frame.x[1], frame.x[2]),
+        135 => crate::signal::sigprocmask(frame.x[0], frame.x[1], frame.x[2]),
+        136 => crate::signal::sigpending(frame.x[0]),
+        // sigtimedwait: like sigsuspend but over a set, returning the
+        // signal number instead of EINTR. The timeout is accepted and
+        // ignored: nk waits until a signal in the set arrives, which is
+        // correct for an infinite timeout and early for any other.
+        137 => {
+            let mut buf = [0u8; 8];
+            if frame.x[0] == 0 {
+                return -22;
+            }
+            if crate::uaccess::copy_from_user(&mut buf, frame.x[0]).is_err() {
+                return crate::uaccess::EFAULT;
+            }
+            let want = u64::from_le_bytes(buf);
+            let me = crate::sched::current_id();
+            loop {
+                let got = crate::sched::signal_pending(me) & want & !crate::sched::signal_mask(me);
+                if got != 0 {
+                    let sig = got.trailing_zeros() as u64 + 1;
+                    crate::sched::clear_signal_pending(me, 1 << (sig - 1));
+                    if frame.x[2] != 0 {
+                        let info = (sig as i32).to_le_bytes();
+                        if crate::uaccess::copy_to_user(frame.x[2], &info).is_err() {
+                            return crate::uaccess::EFAULT;
+                        }
+                    }
+                    return sig as i64;
+                }
+                crate::sched::yield_now();
+            }
+        }
+        139 => crate::signal::sigreturn(frame),
+        _ => -38,
+    }
+}
+
+/// Remember who sent a signal, for the `siginfo` in the delivered frame.
+/// `SI_USER` (0) for a `kill` from a task, whose Linux pid is recorded.
+#[cfg(nk_lkl)]
+fn record_signal_sender(pid: i64, sig: u64, code: i32) {
+    let Some(id) = crate::sched::task_with_linux_pid(pid) else {
+        return;
+    };
+    let sender = crate::sched::linux_pid(crate::sched::current_id()) as i32;
+    crate::sched::set_signal_source(id, sig, code, sender);
+}
+
+/// # sigaltstack(ss, oss)
+///
+/// Records the alternate stack. `SS_DISABLE` (2) in `ss_flags` disables.
+/// The old stack goes to `oss` when asked. Delivery honours it for
+/// `SA_ONSTACK` handlers; the kernel never switches to it for anything
+/// else.
+#[cfg(nk_lkl)]
+fn sys_sigaltstack(ss: u64, oss: u64) -> i64 {
+    // stack_t is 24 bytes: base, flags, size.
+    let me = crate::sched::current_id();
+    if oss != 0 {
+        let (base, size, in_use) = crate::sched::signal_altstack(me);
+        let mut buf = [0u8; 24];
+        buf[0..8].copy_from_slice(&base.to_le_bytes());
+        buf[8..16].copy_from_slice(&if in_use { 1u64 } else { 2u64 }.to_le_bytes());
+        buf[16..24].copy_from_slice(&size.to_le_bytes());
+        if crate::uaccess::copy_to_user(oss, &buf).is_err() {
+            return crate::uaccess::EFAULT;
+        }
+        // `ss_flags` reads `SS_DISABLE` when no stack is registered, which
+        // is what a libc checks before installing its first one.
+        if base == 0 {
+            let mut zero = [0u8; 24];
+            zero[8..16].copy_from_slice(&2u64.to_le_bytes());
+            if crate::uaccess::copy_to_user(oss, &zero).is_err() {
+                return crate::uaccess::EFAULT;
+            }
+        }
+    }
+    if ss != 0 {
+        let mut buf = [0u8; 24];
+        if crate::uaccess::copy_from_user(&mut buf, ss).is_err() {
+            return crate::uaccess::EFAULT;
+        }
+        let base = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let flags = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        let size = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+        if flags & 2 != 0 {
+            crate::sched::set_signal_altstack(me, 0, 0);
+            return 0;
+        }
+        if size < 5120 {
+            // MINSIGSTKSZ: a smaller stack cannot hold the frame.
+            return -12; // -ENOMEM, like Linux
+        }
+        crate::sched::set_signal_altstack(me, base, size);
+    }
+    0
+}
+
+/// Without Linux there are no signal tasks to post to.
+#[cfg(not(nk_lkl))]
+fn signal_dispatch(_frame: &Frame) -> i64 {
+    -38
 }
 
 /// Hand a call to Linux, with its pointers copied across.
@@ -391,17 +611,28 @@ fn sys_brk(addr: u64) -> i64 {
 
 /// # mmap(addr, len, prot, flags, fd, off)
 ///
-/// Anonymous/private file mappings, eagerly populated through Linux pread.
-/// MAP_SHARED and file-page coherence/writeback are not implemented.
+/// Anonymous and private file mappings, eagerly populated through Linux
+/// pread -- plus shared file mappings, which live in the pool in `shm.rs.
+/// A shared mapping is the same physical pages for every holder, filled once
+/// from the file and written back on `munmap` or `msync`. Anonymous shared
+/// mappings have no file and are never written back.
 fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
-    // Private file mappings are snapshots: Linux reads its filesystem into
-    // nk-owned pages. Shared/writeback mappings need a different contract.
     if length == 0 || length > USER_MAP_LIMIT || offset & 4095 != 0 || prot & !7 != 0 {
         return -22;
     }
-    if flags & !(0x2 | 0x10 | 0x20 | 0x800 | 0x1000 | 0x20000) != 0 { return -95; }
-    if flags & 3 != 2 { return -95; } // MAP_PRIVATE only
+    // MAP_SHARED (0x1) or MAP_PRIVATE (0x2): exactly one must be set.
+    let shared = flags & 3 == 1;
+    if flags & 3 == 0 || flags & 3 == 3 {
+        return -22; // -EINVAL: neither, or both
+    }
+    if flags & !(0x1 | 0x2 | 0x10 | 0x20 | 0x800 | 0x1000 | 0x20000) != 0 {
+        return -95; // -EOPNOTSUPP: an unknown flag, not a guess
+    }
     if prot & 6 == 6 { return -13; }
+    // MAP_SHARED without a file is anonymous-shared: same pages for every
+    // holder that maps them, no file behind them. With MAP_ANONYMOUS the fd
+    // is ignored, by the same rule Linux applies.
+    let anonymous = flags & 0x20 != 0;
     let len = length.div_ceil(4096)*4096;
     let (brk, _, next) = crate::sched::user_memory();
     let fixed = flags & 0x10 != 0;
@@ -412,7 +643,59 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
     if at & 4095 != 0 || at < brk || end > USER_MMAP_TOP || (at < 0x0a20_0000 && end > 0x0800_0000) {
         return -12;
     }
-    let anonymous = flags & 0x20 != 0;
+    let executable = prot & 4 != 0;
+    let writable = prot & 2 != 0;
+
+    if shared {
+        if fixed {
+            // A fixed shared mapping replaces whatever was there, including
+            // pool references -- which must be released, not freed.
+            for m in crate::sched::remove_shared_maps(at, len) {
+                let lo = at.max(m.start);
+                let hi = (at + len).min(m.start + m.len);
+                if hi > lo {
+                    unsafe { crate::paging::unmap_user_nofree(current_ttbr0(), lo, hi - lo) };
+                }
+                if m.anonymous {
+                    crate::shm::release_anon(m.region);
+                } else {
+                    crate::shm::release(m.region, m.fd);
+                }
+            }
+        }
+        // Anonymous-shared ignores the fd entirely, like Linux: no file to
+        // key on, no `fstat`, no writeback. A shared mapping of a file with
+        // fd < 0 is -EBADF, not anonymous -- the flag decides, not the fd.
+        if anonymous {
+            let region = crate::shm::map_anonymous_shared(len, at, writable, executable);
+            if region == usize::MAX {
+                return -12; // -ENOMEM
+            }
+            if !fixed { crate::sched::set_user_mmap_next(at); }
+            if !crate::sched::add_shared_map(SharedMap { start: at, len, region, fd: -1, anonymous: true }) {
+                unsafe { crate::paging::unmap_user_nofree(current_ttbr0(), at, len) };
+                crate::shm::release_anon(region);
+                return -12;
+            }
+            return at as i64;
+        }
+        if fd < 0 {
+            return -9; // -EBADF: shared file mapping with no file
+        }
+        let region = match crate::shm::map_shared(fd, offset, len, at, writable, executable) {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+        if !fixed { crate::sched::set_user_mmap_next(at); }
+        if !crate::sched::add_shared_map(SharedMap { start: at, len, region, fd, anonymous: false }) {
+            // The table is full. Undo the mapping and say so: the pool
+            // reference is released, the pages stay for other holders.
+            unsafe { crate::paging::unmap_user_nofree(current_ttbr0(), at, len) };
+            crate::shm::release(region, fd);
+            return -12;
+        }
+        return at as i64;
+    }
 
     // A batch of pages per read, not a read per page.
     //
@@ -486,6 +769,10 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
 /// rather than being handed out again while something still holds a pointer
 /// into it. That wastes address space and not memory, and the pages
 /// themselves do go back.
+///
+/// Shared mappings are the exception to "the pages go back": the pool owns
+/// them, so unmapping drops a pool reference (writing back first) and only
+/// removes the caller's page-table entries, without freeing.
 fn sys_munmap(addr: u64, len: u64) -> i64 {
     let (_, brk_min, _) = crate::sched::user_memory();
     if brk_min == 0 || len == 0 {
@@ -495,6 +782,24 @@ fn sys_munmap(addr: u64, len: u64) -> i64 {
     let end = (addr + len).div_ceil(PAGE as u64) * PAGE as u64;
     if start < brk_min || end <= start || end > USER_STACK_TOP {
         return -22;
+    }
+    // Release pool references first, over the page-rounded range. A shared
+    // record overlapping the range is taken whole: the pool counts
+    // references per mapping, not per page, so a partial unmap cannot drop
+    // half a reference. Rounding up over-unmaps a partial request -- the
+    // whole record goes -- which is exact in the accounting and surprising
+    // only to a caller unmapping half a shared mapping, which no libc does
+    // to a `wl_shm` buffer. The pool's pages leave the tables via
+    // `unmap_user_nofree` (never freed: other holders still map them) before
+    // the private `unmap_user` below, which then finds holes there and frees
+    // nothing it should not.
+    for m in crate::sched::remove_shared_maps(start, end - start) {
+        unsafe { crate::paging::unmap_user_nofree(current_ttbr0(), m.start, m.len) };
+        if m.anonymous {
+            crate::shm::release_anon(m.region);
+        } else {
+            crate::shm::release(m.region, m.fd);
+        }
     }
     unsafe { crate::paging::unmap_user(current_ttbr0(), start, end - start) };
     0
@@ -564,6 +869,33 @@ struct Forked {
     /// binds the Linux task to the host thread it runs on.
     ready: &'static crate::sync::Semaphore,
     pid: &'static core::sync::atomic::AtomicI64,
+    /// Shared regions the child inherits. `fork` copies the pages into the
+    /// child's address space the way it copies everything else -- a real
+    /// copy, not a second reference -- and records what it mapped so
+    /// `munmap` can release the pool's reference rather than freeing pages
+    /// the pool still owns.
+    shared: alloc::vec::Vec<SharedMap>,
+    /// Signal state the child inherits: dispositions, mask, altstack. The
+    /// child starts with nothing pending -- signals sent to the parent
+    /// before the fork are the parent's, not the child's. A thread takes
+    /// nothing: it shares the creator's table by sharing its address space.
+    sig_actions: [crate::signal::Action; 64],
+    sig_mask: u64,
+    sig_alt_base: u64,
+    sig_alt_size: u64,
+}
+
+/// One shared mapping in a process: where it is, and which pool region it
+/// points at. Kept per task in the scheduler, next to `brk` and `mmap_next`.
+/// `anonymous` distinguishes pool regions with no file behind them: they are
+/// released without writeback.
+#[derive(Clone, Copy)]
+pub struct SharedMap {
+    pub start: u64,
+    pub len: u64,
+    pub region: usize,
+    pub fd: i64,
+    pub anonymous: bool,
 }
 
 /// # clone(flags, stack, ...) -- but only the shape `fork` uses
@@ -616,6 +948,7 @@ fn fork(frame: &Frame) -> i64 {
     let mut child_frame = Frame { x: frame.x, elr: frame.elr, spsr: frame.spsr, sp: frame.sp };
     child_frame.x[0] = 0; // what fork returns in the child
 
+    let me0 = crate::sched::current_id();
     let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(Forked {
         frame: child_frame,
         ttbr0,
@@ -623,12 +956,26 @@ fn fork(frame: &Frame) -> i64 {
         brk_min,
         mmap_next,
         tpidr,
-        parent_pid: crate::sched::linux_pid(crate::sched::current_id()),
+        parent_pid: crate::sched::linux_pid(me0),
         shares_mm: false,
         has_console: crate::sched::has_console(),
         set_tid: (0, 0),
         ready,
         pid,
+        // The pool's pages came across in `copy_user_address_space`, which
+        // copies every page the parent owns -- including the shared ones.
+        // The child therefore holds its own private copies under the same
+        // virtual addresses. Record them as pool references anyway: the
+        // pages the child frees on `munmap` are the pool's accounting, and
+        // a `munmap` that freed pool pages as though they were private
+        // would corrupt every other holder. The cost is that forked shared
+        // pages diverge -- no coherence between parent and child -- which
+        // is a limitation, and the same one the private snapshot has.
+        shared: crate::sched::shared_maps(),
+        sig_actions: crate::sched::signal_actions(me0),
+        sig_mask: crate::sched::signal_mask(me0),
+        sig_alt_base: crate::sched::signal_altstack(me0).0,
+        sig_alt_size: crate::sched::signal_altstack(me0).1,
     })) as usize;
 
     let me = crate::sched::current_id();
@@ -695,6 +1042,18 @@ extern "C" fn forked_entry(arg: usize) {
     }
 
     crate::sched::set_user_memory_full(f.brk, f.brk_min, f.mmap_next);
+    crate::sched::set_shared_maps(&f.shared);
+    if !f.shares_mm {
+        // A forked child inherits dispositions, mask and altstack -- and
+        // nothing pending. A thread inherits nothing: it shares the
+        // creator's table by sharing its address space.
+        crate::sched::install_signal_state(
+            f.sig_actions,
+            f.sig_mask,
+            f.sig_alt_base,
+            f.sig_alt_size,
+        );
+    }
     unsafe {
         core::arch::asm!("msr tpidr_el0, {}", in(reg) f.tpidr, options(nomem, nostack));
         resume_user(
@@ -769,6 +1128,19 @@ fn thread(frame: &Frame) -> i64 {
         ),
         ready,
         pid: tid,
+        // Same address space, same mappings: the thread sees the pool's
+        // pages directly, which is the one case where sharing is real
+        // rather than copied. No extra pool reference -- the creator's
+        // covers the address space, and the thread must not release it.
+        // `sys_exit` therefore releases shared maps only for processes.
+        shared: alloc::vec::Vec::new(),
+        // A thread shares dispositions by sharing the address space: no
+        // copy, no install. The fields travel in `Forked` because the
+        // struct is shared with fork; a thread ignores them.
+        sig_actions: [crate::signal::Action::default(); 64],
+        sig_mask: 0,
+        sig_alt_base: 0,
+        sig_alt_size: 0,
     })) as usize;
 
     let me = crate::sched::current_id();
@@ -964,6 +1336,18 @@ fn sys_execve(path: u64, argv: u64, envp: u64) -> i64 {
     };
 
     let old = current_ttbr0();
+    // The old address space's shared mappings end with it: write back and
+    // drop the pool references before the tables are destroyed. The pages
+    // themselves stay in the pool for other holders; destroying the tables
+    // must not free them, so this goes through `unmap_user_nofree`.
+    for m in crate::sched::take_shared_maps() {
+        unsafe { crate::paging::unmap_user_nofree(old, m.start, m.len) };
+        if m.anonymous {
+            crate::shm::release_anon(m.region);
+        } else {
+            crate::shm::release(m.region, m.fd);
+        }
+    }
     unsafe {
         // The new tables first, then the old ones freed. The other order
         // unmaps the kernel from under the code doing the freeing.
@@ -1011,6 +1395,19 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
     0
 }
 
+/// # msync(addr, len, flags)
+///
+/// Write back every dirty shared region. The address range is accepted and
+/// not filtered on: every region is small, writes complete before the call
+/// returns, and `MS_ASYNC` vs `MS_SYNC` differ in when the write completes,
+/// which here is already. An `msync` over no shared mappings is success.
+fn sys_msync(_addr: u64, len: u64, _flags: u64) -> i64 {
+    if len == 0 {
+        return -22; // -EINVAL
+    }
+    crate::shm::msync_all(-1)
+}
+
 /// # set_tid_address(ptr)
 ///
 /// Answered here rather than forwarded because the pointer is a user address
@@ -1052,6 +1449,10 @@ fn current_ttbr0() -> u64 {
     v
 }
 
+pub fn current_ttbr0_pub() -> u64 {
+    current_ttbr0()
+}
+
 /// Back a user range with fresh zeroed pages. All or nothing: a partial
 /// mapping would leave the process holding an address range that faults half
 /// way through, which is worse than being told no.
@@ -1072,7 +1473,7 @@ fn map_anonymous(at: u64, len: u64) -> bool {
     true
 }
 
-fn sys_exit(status: i32) -> ! {
+pub fn sys_exit(status: i32) -> ! {
     #[cfg(nk_lkl)]
     {
         // What pthread_join is waiting for.
@@ -1095,9 +1496,49 @@ fn sys_exit(status: i32) -> ! {
     let thread = crate::sched::clear_child_tid() != 0;
     #[cfg(not(nk_lkl))]
     let thread = false;
+    // A process's shared mappings end with it: write back and drop the pool
+    // references. A thread's do not -- the address space is still in use by
+    // the threads it shares with, and the creator's exit covers them.
+    //
+    // And the parent learns of it by signal as well as by `wait4`: a child
+    // that is not ignored posts `SIGCHLD`, which is what makes a shell
+    // print "done" without polling and what wakes a blocked `waitpid`.
+    #[cfg(nk_lkl)]
+    if !thread {
+        for m in crate::sched::take_shared_maps() {
+            if m.anonymous {
+                crate::shm::release_anon(m.region);
+            } else {
+                crate::shm::release(m.region, m.fd);
+            }
+        }
+        let me = crate::sched::current_id();
+        let parent = crate::sched::task_parent(me);
+        if parent != 0 && parent != me {
+            let act = crate::sched::signal_action(parent, crate::signal::SIGCHLD);
+            if act.handler != crate::signal::SIG_IGN {
+                crate::sched::add_signal_pending(parent, 1 << (crate::signal::SIGCHLD - 1));
+                crate::sched::set_signal_source(
+                    parent,
+                    crate::signal::SIGCHLD,
+                    128, // SI_KERNEL: from the kernel, not a kill
+                    crate::sched::linux_pid(me) as i32,
+                );
+                crate::sched::wake(parent);
+            }
+        }
+    }
     if !thread {
         println!();
         println!("  the process exited with status {}", status);
+        // The handler ran and returned, or it never ran at all: either way
+        // the next line out of EL0 names the cause. A SIGABRT (-6) with no
+        // preceding fault line means the process killed itself -- glibc's
+        // default for a signal whose handler returned without a restorer,
+        // or an abort() after a failed assertion in the handler path.
+        if status == -6 {
+            println!("  (SIGABRT: check the handler's return path -- x30/restorer -- and what it ran)");
+        }
     }
     #[cfg(nk_lkl)]
     {

@@ -122,6 +122,34 @@ pub struct Task {
     /// one's heap bookkeeping, and the crash lands some distance away in
     /// malloc rather than anywhere near the switch.
     pub tpidr: u64,
+    /// Shared mappings this task holds: where each is, and which pool region
+    /// it points at. A thread shares its creator's list -- it is the same
+    /// address space -- while a forked child gets a copy of the entries
+    /// (its pages are private copies; see `user.rs`). Bounded: a process
+    /// with more shared mappings than this is told no at `mmap` time.
+    pub shared: [crate::user::SharedMap; 16],
+    pub nshared: usize,
+    /// Signal state. `actions` is shared across threads the way the address
+    /// space is -- dispositions belong to the process -- while `mask` and
+    /// `pending` are per task. A forked child inherits a copy of all three.
+    pub sig_actions: [crate::signal::Action; 64],
+    pub sig_mask: u64,
+    pub sig_pending: u64,
+    /// `si_code` and sender pid for the pending signals, so `siginfo` in the
+    /// delivered frame says something true. `SI_USER` for a `kill`,
+    /// `SI_KERNEL` for a `SIGCHLD` from `sys_exit`.
+    pub sig_code: [i32; 64],
+    pub sig_sender: [i32; 64],
+    /// Alternate signal stack from `sigaltstack`, and whether a handler is
+    /// running on it now (nested `SA_ONSTACK` handlers reuse it -- Linux
+    /// refuses the second, nk notes it and carries on).
+    pub sig_alt_base: u64,
+    pub sig_alt_size: u64,
+    pub sig_alt_in_use: bool,
+    /// What `rt_sigreturn` restores: the mask saved at delivery, and whether
+    /// the handler ran on the alternate stack.
+    pub sig_return_mask: u64,
+    pub sig_return_alt: bool,
 }
 
 static mut TASKS: [Task; MAX_TASKS] = [Task {
@@ -145,6 +173,24 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     has_console: false,
     user_syscall: false,
     tpidr: 0,
+    shared: [crate::user::SharedMap {
+        start: 0,
+        len: 0,
+        region: 0,
+        fd: -1,
+        anonymous: false,
+    }; 16],
+    nshared: 0,
+    sig_actions: [crate::signal::Action::default(); 64],
+    sig_mask: 0,
+    sig_pending: 0,
+    sig_code: [0; 64],
+    sig_sender: [0; 64],
+    sig_alt_base: 0,
+    sig_alt_size: 0,
+    sig_alt_in_use: false,
+    sig_return_mask: 0,
+    sig_return_alt: false,
 }; MAX_TASKS];
 
 static mut CURRENT: usize = 0;
@@ -233,6 +279,24 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             has_console: false,
             user_syscall: false,
             tpidr: 0,
+            shared: [crate::user::SharedMap {
+                start: 0,
+                len: 0,
+                region: 0,
+                fd: -1,
+                anonymous: false,
+            }; 16],
+            nshared: 0,
+            sig_actions: [crate::signal::Action::default(); 64],
+            sig_mask: 0,
+            sig_pending: 0,
+            sig_code: [0; 64],
+            sig_sender: [0; 64],
+            sig_alt_base: 0,
+            sig_alt_size: 0,
+            sig_alt_in_use: false,
+            sig_return_mask: 0,
+            sig_return_alt: false,
         };
         tasks[slot].ttbr0 = crate::paging::kernel_address_space();
         slot
@@ -368,6 +432,248 @@ pub fn set_user_memory_full(brk: u64, brk_min: u64, mmap_next: u64) {
         TASKS[CURRENT].brk_min = brk_min;
         TASKS[CURRENT].mmap_next = mmap_next;
     }
+}
+
+/// Shared mappings of the running task, copied out. `fork` hands them to the
+/// child, which records them as pool references over its private copies.
+pub fn shared_maps() -> alloc::vec::Vec<crate::user::SharedMap> {
+    unsafe {
+        TASKS[CURRENT].shared[..TASKS[CURRENT].nshared]
+            .iter()
+            .copied()
+            .collect::<alloc::vec::Vec<_>>()
+    }
+}
+
+/// Install the shared-mapping list for the running task. The child's entries
+/// arrive in `Forked`; threads share the creator's list by copying it too --
+/// same address space, same mappings.
+pub fn set_shared_maps(maps: &[crate::user::SharedMap]) {
+    unsafe {
+        let n = maps.len().min(16);
+        TASKS[CURRENT].shared[..n].copy_from_slice(&maps[..n]);
+        TASKS[CURRENT].nshared = n;
+    }
+}
+
+/// Record one shared mapping for the running task. False when the table is
+/// full: the mapping is already in place, and the caller must undo it.
+pub fn add_shared_map(m: crate::user::SharedMap) -> bool {
+    unsafe {
+        if TASKS[CURRENT].nshared >= 16 {
+            return false;
+        }
+        let n = TASKS[CURRENT].nshared;
+        TASKS[CURRENT].shared[n] = m;
+        TASKS[CURRENT].nshared = n + 1;
+        true
+    }
+}
+
+/// Drop every shared-mapping record overlapping `start..start+len`, handing
+/// back what was dropped so the caller can release the pool references.
+pub fn remove_shared_maps(start: u64, len: u64) -> alloc::vec::Vec<crate::user::SharedMap> {
+    use alloc::vec::Vec;
+    unsafe {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < TASKS[CURRENT].nshared {
+            let m = TASKS[CURRENT].shared[i];
+            if m.start < start + len && start < m.start + m.len {
+                out.push(m);
+                TASKS[CURRENT].shared.copy_within(i + 1..TASKS[CURRENT].nshared, i);
+                TASKS[CURRENT].nshared -= 1;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+}
+
+/// All shared mappings of the running task. `exit` releases every one.
+pub fn take_shared_maps() -> alloc::vec::Vec<crate::user::SharedMap> {
+    use alloc::vec::Vec;
+    unsafe {
+        let mut out = Vec::with_capacity(TASKS[CURRENT].nshared);
+        for i in 0..TASKS[CURRENT].nshared {
+            out.push(TASKS[CURRENT].shared[i]);
+        }
+        TASKS[CURRENT].nshared = 0;
+        out
+    }
+}
+
+/// Signal helpers: actions, masks and pending bits live in the task table
+/// because they are per task (or per process, for actions), and `signal.rs`
+/// owns the semantics while this owns the storage.
+pub fn signal_action(id: usize, sig: u64) -> crate::signal::Action {
+    unsafe { TASKS[id].sig_actions.get((sig - 1) as usize).copied().unwrap_or(crate::signal::Action::default()) }
+}
+
+pub fn set_signal_action(id: usize, sig: u64, act: crate::signal::Action) {
+    unsafe {
+        if sig >= 1 && sig <= 64 {
+            // Threads share dispositions: writing one task's table writes
+            // every task sharing its address space. The table is small and
+            // sharing is by `ttbr0`, which threads share and processes do
+            // not -- fork copies, threads alias.
+            let root = TASKS[id].ttbr0;
+            for t in TASKS.iter_mut() {
+                if t.state != State::Unused && t.ttbr0 == root {
+                    t.sig_actions[(sig - 1) as usize] = act;
+                }
+            }
+        }
+    }
+}
+
+pub fn signal_mask(id: usize) -> u64 {
+    unsafe { TASKS[id].sig_mask }
+}
+
+pub fn set_signal_mask(id: usize, mask: u64) {
+    unsafe { TASKS[id].sig_mask = mask }
+}
+
+pub fn signal_pending(id: usize) -> u64 {
+    unsafe { TASKS[id].sig_pending }
+}
+
+pub fn add_signal_pending(id: usize, bits: u64) {
+    unsafe { TASKS[id].sig_pending |= bits }
+}
+
+pub fn clear_signal_pending(id: usize, bits: u64) {
+    unsafe { TASKS[id].sig_pending &= !bits }
+}
+
+/// Record where a signal came from, for the `siginfo` in the frame.
+pub fn set_signal_source(id: usize, sig: u64, code: i32, sender: i32) {
+    unsafe {
+        if sig >= 1 && sig <= 64 {
+            TASKS[id].sig_code[(sig - 1) as usize] = code;
+            TASKS[id].sig_sender[(sig - 1) as usize] = sender;
+        }
+    }
+}
+
+pub fn signal_code(id: usize, sig: u64) -> i32 {
+    unsafe {
+        TASKS[id]
+            .sig_code
+            .get((sig.wrapping_sub(1)) as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+pub fn signal_sender(id: usize, sig: u64) -> i32 {
+    unsafe {
+        TASKS[id]
+            .sig_sender
+            .get((sig.wrapping_sub(1)) as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// The task with Linux pid `pid`, if it is still alive.
+pub fn task_with_linux_pid(pid: i64) -> Option<usize> {
+    unsafe {
+        (0..MAX_TASKS).find(|&i| {
+            TASKS[i].linux_pid == pid
+                && (TASKS[i].state == State::Running
+                    || TASKS[i].state == State::Ready
+                    || TASKS[i].state == State::Blocked)
+        })
+    }
+}
+
+/// `(linux_pid, parent, live)` for `kill(0/-1)` group delivery.
+pub fn task_identity(id: usize) -> (i64, usize, bool) {
+    unsafe {
+        let t = TASKS[id];
+        let live = t.state == State::Running || t.state == State::Ready || t.state == State::Blocked;
+        (t.linux_pid, t.parent, live)
+    }
+}
+
+pub fn task_parent(id: usize) -> usize {
+    unsafe { TASKS[id].parent }
+}
+
+pub fn signal_altstack(id: usize) -> (u64, u64, bool) {
+    unsafe { (TASKS[id].sig_alt_base, TASKS[id].sig_alt_size, TASKS[id].sig_alt_in_use) }
+}
+
+pub fn set_signal_altstack(id: usize, base: u64, size: u64) {
+    unsafe {
+        TASKS[id].sig_alt_base = base;
+        TASKS[id].sig_alt_size = size;
+        TASKS[id].sig_alt_in_use = false;
+    }
+}
+
+pub fn set_signal_altstack_in_use(id: usize, used: bool) {
+    unsafe { TASKS[id].sig_alt_in_use = used }
+}
+
+pub fn set_signal_return(id: usize, mask: u64, used_alt: bool) {
+    unsafe {
+        TASKS[id].sig_return_mask = mask;
+        TASKS[id].sig_return_alt = used_alt;
+    }
+}
+
+pub fn signal_return(id: usize) -> (u64, bool) {
+    unsafe { (TASKS[id].sig_return_mask, TASKS[id].sig_return_alt) }
+}
+
+/// Copy signal state to a forked child: dispositions, mask, altstack. The
+/// child starts with nothing pending -- signals sent to the parent before
+/// the fork are the parent's, not the child's.
+pub fn inherit_signal_state(child: usize, parent: usize) {
+    unsafe {
+        TASKS[child].sig_actions = TASKS[parent].sig_actions;
+        TASKS[child].sig_mask = TASKS[parent].sig_mask;
+        TASKS[child].sig_alt_base = TASKS[parent].sig_alt_base;
+        TASKS[child].sig_alt_size = TASKS[parent].sig_alt_size;
+        TASKS[child].sig_alt_in_use = false;
+        TASKS[child].sig_pending = 0;
+        TASKS[child].sig_code = [0; 64];
+        TASKS[child].sig_sender = [0; 64];
+        TASKS[child].sig_return_mask = 0;
+        TASKS[child].sig_return_alt = false;
+    }
+}
+
+/// Install carried signal state on the running task. `fork` copies the
+/// parent's dispositions into `Forked` before spawning; the child installs
+/// them here, on itself, once it exists.
+pub fn install_signal_state(
+    actions: [crate::signal::Action; 64],
+    mask: u64,
+    alt_base: u64,
+    alt_size: u64,
+) {
+    unsafe {
+        TASKS[CURRENT].sig_actions = actions;
+        TASKS[CURRENT].sig_mask = mask;
+        TASKS[CURRENT].sig_alt_base = alt_base;
+        TASKS[CURRENT].sig_alt_size = alt_size;
+        TASKS[CURRENT].sig_alt_in_use = false;
+        TASKS[CURRENT].sig_pending = 0;
+        TASKS[CURRENT].sig_code = [0; 64];
+        TASKS[CURRENT].sig_sender = [0; 64];
+        TASKS[CURRENT].sig_return_mask = 0;
+        TASKS[CURRENT].sig_return_alt = false;
+    }
+}
+
+/// Dispositions of the running task, for carrying across `fork`.
+pub fn signal_actions(id: usize) -> [crate::signal::Action; 64] {
+    unsafe { TASKS[id].sig_actions }
 }
 
 /// The top of a task's kernel stack.

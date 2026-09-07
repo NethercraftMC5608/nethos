@@ -960,11 +960,18 @@ is a real distinction and this does not claim to have crossed it.
 
 ### What a real binary still cannot do
 
-Signals, and any *shared* file mapping -- `MAP_SHARED` on a file is refused
-rather than faked, because honouring it means writeback and a page cache
-shared with Linux's. Private file mappings and threads both work; they have
-their own sections below. Nothing survives a reboot unless it is on the
-virtio disk: the rootfs itself is memory-backed.
+Demand paging, `switch_root`, and *device* shared mappings. Everything is
+still mapped eagerly at `mmap` time -- Mesa works without demand paging,
+but nk allocates a frame for every page whether or not it is touched, and
+190MB of Mesa is mostly not touched. The disk is mounted by the program nk
+runs, not by nk; a root filesystem proper means `switch_root` as pid 1 in
+an initramfs, which nk's processes are not. And `MAP_SHARED` on a device
+or DRM dumb buffer is still refused: those pages are Linux's, not nk's,
+and pinning them is separate work. Nothing survives a reboot unless it is
+on the virtio disk: the rootfs itself is memory-backed.
+
+Signals and file-backed `MAP_SHARED` used to be on this list. They have
+their own sections below.
 
 ### The process image: a stack, a heap, and mappings
 
@@ -1121,6 +1128,83 @@ that task to start.
 `shares_mm` and reaping a thread no longer tears down page tables its
 siblings are still executing from.
 
+### Signals, delivered on the way back to EL0
+
+Signals are nk's, not Linux's, for the same reason the futex is: LKL's
+host-task model never returns through Linux to EL0, so a disposition
+recorded by forwarding `rt_sigaction` would be written down and never
+acted on. `rt_sigaction`, `rt_sigprocmask`, `kill`/`tkill`/`tgkill`,
+`sigaltstack`, `sigsuspend`, `sigtimedwait` and `rt_sigreturn` are
+intercepted in `rust_el0_sync`; everything else still forwards.
+
+Delivery happens on the EL0 return path -- after every syscall and, via
+the same check, after every timer interrupt -- so a signal arrives
+promptly without preempting the kernel mid-syscall. At most one signal
+per return, lowest number first; `SIGKILL`/`SIGSTOP` answer to nothing,
+`SIGCHLD`/`SIGCONT`/`SIGURG` default to ignored, everything else without
+a handler terminates. A child that exits posts `SIGCHLD` to its parent
+(unless ignored), which is what wakes a blocked `waitpid` without
+polling. Dispositions belong to the process (threads share the table by
+`TTBR0`), masks and pending bits to the task; `fork` copies all three
+with nothing pending.
+
+The frame is always the `rt_` shape: 128 bytes of `siginfo` (signo,
+errno, code, pid, uid at 0/4/8/16/20), then a 4560-byte `ucontext`
+whose `mcontext` carries the interrupted registers, stack pointer, pc
+and pstate -- 4704 bytes on the user's stack (or the alternate stack
+for `SA_ONSTACK`), 16-byte aligned. `rt_sigreturn` restores from the
+`ucontext` found via the stack pointer, not `x2`: that register carried
+the pointer *into* the handler but is caller-saved, so any non-trivial
+handler clobbers it, and Linux finds the frame via `sp` for the same
+reason.
+
+The return address is the hard part. glibc on aarch64 never fills
+`sa_restorer` and never sets `SA_RESTORER` -- the field is uninitialised
+stack garbage, measured as 0x400bc0 one run (landing in the binary's
+text, executably) and 0x2efe15f8 the next (in the mmap arena, faulting
+as NOT-EXEC). Synthesising the flag from a nonzero restorer was tried
+and removed: it honours noise. Instead nk owns the return path the way
+Linux owns its VDSO `sigtramp`: one page per address space at
+`0x3FF0_0000` -- above `USER_STACK_TOP`, unreachable by `mmap`/`brk`,
+refused by `munmap`/`mprotect`, copied on `fork`, freed on teardown,
+icache-cleaned on map -- holding `mov x8, #139; svc #0`. `x30` is the
+caller's restorer when `SA_RESTORER` is set, else the trampoline; a
+missing trampoline faults at a poisoned address rather than falling off
+the handler. `kernel/init/signals.c` proves both handler shapes (plain
+and `SA_SIGINFO`), `SIGCHLD` pending-and-reaped, and dispositions
+ignored, reinstalled and inherited.
+
+### Shared file mappings, and the writeback that makes them shared
+
+`MAP_PRIVATE` is a snapshot: `preadv` at map time, never the filesystem
+again. `MAP_SHARED` is the same physical pages for every holder, filled
+once from the file and written back on `munmap` or `msync` -- the
+contract a `wl_shm` buffer (written by a client, read by the
+compositor) and a `memfd` passed over `SCM_RIGHTS` both depend on.
+
+The pool in `kernel/core/src/shm.rs` is keyed by `(dev, ino)` from
+`fstat` plus file offset; the first mapper `preadv`-fills in 256-page
+batches and duplicates its fd for the region's own lifetime (via
+`fcntl(F_DUPFD)` above the fd range children inherit, since the mapper
+may close or exit first); the last mapping out `pwritev`s dirty pages
+back. Anonymous-shared (`MAP_SHARED|MAP_ANONYMOUS`) has no file and is
+never written back. Past-EOF pages read as zero and are skipped on
+writeback, which is the `ftruncate`-then-`mmap` shape `memfd` users
+depend on. Everything is still eager -- no demand paging, no coherence
+with later writes through other descriptors, no device or DRM pages
+(those are Linux's; pinning them is separate work).
+
+Each task holds up to 16 `SharedMap` records (start, length, region,
+fd) beside `brk` and `mmap_next`; `munmap` over a record releases the
+pool reference (writing back first) and removes only the caller's page
+entries via `unmap_user_nofree`, never freeing pool pages others still
+map. `fork` copies the pages the way it copies everything else and
+records pool references over the copies (divergence, like the private
+snapshot -- documented, not hidden); threads share the pool directly;
+`execve` and `exit` release. `kernel/init/writeback.c` proves
+munmap-writeback, msync-while-mapped, private-snapshot isolation, and
+anonymous-shared.
+
 ### Mesa, measured rather than estimated
 
 Mesa is not one library. `libEGL` dlopens `libEGL_mesa`, which dlopens a
@@ -1202,12 +1286,11 @@ GPU at all.
 
 ### What is next
 
-Signals, and `MAP_SHARED` file mappings with writeback -- which is also what
-a windowing system will want, since sharing a buffer with a compositor is
-exactly the contract nk still refuses. Demand paging rather than eager reads:
-Mesa works without it, but nk currently allocates a frame for every page of
-every mapping whether or not it is touched, and 190MB of Mesa is mostly not
-touched. Then `switch_root`, for a root filesystem rather than a mounted one.
+Demand paging rather than eager reads, then `switch_root` for a root
+filesystem rather than a mounted one. Signals and `MAP_SHARED` file
+mappings with writeback are done -- they have their own sections above --
+and what a windowing system wants next is sharing a *device* buffer with
+a compositor, which is the contract nk still refuses.
 
 Mesa running does not mean GPU acceleration. llvmpipe is software; the GPU is
 still a display with dumb buffers, and virgl -- a command stream Mesa could

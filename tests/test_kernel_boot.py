@@ -1284,9 +1284,8 @@ class SyscallSoak(unittest.TestCase):
     compositor's event loop, eventfd wakes its threads, memfd is wl_shm,
     poll is everything that waits the other way. All of them forward to
     Linux untouched -- nk owns none of these numbers -- except the memfd
-    mmap, which is nk's sys_mmap and refuses MAP_SHARED. That refusal is
-    the test working: the one marker that must fail until MAP_SHARED
-    exists, proving the probe can see the gap it was built to find.
+    mmap, which is nk's sys_mmap and refused MAP_SHARED until the shared
+    pool landed. Now it passes like the rest.
 
     arch/lkl's defconfig leaves CONFIG_UNIX off, so the first run of
     this failed at socketpair with EAFNOSUPPORT. The forwarding was
@@ -1311,19 +1310,92 @@ class SyscallSoak(unittest.TestCase):
     def test_eventfd_counts(self):
         self.assertEqual(self.out.count('SOAK_EVENTFD_OK'), 1, self.out)
 
-    def test_memfd_mmap_needs_shared(self):
-        # MAP_SHARED is blocker #1. The probe reaches the mmap, nk
-        # refuses it with EOPNOTSUPP, and the marker stays absent --
-        # while everything around it passes. When MAP_SHARED lands,
-        # this becomes an assertEqual on SOAK_MEMFD_OK like the rest.
-        self.assertIn('mmap memfd: Operation not supported', self.out)
-        self.assertNotIn('SOAK_MEMFD_OK', self.out)
+    def test_memfd_maps_shared(self):
+        self.assertEqual(self.out.count('SOAK_MEMFD_OK'), 1, self.out)
 
     def test_poll_waits_on_a_pipe(self):
-        # poll sits after memfd in soak.c, so it is not reached until
-        # MAP_SHARED exists. Asserted absent for the same reason: the
-        # run must stop exactly where the missing feature is.
-        self.assertNotIn('SOAK_POLL_OK', self.out)
+        self.assertEqual(self.out.count('SOAK_POLL_OK'), 1, self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('!!EXC', self.out)
+        self.assertNotIn('!! kernel panic', self.out)
+        self.assertIn('nk: done.', self.out)
+
+
+WB_CPIO = ROOT / 'kernel/ldk/build/writeback.cpio'
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+@unittest.skipUnless(WB_CPIO.exists(),
+                     'run scripts/build-writeback-test.sh first')
+class SharedWriteback(unittest.TestCase):
+    """MAP_SHARED is a contract, not a flag: the same pages for every
+    holder, and writes that reach the file.
+
+    A shared write must be readable through the file after `munmap` and
+    after `msync` while still mapped; a private mapping of the same file
+    must see neither the shared write (snapshotted before it) nor leak its
+    own writes back; anonymous-shared must behave as ordinary zeroed
+    memory with no file behind it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot('--lkl', '--initrd', str(WB_CPIO),
+                       timeout=120, watchdog=30)
+
+    def test_munmap_writes_back(self):
+        self.assertEqual(self.out.count('WB_MUNMAP_OK'), 1, self.out)
+
+    def test_msync_writes_back_while_mapped(self):
+        self.assertEqual(self.out.count('WB_MSYNC_OK'), 1, self.out)
+
+    def test_private_mapping_is_a_snapshot(self):
+        self.assertEqual(self.out.count('WB_PRIVATE_OK'), 1, self.out)
+
+    def test_anonymous_shared_is_memory(self):
+        self.assertEqual(self.out.count('WB_ANON_OK'), 1, self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('!!EXC', self.out)
+        self.assertNotIn('!! kernel panic', self.out)
+        self.assertIn('nk: done.', self.out)
+
+
+SIGNALS_CPIO = ROOT / 'kernel/ldk/build/signals.cpio'
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+@unittest.skipUnless(SIGNALS_CPIO.exists(),
+                     'run scripts/build-signals-test.sh first')
+class Signals(unittest.TestCase):
+    """Both handler shapes, and the trampoline between them.
+
+    A plain `sa_handler` and a `SA_SIGINFO` `sa_sigaction` exercise
+    different frame paths (one arg vs siginfo+ucontext), and both return
+    through nk's own trampoline -- one page per address space holding
+    `mov x8, #139; svc #0` -- because glibc on aarch64 never fills
+    `sa_restorer` and never sets `SA_RESTORER`. The `SIGCHLD` and
+    disposition checks prove delivery integrates with `waitpid` and
+    `fork` rather than merely running a function pointer.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = boot('--lkl', '--initrd', str(SIGNALS_CPIO),
+                       timeout=120, watchdog=30)
+
+    def test_plain_handler_runs_and_returns(self):
+        self.assertEqual(self.out.count('SIG_HANDLER_OK'), 1, self.out)
+
+    def test_siginfo_frame_carries_pid(self):
+        self.assertEqual(self.out.count('SIG_INFO_OK'), 1, self.out)
+
+    def test_sigchld_is_pending_and_reaped(self):
+        self.assertEqual(self.out.count('SIG_CHLD_OK'), 1, self.out)
+
+    def test_ignore_reinstall_and_inherit(self):
+        self.assertEqual(self.out.count('SIG_DISP_OK'), 1, self.out)
 
     def test_nothing_faulted(self):
         self.assertNotIn('!!EXC', self.out)

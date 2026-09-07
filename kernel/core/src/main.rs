@@ -39,6 +39,8 @@ pub mod paging;
 pub mod psci;
 pub mod sched;
 pub mod selftest;
+pub mod shm;
+pub mod signal;
 pub mod stack;
 pub mod stub;
 pub mod sync;

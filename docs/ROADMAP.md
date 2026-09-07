@@ -320,7 +320,9 @@ the one below it.
       threads request Linux thread-group leaders, unshare files/fs, retain
       their identity through EL0 preemption, and release Linux tasks on exit.
       The parent reclaims nk pages and stacks after joining. Fork, execve,
-      userspace signals and Linux wait-status propagation remain outstanding.
+      userspace signals (`rt_sigaction`/`sigreturn`/`kill` with an nk-owned
+      trampoline) and `SIGCHLD` on child exit all work; Linux wait-status
+      propagation for stopped (not exited) children remains outstanding.
 - [ ] **Desktop runtime integration.** Normal binary addresses, dynamic
       linking, checked syscall buffers, signals, shared memory, futexes and
       DRM/device access must work before desktop configuration can be tested.
@@ -460,9 +462,13 @@ the one below it.
       generated code -- a trap that arrives as ESR EC 0x18 with a FAR of zero
       and reads exactly like a null dereference. Software rasterisation, not
       GPU acceleration: virgl is a separate piece of work.
-- [ ] `MAP_SHARED` file mappings with writeback, signals, `epoll` -- the long
-      tail, and the actual size of the problem. `docs/KERNEL.md` has the measurement of
-      what a desktop needs and why borrowing stops helping here.
+- [x] `MAP_SHARED` file mappings with writeback and userspace signals --
+      done (shared pool with `pwritev` writeback on `munmap`/`msync`,
+      nk-owned trampoline for `rt_sigreturn`). `epoll` forwards to Linux
+      untouched and is proven by soak. What remains of the tail is demand
+      paging and *device* shared mappings -- `docs/KERNEL.md` has the
+      measurement of what a desktop needs and why borrowing stops helping
+      here.
 
 ### Not started, and honest about why
 

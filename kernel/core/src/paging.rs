@@ -406,18 +406,51 @@ pub fn new_address_space() -> u64 {
 
 /// Map user-accessible pages into `ttbr0`, in 4KB pages.
 ///
-/// # Safety
-/// `ttbr0` is a table from `new_address_space`; the range is not already
-/// mapped and does not overlap the kernel's own top-level entries.
+/// Executable pages arrive dirty: the bytes were just copied (ELF load) or
+/// are about to be written (JIT, handler trampolines delivered by copy).
+/// Caches are not coherent on this machine, so every executable mapping
+/// cleans the data cache to the point of unification and invalidates the
+/// instruction cache before the TLB flush makes it visible. `publish_code`
+/// in user.rs does the same for single pages; this covers the mapping path
+/// itself, which is where an EL0 handler's first instruction fetch faults
+/// as SIGILL when the icache still holds whatever the frame held before.
 pub unsafe fn map_user(ttbr0: u64, va: u64, pa: u64, size: u64, exec: bool) {
+    if exec {
+        clean_icache_range(pa, size);
+    }
     map_user_permissions(ttbr0, va, pa, size, exec, !exec);
 }
 
+/// Clean one range to the point of unification and invalidate the icache.
+///
+/// The caller guarantees `pa..pa+size` is normal cacheable memory it owns.
+/// Device memory must never come here: `dc cvau` on Device-nGnRnE faults.
+pub unsafe fn clean_icache_range(pa: u64, size: u64) {
+    let ctr: u64;
+    core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nostack, nomem));
+    let line = 4usize << ((ctr >> 16) & 15);
+    let start = (pa as usize) & !(line - 1);
+    let end = pa as usize + size as usize;
+    let mut addr = start;
+    while addr < end {
+        core::arch::asm!("dc cvau, {}", in(reg) addr, options(nostack));
+        addr += line;
+    }
+    core::arch::asm!("dsb ish", "ic iallu", "dsb ish", "isb", options(nostack));
+}
+
 /// Map an ELF segment with independent write and execute permissions.
+///
+/// Executable segments are cleaned to the point of unification here, for
+/// the same reason as `map_user`: the loader just copied the bytes, and
+/// the icache does not know that.
 /// # Safety
 /// Same requirements as `map_user`; writable executable pages are forbidden.
 pub unsafe fn map_user_permissions(ttbr0: u64, va: u64, pa: u64, size: u64, exec: bool, writable: bool) {
     assert!(!(exec && writable));
+    if exec {
+        clean_icache_range(pa, size);
+    }
     let l0 = table_of(ttbr0) as *mut u64;
     let mut off = 0;
     while off < size {
@@ -494,6 +527,45 @@ pub unsafe fn unmap_user(ttbr0: u64, va: u64, size: u64) -> usize {
     }
     core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
     freed
+}
+
+/// Remove a user mapping without freeing the pages behind it.
+///
+/// The shared pool's other half: `unmap_user` frees, which would hand pool
+/// pages back to the allocator while other holders still map them. This
+/// clears the entries and flushes the TLB, and the pool frees when its
+/// reference count reaches zero. Unmapping a hole is still legal.
+///
+/// # Safety
+/// Same requirements as `unmap_user`.
+pub unsafe fn unmap_user_nofree(ttbr0: u64, va: u64, size: u64) {
+    let l0 = table_of(ttbr0) as *mut u64;
+    let mut off = 0;
+    while off < size {
+        let v = va + off;
+        off += 4096;
+        let e0 = *l0.add(((v >> L0_SHIFT) & 511) as usize);
+        if !is_table(e0) {
+            continue;
+        }
+        let l1 = (e0 & ADDR) as *mut u64;
+        let e1 = *l1.add(((v >> L1_SHIFT) & 511) as usize);
+        if !is_table(e1) {
+            continue;
+        }
+        let l2 = (e1 & ADDR) as *mut u64;
+        let e2 = *l2.add(((v >> L2_SHIFT) & 511) as usize);
+        if !is_table(e2) {
+            continue;
+        }
+        let l3 = (e2 & ADDR) as *mut u64;
+        let slot = l3.add(((v >> L3_SHIFT) & 511) as usize);
+        if *slot & pte::VALID == 0 {
+            continue;
+        }
+        *slot = 0;
+    }
+    core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
 }
 
 /// Copy an address space: every page the process owns, with the permissions

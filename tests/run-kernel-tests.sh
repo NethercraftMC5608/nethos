@@ -22,10 +22,10 @@ RESULTS="$(mktemp -d)"
 trap '[ -n "${KEEP:-}" ] || rm -rf "$RESULTS"' EXIT
 
 CLASSES=$(
-    { sed -n 's/^class \([A-Za-z0-9_]*\).*/test_kernel_boot.\1/p' test_kernel_boot.py
-      sed -n 's/^class \([A-Za-z0-9_]*\).*/test_kernel_elf.\1/p' test_kernel_elf.py
-      sed -n 's/^class \([A-Za-z0-9_]*\).*/test_kernel_runtime.\1/p' test_kernel_runtime.py
-    } | grep -- "$PATTERN"
+    for f in test_*.py; do
+        mod="${f%.py}"
+        sed -n "s/^class \([A-Za-z0-9_]*\).*/${mod}.\1/p" "$f"
+    done | grep -- "$PATTERN"
 )
 [ -n "$CLASSES" ] || { echo "no test classes match $PATTERN"; exit 1; }
 
