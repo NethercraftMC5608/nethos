@@ -1,12 +1,19 @@
-/* M3 step B: slate framebuffer holder (folio of fbtest.c).
+/* M3 step B+C: shell-background framebuffer holder (folio of fbtest.c).
  *
- * Fills /dev/fb0 with the shell's dark-slate pixel (#14181f: the first stop
- * of the slate wallpaper gradient, payload/shell/style.css:1229), modesets
- * via FBIOPUT_VSCREENINFO + FBIOPAN_DISPLAY exactly like fbtest.c, prints
- * M3_SPIN_READY, and sleeps forever so the host can screendump the scanout
- * through the QEMU monitor. Deliberately through write() rather than mmap(),
- * for fbtest's reason: a DRM dumb buffer has to be mapped and device shared
- * mappings are refused on nk. Built static by scripts/build-wl-test.sh m3fb.
+ * Fills /dev/fb0 with the shell's dark-slate wallpaper colours
+ * (payload/shell/style.css:1225-1230), modesets via FBIOPUT_VSCREENINFO +
+ * FBIOPAN_DISPLAY exactly like fbtest.c, prints M3_SPIN_READY, and sleeps
+ * forever so the host can screendump the scanout through the QEMU monitor.
+ * Deliberately through write() rather than mmap(), for fbtest's reason: a
+ * DRM dumb buffer has to be mapped and device shared mappings are refused
+ * on nk. Built static by scripts/build-wl-test.sh m3fb.
+ *
+ * Step B drew the flat first stop (#14181f) and proved the byte path.
+ * Step C draws the full linear layer as a vertical gradient through its
+ * three exact stops (#14181f 0%, #11151c 60%, #0e1116 100%): vertical is an
+ * approximation of the CSS 155deg angle, but every stop byte is exact and
+ * scripts/m3-check.py --gradient recomputes the same integer ramp, so the
+ * screendump comparison is still byte-level, now non-uniform.
  */
 #include <fcntl.h>
 #include <linux/fb.h>
@@ -15,6 +22,31 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+/* One row's colour (R,G,B) on the piecewise-linear ramp through the slate
+ * stops. Integer math, thousandths of height, k in 0..256 per segment --
+ * m3-check.py mirrors this formula exactly. */
+static void row_color(unsigned int y, unsigned int h, unsigned char *rgb)
+{
+	static const unsigned char stops[3][3] = {
+		{ 0x14, 0x18, 0x1f }, /* #14181f at 0.00 */
+		{ 0x11, 0x15, 0x1c }, /* #11151c at 0.60 */
+		{ 0x0e, 0x11, 0x16 }, /* #0e1116 at 1.00 */
+	};
+	unsigned int t = h > 1 ? (y * 1000) / (h - 1) : 0;
+	const unsigned char *a = stops[0], *b = stops[1];
+	unsigned int lo = 0, hi = 600, k, c;
+
+	if (t >= 600) {
+		a = stops[1];
+		b = stops[2];
+		lo = 600;
+		hi = 1000;
+	}
+	k = ((t - lo) * 256) / (hi - lo);
+	for (c = 0; c < 3; c++)
+		rgb[c] = (unsigned char)((a[c] * (256 - k) + b[c] * k + 128) / 256);
+}
 
 int main(void)
 {
@@ -41,19 +73,21 @@ int main(void)
 	if (row == NULL)
 		return 3;
 
-	/* Flat slate #14181f in xrgb byte order (B=0x1f G=0x18 R=0x14):
-	 * a screendump whose mean colour is this value can only have come
-	 * from this program. fbtest's gradient proves drawing; this proves
-	 * the shell's own background byte reaching the scanout. */
+	/* The slate linear layer as a vertical gradient through its three exact
+	 * stops (non-uniform: a flat black frame fails this check, as does
+	 * fbtest's red-tinted gradient). Byte order on the wire is xrgb:
+	 * px = (B, G, R), matching fbtest's layout. */
 	for (y = 0; y < var.yres; y++) {
 		unsigned int x;
+		unsigned char rgb[3];
 
+		row_color(y, var.yres, rgb);
 		for (x = 0; x < var.xres; x++) {
 			unsigned char *px = row + x * (var.bits_per_pixel / 8);
 
-			px[0] = 0x1f; /* blue  */
-			px[1] = 0x18; /* green */
-			px[2] = 0x14; /* red   */
+			px[0] = rgb[2]; /* blue  */
+			px[1] = rgb[1]; /* green */
+			px[2] = rgb[0]; /* red   */
 			if (var.bits_per_pixel == 32)
 				px[3] = 0x00;
 		}
@@ -62,7 +96,7 @@ int main(void)
 			return 4;
 		}
 	}
-	printf("fb: drew %u lines M3_SLATE\n", var.yres);
+	printf("fb: drew %u lines M3_SLATE_GRADIENT\n", var.yres);
 
 	/* Turn the display on, like fbtest: writing fills a shadow buffer and
 	 * nothing is scanned out until a mode is set on the CRTC. */
