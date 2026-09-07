@@ -51,21 +51,46 @@ static struct tty_driver *nk_tty_driver;
 static struct tty_port nk_tty_port;
 static int nk_console_irq_no = -1;
 
-static irqreturn_t nk_console_isr(int irq, void *dev)
+/*
+ * Nothing is collected until somebody has the console open.
+ *
+ * A flip buffer with no tty behind it accepts every byte and delivers none:
+ * the port is where the line discipline hangs, and until an open has attached
+ * one there is nowhere for the characters to go. So keys typed before init
+ * gets that far -- which is every key, when the input is a pipe -- were taken
+ * out of the host's ring and dropped. They stay in the ring instead, and the
+ * open drains it.
+ */
+static bool nk_tty_live;
+
+static void nk_console_drain(void)
 {
 	char buf[128];
 	int n;
 
+	if (!nk_tty_live)
+		return;
 	while ((n = nk_console_read(buf, sizeof(buf))) > 0) {
 		tty_insert_flip_string(&nk_tty_port, buf, n);
 		tty_flip_buffer_push(&nk_tty_port);
 	}
+}
+
+static irqreturn_t nk_console_isr(int irq, void *dev)
+{
+	nk_console_drain();
 	return IRQ_HANDLED;
 }
 
 static int nk_tty_open(struct tty_struct *tty, struct file *filp)
 {
-	return tty_port_open(&nk_tty_port, tty, filp);
+	int ret = tty_port_open(&nk_tty_port, tty, filp);
+
+	if (!ret) {
+		nk_tty_live = true;
+		nk_console_drain();
+	}
+	return ret;
 }
 
 static void nk_tty_close(struct tty_struct *tty, struct file *filp)

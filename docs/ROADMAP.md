@@ -404,10 +404,11 @@ the one below it.
 - [x] **`#!` interpreter lines.** An init can be a shell script, which is what
       an init usually is. Linux's rules, including the one that matters --
       argv[0] is discarded and the script's path takes its place.
-- [~] **Interactive input.** The PL011's receive interrupt is taken, the bytes
-      reach nk's ring, and LKL's console interrupt is raised from a thread --
-      all verified. The driver's handler does not deliver into the tty yet, so
-      a shell blocked in `read` stays blocked. See docs/KERNEL.md.
+- [x] **Interactive input.** A shell on nk reads what is typed at it. The
+      PL011's receive interrupt, a ring in nk, LKL's console interrupt raised
+      from a thread, and the driver holding the bytes until somebody has the
+      console open -- because a flip buffer with no tty behind it accepts
+      every byte and delivers none.
 - [ ] `mmap` of a file, `futex`, signals, `epoll` -- the long tail, and
       the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.

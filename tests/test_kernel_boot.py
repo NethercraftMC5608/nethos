@@ -32,7 +32,7 @@ HAVE = bool(CARGO) and bool(shutil.which('qemu-system-aarch64'))
 DONE = ('nk: done.', '!! kernel panic')
 
 
-def boot(*args, timeout=60, watchdog=12):
+def boot(*args, timeout=60, watchdog=12, keys=None):
     """Boot nk and return everything it said.
 
     Reads the serial console as it arrives and stops at nk's own end marker
@@ -54,8 +54,15 @@ def boot(*args, timeout=60, watchdog=12):
     proc = subprocess.Popen(
         ['bash', str(RUN), '--timeout', str(watchdog), *prebuilt, *args],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, stdin=subprocess.DEVNULL, start_new_session=True,
+        text=True, start_new_session=True,
+        stdin=subprocess.PIPE if keys is not None else subprocess.DEVNULL,
     )
+    if keys is not None:
+        # Written and closed before reading a line: the whole point is that it
+        # arrives before anything has opened the console, which is what a pipe
+        # does and what nk has to cope with.
+        proc.stdin.write(keys)
+        proc.stdin.close()
     lines = []
     deadline = time.monotonic() + timeout
     try:
@@ -481,7 +488,13 @@ NET_LIB = ROOT / 'kernel/ldk/build/virtio-net/libnklinux.a'
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
 @unittest.skipUnless(NET_LIB.exists(), 'virtio-net port not built')
 def build_c(name, out):
-    """Compile kernel/init/<name>.c in ldk's container to kernel/ldk/build/<out>."""
+    """Compile kernel/init/<name>.c in ldk's container to kernel/ldk/build/<out>.
+
+    `out` must be unique to the caller. The classes run in parallel, and two
+    of them compiling the same source to the same path means one reads a file
+    the other is still writing -- which presents as a class failing every
+    assertion about a program that ran perfectly well on its own.
+    """
     (ROOT / 'kernel/ldk/build').mkdir(parents=True, exist_ok=True)
     try:
         build = subprocess.run(
@@ -496,6 +509,35 @@ def build_c(name, out):
     return ROOT / 'kernel/ldk/build' / out
 
 
+def busybox():
+    """Debian's busybox-static, arm64, fetched once and shared.
+
+    Three classes want it and they run in parallel, so it is fetched into a
+    file named for the process doing the fetching and moved into place -- a
+    rename is atomic, and a half-written 2MB binary is not something the
+    reader can detect.
+    """
+    out = ROOT / 'kernel/ldk/build/busybox'
+    if out.exists():
+        return out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(f'.{os.getpid()}')
+    try:
+        bb = subprocess.run(
+            ['docker', 'run', '--rm', '-v', f'{ROOT}/kernel/ldk/build:/out',
+             'nethos-ldk', 'sh', '-c',
+             'apt-get update -qq >/dev/null 2>&1;'
+             ' apt-get install -y -qq busybox-static >/dev/null 2>&1;'
+             f' cp /bin/busybox /out/{tmp.name}'],
+            capture_output=True, text=True, timeout=600)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        raise unittest.SkipTest(f'no ldk container: {e}')
+    if bb.returncode != 0 or not tmp.exists():
+        raise unittest.SkipTest(f'no busybox: {bb.stderr.strip()[:200]}')
+    tmp.replace(out)
+    return out
+
+
 def make_cpio(root, name):
     """Pack a directory as a newc cpio archive and return its path."""
     archive = ROOT / 'kernel/ldk/build' / name
@@ -507,6 +549,55 @@ def make_cpio(root, name):
     if cpio.returncode != 0:
         raise unittest.SkipTest(f'cpio failed: {cpio.stderr.decode()[:200]}')
     return archive
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class Interactive(unittest.TestCase):
+    """A shell that reads what somebody types.
+
+    The input is written and the pipe closed before nk has finished booting,
+    which is the case that matters: a flip buffer with no tty behind it takes
+    every byte and delivers none, so anything typed before init opens the
+    console has to wait in the host's ring rather than be handed over early.
+    """
+
+    SCRIPT = ('#!/bin/busybox sh\n'
+              'echo "nk shell ready"\n'
+              'while read -r line; do\n'
+              '  echo "you typed: $line"\n'
+              '  [ "$line" = quit ] && break\n'
+              'done\n'
+              'echo goodbye\n')
+
+    @classmethod
+    def setUpClass(cls):
+        bb = busybox()
+        root = ROOT / 'kernel/ldk/build/interactive-root'
+        shutil.rmtree(root, ignore_errors=True)
+        (root / 'bin').mkdir(parents=True)
+        (root / 'dev').mkdir()
+        shutil.copy(bb, root / 'bin/busybox')
+        init = root / 'nk-init'
+        init.write_text(cls.SCRIPT)
+        init.chmod(0o755)
+        cls.out = boot('--lkl', '--initrd', str(make_cpio(root, 'interactive.cpio')),
+                       keys='hello there\nquit\n', timeout=240, watchdog=120)
+
+    def test_the_shell_starts(self):
+        self.assertIn('nk shell ready', self.out)
+
+    def test_it_reads_what_was_typed(self):
+        self.assertIn('you typed: hello there', self.out)
+        self.assertIn('you typed: quit', self.out)
+
+    def test_it_acts_on_it(self):
+        # The loop breaks on "quit", so this is the shell having read the
+        # second line and compared it, not just echoed it.
+        self.assertIn('goodbye', self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('fault in user space', self.out)
+        self.assertNotIn('kernel panic', self.out)
 
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
@@ -529,9 +620,7 @@ class Shebang(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        bb = ROOT / 'kernel/ldk/build/busybox'
-        if not bb.exists():
-            raise unittest.SkipTest('busybox not built; run the Busybox class first')
+        bb = busybox()
         root = ROOT / 'kernel/ldk/build/shebang-root'
         shutil.rmtree(root, ignore_errors=True)
         (root / 'bin').mkdir(parents=True)
@@ -573,19 +662,7 @@ class Busybox(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        try:
-            bb = subprocess.run(
-                ['docker', 'run', '--rm', '-v', f'{ROOT}/kernel/ldk/build:/out',
-                 'nethos-ldk', 'sh', '-c',
-                 'apt-get update -qq >/dev/null 2>&1;'
-                 ' apt-get install -y -qq busybox-static >/dev/null 2>&1;'
-                 ' cp /bin/busybox /out/busybox'],
-                capture_output=True, text=True, timeout=600)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            raise unittest.SkipTest(f'no ldk container: {e}')
-        if bb.returncode != 0:
-            raise unittest.SkipTest(f'no busybox: {bb.stderr.strip()[:200]}')
-
+        busybox()
         root = ROOT / 'kernel/ldk/build/busybox-root'
         shutil.rmtree(root, ignore_errors=True)
         (root / 'bin').mkdir(parents=True)
@@ -749,7 +826,7 @@ class Initrd(unittest.TestCase):
         root = ROOT / 'kernel/ldk/build/initrd-root'
         shutil.rmtree(root, ignore_errors=True)
         (root / 'etc').mkdir(parents=True)
-        shutil.copy(build_c('hello', 'nk-hello'), root / 'nk-init')
+        shutil.copy(build_c('hello', 'hello-for-initrd'), root / 'nk-init')
         (root / 'etc/nk-greeting').write_text(
             'a userland that is not part of the kernel image\n')
         cls.out = boot('--lkl', '--initrd', str(make_cpio(root, 'initrd.cpio')),

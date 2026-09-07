@@ -43,3 +43,5 @@ kernel/ldk/build/busybox.cpio
 kernel/ldk/build/bbinit
 kernel/ldk/build/shebang-root/
 kernel/ldk/build/shebang.cpio
+kernel/ldk/build/interactive-root/
+kernel/ldk/build/interactive.cpio

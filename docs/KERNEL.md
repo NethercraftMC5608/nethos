@@ -736,51 +736,62 @@ total 1932
 written
 ```
 
-### Input: as far as it goes
+### Input, and a shell that reads it
 
-The console can carry output and the receive path now reaches nk, but a
-keystroke does not yet arrive at a program. What works, verified:
+```
+$ printf 'hello there\nquit\n' | scripts/run-kernel.sh --lkl --initrd sh.cpio
+nk shell ready
+you typed: hello there
+you typed: quit
+goodbye
+```
 
-- The PL011 raises its receive interrupt, nk takes it on the SPI the device
-  tree names, and the bytes arrive in nk's ring. `printf 'hi\n' | run-kernel.sh`
-  puts `h`, `i` and `\n` there.
-- nk raises LKL's interrupt for the console driver, from a thread rather than
-  from the handler, and `lkl_trigger_irq` reports success.
+The path is: the PL011 raises its receive interrupt, nk takes it on the SPI
+the device tree names and buffers the bytes in a ring of its own, a thread
+raises LKL's console interrupt, and the driver's handler asks nk for what it
+has and hands it to the tty.
 
-What does not: the driver's handler does not deliver into the tty, so a shell
-blocked in `read` stays blocked. The likely place is LKL's own interrupt
-dispatch -- a raised interrupt runs when something enters LKL's CPU, and every
-task is blocked inside a system call at that moment -- but making the pump
-enter the CPU with a `getpid` afterwards did not change it, so that is a guess
-and not a finding.
-
-Two real bugs were fixed on the way, both invisible from inside the kernel:
+Four things were wrong on the way, and three of them were the same mistake --
+**data delivered before there was anything to receive it is data thrown
+away**:
 
 **A backgrounded command's standard input is `/dev/null`.** `run-kernel.sh`
 backgrounds QEMU whenever `--timeout` is given, so with a timeout the console
-was write-only and a key typed at it went nowhere -- and nothing about that is
-visible from inside nk, because the PL011 simply never raises its interrupt.
-The fix is one redirection.
+was write-only and a key typed at it went nowhere. Nothing about that is
+visible from inside nk: the PL011 simply never raises its interrupt.
 
 **Clearing "anything stale" cleared something real.** `enable_receive` began
-by writing `ICR` to drop pending interrupts, which is the ordinary thing to do
-when enabling a source. The PL011 raises the receive interrupt *once*, when
-the character arrives, and the raw status is what remembers it -- so a
-character typed before the kernel got that far had its interrupt thrown away
-while the character itself sat in the register, and the input then waited for
-a keystroke that had already happened. Nothing is cleared there now; with both
-sources masked, a stale bit cannot have interrupted anything anyway.
+by writing `ICR`, which is the ordinary thing to do when enabling an interrupt
+source. The PL011 raises the receive interrupt *once*, when the character
+arrives, and the raw status is what remembers it -- so a character typed
+before the kernel got that far had its interrupt discarded while the character
+itself sat in the register, and the input then waited for a keystroke that had
+already happened.
 
-And one design point that is the same lesson nk learned with timers: **raising
-LKL's interrupt takes LKL's CPU lock, and a handler must not take a lock.**
-The UART handler only buffers and marks; a thread does the part that can
-block. Doing it in the handler blocks whichever task was interrupted, on a
-half-finished exception stack.
+**A flip buffer with no tty takes every byte and delivers none.** The port is
+where the line discipline hangs, and until an `open` has attached one there is
+nowhere for the characters to go. `tty_insert_flip_string` accepted all eight
+bytes and reported `tty=NULL`; they were gone. The driver collects nothing
+until somebody has the console open, and the open drains the ring -- so keys
+typed before init gets that far, which is *every* key when the input is a
+pipe, wait rather than being handed over early.
+
+**And raising LKL's interrupt takes LKL's CPU lock**, which a handler must not
+do -- the lesson nk already learned with timers. The UART handler only buffers
+and marks; a thread does the part that can block.
+
+Worth recording how the last one was found, because two guesses came first and
+both were wrong. Guess one: LKL's interrupt dispatch was not running because
+every task was blocked inside a system call. Guess two: the pump needed to
+enter LKL's CPU itself. The measurement that settled it took one line -- print
+when Linux asks nk for input -- and it printed, which killed both guesses at
+once and pointed at the tty. The next line printed what the tty did with the
+bytes, and `tty=NULL` was the answer.
 
 ### What a real binary still cannot do
 
-Threads, signals, and any `mmap` of a file. Input reaches nk but
-not yet the program that is waiting for it -- see above. The rootfs is memory-backed,
+Threads, signals, and any `mmap` of a file. Nothing survives a reboot:
+the rootfs is memory-backed. The rootfs is memory-backed,
 so nothing survives a reboot.
 
 ### The process image: a stack, a heap, and mappings
