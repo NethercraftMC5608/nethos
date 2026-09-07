@@ -392,7 +392,11 @@ the one below it.
 - [x] **Pixels on screen.** `FBIOPUT_VSCREENINFO` makes the DRM fbdev helper
       set the mode, and a screendump from QEMU's monitor shows the gradient a
       program at EL0 drew.
-- [ ] **A persistent root.** The rootfs is still memory-backed: an initrd is
+- [x] **A real filesystem on real storage.** ext4 on virtio-blk, mounted by
+      Linux's own ext4, read and written from EL0, surviving a reboot. Not yet
+      a root filesystem: that means `switch_root`, which wants to be pid 1 in
+      an initramfs.
+- [ ] **A root filesystem proper.** The rootfs is still memory-backed: an initrd is
       unpacked into RAM and nothing survives a reboot. virtio-blk works under
       the shim; giving Linux a real block device under LKL is the next step.
 - [x] **`execve`.** nk's own, since LKL has no user space to exec into: nk

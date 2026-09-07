@@ -650,6 +650,101 @@ class Shebang(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class PersistentDisk(unittest.TestCase):
+    """A real filesystem on real storage, surviving a reboot.
+
+    Everything nk has written until now lived in a memory-backed rootfs and
+    went when the machine did. This is ext4 on a virtio-blk disk: nk finds the
+    device in its own device tree and hands it to Linux, Linux's own ext4
+    mounts it, and a program at EL0 reads a file that was put there by
+    mke2fs on the host and appends one of its own.
+
+    The test boots twice on the same image, which is the only way to tell
+    persistence from a filesystem that merely worked.
+    """
+
+    IMAGE = ROOT / 'kernel/ldk/build/root.img'
+
+    @classmethod
+    def setUpClass(cls):
+        bb = ROOT / 'kernel/ldk/build/busybox'
+        if not bb.exists():
+            raise unittest.SkipTest('busybox not built; run the Busybox class first')
+
+        # The image, built by mke2fs -d, which populates a filesystem from a
+        # directory without needing to mount anything or be root.
+        src = ROOT / 'kernel/ldk/build/root-src'
+        shutil.rmtree(src, ignore_errors=True)
+        (src / 'etc').mkdir(parents=True)
+        (src / 'etc/greeting').write_text('this file lives on a real disk\n')
+        cls.IMAGE.unlink(missing_ok=True)
+        try:
+            mk = subprocess.run(
+                ['docker', 'run', '--rm', '-v', f'{ROOT}:/w', '-w', '/w', 'nethos-ldk',
+                 'sh', '-c',
+                 'command -v mke2fs >/dev/null ||'
+                 ' { apt-get update -qq >/dev/null 2>&1;'
+                 '   apt-get install -y -qq e2fsprogs >/dev/null 2>&1; };'
+                 ' mke2fs -q -t ext4 -d kernel/ldk/build/root-src -F'
+                 ' kernel/ldk/build/root.img 64M'],
+                capture_output=True, text=True, timeout=600)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            raise unittest.SkipTest(f'no ldk container: {e}')
+        if mk.returncode != 0:
+            raise unittest.SkipTest(f'mke2fs failed: {mk.stderr.strip()[:200]}')
+
+        root = ROOT / 'kernel/ldk/build/disk-root'
+        shutil.rmtree(root, ignore_errors=True)
+        (root / 'bin').mkdir(parents=True)
+        (root / 'dev').mkdir()
+        (root / 'mnt').mkdir()
+        shutil.copy(bb, root / 'bin/busybox')
+        init = root / 'nk-init'
+        init.write_text(
+            '#!/bin/busybox sh\n'
+            'busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null\n'
+            # nk launches two processes; the second finds the disk already
+            # mounted, which is a race in the test rather than in the kernel.
+            'busybox mount -t ext4 /dev/vda /mnt 2>/dev/null || {\n'
+            '  echo "root: another process has it"; exit 0; }\n'
+            'echo "root: ext4 mounted from /dev/vda"\n'
+            'busybox cat /mnt/etc/greeting\n'
+            'echo "root: boot log so far:"\n'
+            'busybox cat /mnt/etc/boots 2>/dev/null || echo "   (none: first boot)"\n'
+            'echo "a boot happened" >> /mnt/etc/boots\n'
+            'busybox sync\n'
+            'busybox umount /mnt\n'
+            'echo "root: done"\n')
+        init.chmod(0o755)
+        cpio = make_cpio(root, 'disk.cpio')
+
+        cls.first = boot('--lkl', '--disk', str(cls.IMAGE), '--initrd', str(cpio),
+                         timeout=240, watchdog=120)
+        cls.second = boot('--lkl', '--disk', str(cls.IMAGE), '--initrd', str(cpio),
+                          timeout=240, watchdog=120)
+
+    def test_ext4_mounts_from_the_disk(self):
+        self.assertIn('root: ext4 mounted from /dev/vda', self.first)
+
+    def test_it_reads_a_file_put_there_by_the_host(self):
+        self.assertIn('this file lives on a real disk', self.first)
+
+    def test_the_first_boot_finds_no_log(self):
+        self.assertIn('(none: first boot)', self.first)
+
+    def test_the_second_boot_reads_what_the_first_wrote(self):
+        # The whole point: this line is on the disk because a program running
+        # on nk put it there, on a previous boot of the machine.
+        self.assertIn('a boot happened', self.second)
+        self.assertNotIn('(none: first boot)', self.second)
+
+    def test_nothing_faulted(self):
+        for out in (self.first, self.second):
+            self.assertNotIn('fault in user space', out)
+            self.assertNotIn('kernel panic', out)
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
 class Gpu(unittest.TestCase):
     """A GPU, driven by Linux, on nk.
 

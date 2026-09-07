@@ -48,3 +48,7 @@ kernel/ldk/build/interactive.cpio
 kernel/ldk/build/gpu-root/
 kernel/ldk/build/gpu.cpio
 kernel/ldk/build/fbtest
+kernel/ldk/build/root.img
+kernel/ldk/build/root-src/
+kernel/ldk/build/disk-root/
+kernel/ldk/build/disk.cpio

@@ -925,6 +925,31 @@ Three flags exist because this was hard to see into: `--gpu`, `QEMU_LOG` for
 the machine's own complaints about what the guest did, and `NK_MONITOR` for a
 screenshot.
 
+### A real filesystem, on real storage
+
+```
+root: ext4 mounted from /dev/vda
+this file lives on a real disk
+root: boot log so far:
+a boot happened
+```
+
+Everything nk had written until now lived in a memory-backed rootfs and went
+when the machine did. That is ext4 on a virtio-blk disk: nk finds the device
+in its own device tree and hands it to Linux, Linux's own ext4 mounts it, and
+a program at EL0 reads a file `mke2fs` put there on the host and appends one
+of its own. The second boot reads what the first wrote, which is the only way
+to tell persistence from a filesystem that merely worked.
+
+The image is built with `mke2fs -d`, which populates a filesystem from a
+directory without mounting anything or being root -- worth knowing, because
+the usual way to build a root image needs both.
+
+The disk is mounted by the program nk runs, not by nk. A root filesystem
+proper means `switch_root`, and that wants to be pid 1 in an initramfs, which
+nk's processes are not: they are ordinary Linux tasks that nk attached. That
+is a real distinction and this does not claim to have crossed it.
+
 ### What a real binary still cannot do
 
 Threads, signals, and any `mmap` of a file. Nothing survives a reboot: the
