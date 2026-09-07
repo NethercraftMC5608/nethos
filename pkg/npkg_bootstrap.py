@@ -187,6 +187,17 @@ SETS = {
     #
     # python3-minimal rather than python3: npkg needs the standard library and
     # nothing else, and the difference is about 30MB. See docs/INSTALLER.md.
+    # A 2D installer with fonts; the full desktop is carried but not started.
+    "graphics": ["firmware-intel-graphics", "firmware-nvidia-graphics"],
+    "installer-gui": [
+        "python3-tk", "xserver-xorg-core", "xserver-xorg-input-libinput",
+        "xserver-xorg-video-fbdev", "xserver-xorg-video-vesa", "xinit",
+        "x11-xserver-utils", "xauth", "xterm", "fontconfig",
+        "fonts-dejavu-core", "fonts-noto-core", "console-setup",
+        "live-boot", "live-boot-initramfs-tools", "grub-pc-bin",
+        "firmware-intel-graphics", "firmware-nvidia-graphics",
+    ],
+
     "installer": [
         "busybox", "python3-minimal", "libpython3-stdlib",
         "parted", "e2fsprogs", "dosfstools", "util-linux",

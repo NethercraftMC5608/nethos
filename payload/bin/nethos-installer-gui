@@ -1,0 +1,33 @@
+#!/bin/sh
+# Try hardware KMS in CPU-rendered 2D, then the firmware framebuffer.
+set -u
+mkdir -p /var/log/nethos /run/nethos /etc/X11
+export PATH=/usr/bin:/usr/sbin:/bin:/sbin
+export LIBGL_ALWAYS_SOFTWARE=1
+export NETHOS_INSTALLER_MEDIA=1
+export NETHOS_PINNED_PAYLOAD=1
+if grep -qw nethos.installer=text /proc/cmdline; then
+    exec python3 /usr/share/nethos/installer/gui/text.py
+fi
+for driver in modesetting fbdev vesa; do
+    cat > /run/nethos/xorg-installer.conf <<EOF
+Section "Device"
+ Identifier "Installer display"
+ Driver "$driver"
+ Option "AccelMethod" "none"
+ Option "ShadowFB" "true"
+EndSection
+Section "ServerFlags"
+ Option "AutoAddDevices" "true"
+EndSection
+EOF
+    printf 'Trying %s (2D)\n' "$driver" >> /var/log/nethos/graphics.log
+    xinit /usr/bin/python3 /usr/share/nethos/installer/gui/app.py -- \
+        /usr/lib/xorg/Xorg :0 vt1 -keeptty -nolisten tcp \
+        -config /run/nethos/xorg-installer.conf \
+        -logfile "/var/log/nethos/Xorg-$driver.log" \
+        >> /var/log/nethos/graphics.log 2>&1
+    # Xinit returns only if the display or installer exits. Keep a console usable.
+done
+printf '\nGraphical startup failed. Continuing with the text installer.\n'
+exec python3 /usr/share/nethos/installer/gui/text.py

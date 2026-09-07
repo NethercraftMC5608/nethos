@@ -9,6 +9,7 @@
 #   --hostname NAME    system hostname (default nethos)
 #   --no-confirm       skip the typed confirmation (for unattended installs)
 #   --layout ab|single how the disk is carved up (default: ab on >=64G)
+#   --source-root DIR  copy a verified, mounted offline NETHOS system image
 #   --online           build the system from the archive instead of copying
 #                      this one -- what the lightweight installer image uses,
 #                      because there is no full system on it to copy
@@ -31,6 +32,7 @@ CONFIRM=1
 LIST=0
 LAYOUT=""
 SLOT_SIZE=""
+SOURCE_ROOT="/"
 NETH_USER="${NETH_USER:-neth}"
 
 while [ $# -gt 0 ]; do
@@ -38,6 +40,7 @@ while [ $# -gt 0 ]; do
         --target|-t) TARGET="${2:?--target needs a device}"; shift 2 ;;
         --hostname) HOSTNAME_NEW="${2:?}"; shift 2 ;;
         --dry-run|-n) DRY_RUN=1; shift ;;
+        --source-root) SOURCE_ROOT="${2:?}"; shift 2 ;;
         --online) ONLINE=1; shift; continue ;;
         --no-confirm) CONFIRM=0; shift ;;
         --layout) LAYOUT="${2:?--layout needs ab or single}"; shift 2 ;;
@@ -84,8 +87,13 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 live_device() {
     # The disk the live ISO itself came from — never a valid target.
     local src
-    src=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)
-    [ -n "$src" ] && lsblk -no PKNAME "$src" 2>/dev/null | head -1
+    for medium in /run/live/medium /run/archiso/bootmnt; do
+        src=$(findmnt -no SOURCE "$medium" 2>/dev/null || true)
+        [ -n "$src" ] || continue
+        parent=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1)
+        printf '%s\n' "${parent:-$(basename "$src")}"
+        return
+    done
 }
 
 LIVE_DISK="$(live_device || true)"
@@ -231,6 +239,16 @@ if [ -n "$missing" ]; then
   Nothing has been changed."
 fi
 
+if [ "$SOURCE_ROOT" != / ]; then
+    [ -r "$SOURCE_ROOT/etc/nethos/system-image.json" ] \
+        || die "not a NETHOS system image: $SOURCE_ROOT"
+    [ -d "$SOURCE_ROOT/usr" ] && [ -d "$SOURCE_ROOT/boot" ] \
+        || die "incomplete system image"
+fi
+if [ "${ONLINE:-0}" = 1 ]; then
+    ip route | grep -q '^default' || die "no network; connect or choose the offline system file"
+fi
+
 say "Partitioning $TARGET"
 # --------------------------------------------------------------------------
 wipefs -a "$TARGET"
@@ -324,7 +342,7 @@ if [ "${ONLINE:-0}" = 1 ]; then
     # old, still installs a working system.
     NPKG_BASE=$(dirname "$NPKG_DIR")
     PAYLOAD_URL="${NETHOS_PAYLOAD_URL:-https://codeload.github.com/NethercraftMC5608/nethos/tar.gz/refs/heads/main}"
-    if [ -w "$NPKG_BASE" ]; then
+    if [ "${NETHOS_PINNED_PAYLOAD:-0}" != 1 ] && [ -w "$NPKG_BASE" ]; then
         say "Refreshing the NETHOS payload from the repository"
         if curl -fL --retry 2 --retry-delay 2 -o /tmp/nethos-src.tar.gz "$PAYLOAD_URL" 2>/dev/null; then
             rm -rf /tmp/nethos-src && mkdir -p /tmp/nethos-src
@@ -369,7 +387,7 @@ if [ "${ONLINE:-0}" = 1 ]; then
     # set is installed as before -- a slow install is recoverable, a laptop
     # with no wifi firmware is not.
     FW=""
-    if command -v nethos-firmware-scan >/dev/null 2>&1; then
+    if [ "${NETHOS_PINNED_PAYLOAD:-0}" != 1 ] && command -v nethos-firmware-scan >/dev/null 2>&1; then
         FW=$(nethos-firmware-scan 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
     fi
     if [ -n "$FW" ]; then
@@ -379,19 +397,19 @@ if [ "${ONLINE:-0}" = 1 ]; then
     fi
 
     say "Building the system on $TARGET"
-    if curl -fsL --retry 2 -o /tmp/repo-index.json "$REPO_URL/index.json" 2>/dev/null; then
+    if [ "${NETHOS_PINNED_PAYLOAD:-0}" != 1 ] && curl -fsL --retry 2 -o /tmp/repo-index.json "$REPO_URL/index.json" 2>/dev/null; then
         say "  from the NETHOS repository (prebuilt; no conversion on this machine)"
         python3 -u "$NPKG_DIR/npkg_bootstrap.py" "$MNT" \
-            --set base --set system --set kernel --set desktop --set firmware --set net \
+            --set base --set system --set kernel --set desktop --set firmware --set browser --set net --set graphics \
             --arch amd64 --user "$NETH_USER" --work /tmp/npkg-work --keep \
             ${FW:+--firmware-packages "$FW"} \
             --repo "$REPO_URL" \
             || die "the system could not be built -- nothing was written to the bootloader"
     else
-        say "  the repository is unreachable; converting Debian packages instead"
+        say "  using Debian packages with the bundled NETHOS desktop"
         say "  (this is much slower on an older machine)"
         python3 -u "$NPKG_DIR/npkg_bootstrap.py" "$MNT" \
-            --set base --set system --set kernel --set desktop --set firmware --set net \
+            --set base --set system --set kernel --set desktop --set firmware --set browser --set net --set graphics \
             --arch amd64 --user "$NETH_USER" --work /tmp/npkg-work --keep \
             ${FW:+--firmware-packages "$FW"} \
             || die "the system could not be built -- nothing was written to the bootloader"
@@ -404,6 +422,7 @@ if [ "${ONLINE:-0}" = 1 ]; then
     # release asset so an installer that is a hundred megabytes does not have
     # to carry forty of them. Failing to fetch it is not fatal: Debian's kernel
     # is a working system, and nethos-kernel install-tar can do this later.
+    if [ "${NETHOS_PINNED_PAYLOAD:-0}" != 1 ]; then
     KURL="${NETHOS_KERNEL_URL:-https://github.com/Caleb22589/nethos/releases/download/kernel-7.2.0/linux-7.2.0-x86_64.tar.gz}"
     say "Fetching the NETHOS kernel"
     if curl -fL --retry 3 --retry-delay 2 -o /tmp/nethos-kernel.tgz "$KURL" 2>/dev/null; then
@@ -485,6 +504,8 @@ if [ "${ONLINE:-0}" = 1 ]; then
         say "  could not fetch it; nethos-session falls back to nethos-view (Python)"
     fi
 
+    fi
+
     # The desktop, the tools and the shell: everything the image build installs
     # after the packages land.
     PAYLOAD_DIR=""
@@ -502,7 +523,7 @@ else
     rsync -aAXH --info=progress2 \
         --exclude=/dev/ --exclude=/proc/ --exclude=/sys/ --exclude=/tmp/ \
         --exclude=/run/ --exclude=/mnt/ --exclude=/media/ --exclude=/lost+found \
-        / "$MNT/"
+        "$SOURCE_ROOT/" "$MNT/"
 fi
 
 # The disk being installed to is not a live stick, whatever it was copied from.
@@ -555,6 +576,10 @@ set -euo pipefail
 # Live-only pieces that must not survive onto a real install.
 rm -f /etc/systemd/system/multi-user.target.wants/nethos-live-setup.service
 rm -f /etc/systemd/system/nethos-live-setup.service
+rm -f /etc/systemd/system/multi-user.target.wants/nethos-installer-gui.service
+rm -f /etc/systemd/system/nethos-installer-gui.service
+rm -f /etc/systemd/system/getty@tty1.service.d/installer.conf
+rm -f /etc/initramfs-tools/conf.d/nethos-live
 rm -f /etc/mkinitcpio.conf.d/archiso.conf
 rm -rf /etc/systemd/system/getty@tty1.service.d/autovt.conf
 rm -f /etc/systemd/system/multi-user.target.wants/{pacman-init,choose-mirror,reflector}.service 2>/dev/null || true
@@ -646,8 +671,7 @@ grub-mkconfig -o /boot/grub/grub.cfg
 # copied. install-nethos.sh puts the shell, the apps and the nethos-* tools in
 # place and enables the services; --no-packages because npkg already ran.
 if [ -f /root/payload/install-nethos.sh ]; then
-    sh /root/payload/install-nethos.sh --no-packages || \
-        echo "WARNING: the NETHOS layer did not install cleanly"
+    bash /root/payload/install-nethos.sh --no-packages
     rm -rf /root/payload
 fi
 

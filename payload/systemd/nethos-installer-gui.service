@@ -1,0 +1,20 @@
+[Unit]
+Description=NETHOS minimal graphical installer
+ConditionPathExists=/etc/nethos/live
+After=systemd-udev-settle.service NetworkManager.service
+Wants=NetworkManager.service systemd-udev-settle.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nethos-installer-gui
+StandardInput=tty
+StandardOutput=journal+console
+StandardError=journal+console
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+
+[Install]
+WantedBy=multi-user.target
