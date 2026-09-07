@@ -384,6 +384,13 @@ the one below it.
       it -- a level-triggered line nk cannot service is an interrupt storm
       that starves the thread trying to report it. Not yet reliable past the
       first read.
+- [x] **A GPU.** virtio-gpu handed to Linux over real MMIO, `virtio_gpu`
+      initialised on DRM minor 0, `/dev/dri/card0` and `renderD128`, a
+      connector with real modes, and a program writing pixels into
+      `/dev/fb0`. Needed Linux to have virtual memory of its own, a modern
+      virtio transport, and LKL's PCI DMA ops out of the way.
+- [ ] **A KMS modeset**, so the pixels are scanned out. One ioctl against
+      card0; until then QEMU says "Display output is not active".
 - [ ] **A persistent root.** The rootfs is still memory-backed: an initrd is
       unpacked into RAM and nothing survives a reboot. virtio-blk works under
       the shim; giving Linux a real block device under LKL is the next step.

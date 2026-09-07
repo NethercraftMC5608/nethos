@@ -845,54 +845,77 @@ process reading concurrently, can hang. The suspicion is the unmask handshake
 Linux's handler having acknowledged the device -- but that is a suspicion and
 the measurement has not been done.
 
-### What actually stands between here and graphics
+### Graphics: what it took, and what is left
 
-The path above is the path a GPU takes: virtio-gpu is a virtio-mmio device
-like the disk. So the obvious next step was to switch on `CONFIG_DRM` and
-`CONFIG_DRM_VIRTIO_GPU` and hand Linux the GPU transport.
+nk has a GPU. `virtio_gpu` is initialised on DRM minor 0, `/dev/dri/card0`
+and `/dev/dri/renderD128` exist, the connector reports real modes, and
+`kernel/init/fbtest.c` writes a gradient into `/dev/fb0` -- through `write()`,
+because a DRM dumb buffer has to be mapped and a shared file-backed mapping is
+not something nk can do yet.
 
-`CONFIG_DRM_VIRTIO_GPU` **depends on `MMU`**, and `arch/lkl` has its own MMU
-implementation which is off by default. Turning it on builds cleanly and then
-Linux dies before it has printed anything, jumping through a null pointer in
-`bootmem_init`:
+The device arrives the same way the disk does: nk finds it in its own device
+tree, hands it to Linux with `virtio_mmio_device_add`, and routes its
+interrupt. What made it hard was that `CONFIG_DRM_VIRTIO_GPU` depends on
+`MMU`, and everything below follows from turning that on.
 
-```c
-	lkl_ops->shmem_init(mem_size);
-	_memory_start = lkl_ops->shmem_mmap(lkl_va_base, 0, mem_size, prot);
-```
+**Linux needed virtual memory of its own**, which is written up above. Four
+host operations, a window nk reserves before any process exists, and Linux's
+linear map made identity with *real* physical memory -- because LKL's `__pa()`
+is the identity and a device programmed with an address Linux invented reads
+memory that is not there.
 
-nk implements neither. On a Unix host they are a shared memory object and an
-`mmap` of it; what they *mean* is that Linux wants to map the same physical
-memory at more than one virtual address -- which is what an MMU is for, and
-what nk has never had to offer it. Every LKL host until now has been a process
-that could ask its own kernel for that. nk is the kernel, and would have to
-provide it: a region of address space that is Linux's, a way to map physical
-pages into it more than once, and the page tables underneath. nk has page
-tables and could do this. It is a piece of work, not a configuration line.
+Then four separate obstacles, each invisible in its own way:
 
-**That is the real gate, and it was not the one I expected.** Threads and
-shared file-backed `mmap` are still missing and Mesa still needs both, but
-they are behind this: with `MMU` off there is no DRM to have buffers in.
+**The transport was legacy.** QEMU's `virt` builds its virtio-mmio transports
+with `force-legacy` left at true, so they report version 1 and never offer
+`VIRTIO_F_VERSION_1`. `virtio_blk` does not mind -- it speaks the legacy
+protocol -- and `virtio_gpu` returns `-ENODEV`, on a path that is a
+`pr_debug`. The device sits on the bus with `DRIVER_FAILED` and nothing
+anywhere says why. `-global virtio-mmio.force-legacy=false` fixes it, and the
+way to find it is to ask sysfs to bind the driver by hand: the write fails
+with the probe's own errno.
 
-So, measured rather than estimated:
+**A reverted patch that had not reverted.** `CONFIG_LKL_MEMORY_START` was
+still the six-gigabyte address from an experiment, because reverting it meant
+deleting the code that *set* it -- and the LKL tree is a docker volume that
+survives between builds. A patch there is a migration, not an edit; one that
+only knows how to apply itself can never be changed afterwards.
+`patch-lkl.py` now writes the values it wants every run.
 
-1. **`shmem_init` and `shmem_mmap` in nk** -- give Linux virtual memory of its
-   own. Unlocks `CONFIG_MMU`, and with it DRM, and very likely shared
-   file-backed `mmap` as well, since that is the same machinery.
-2. **Threads** (`CLONE_THREAD`, `futex`). Mesa is threaded throughout.
-3. **A userland with `libdrm` and Mesa**, which is a rootfs problem rather
-   than a kernel one, and `llvmpipe` for software rendering.
+**A patch in the wrong half of an `#ifdef`.** `VMALLOC_START` and `STACK_TOP`
+were set in the `#ifndef CONFIG_MMU` branch of `pgtable.h`. With MMU the
+values come from `pgtable-mmu-3level.h`, where vmalloc begins at
+`memory_end + 8MB` -- on top of nk's identity map of RAM. The patch applied,
+reported success, and changed nothing in effect.
 
-There is a shorter road to *pixels*, and it does not lead to Mesa: nk can
-speak virtio-gpu itself. The 2D protocol is a resource, some backing pages, a
-scanout and a flush -- a few hundred lines, no DRM, no `MMU`, and nothing a
-GL implementation could ever use. Worth knowing it exists; worth not
-confusing it with the road above.
+**LKL's DMA ops are PCI's.** `config PCI` selects `ARCH_HAS_DMA_OPS`, which
+makes `lkl_dma_ops` the implementation for every device -- and it calls
+`lkl_ops->pci_ops->map_page` and casts the device to a `struct pci_dev`.
+Legacy virtio never noticed, because it bypasses the DMA API and uses
+`virt_to_phys`; a modern device uses it, and nk died at EL1 on a null
+dereference. Without `CONFIG_PCI`, Linux uses dma-direct, which is exactly
+right now that its linear map is identity with real physical memory.
 
-Accelerated Mesa through virgl is a further question and an uncertain one,
-because the uncertainty is on the *host* side: it needs `virtio-gpu-gl` and
-virglrenderer with a working host GL context under HVF on macOS. That is worth
-settling with an experiment on QEMU alone before any of it involves nk.
+**Nothing is scanned out yet.** Writing to `/dev/fb0` fills a shadow buffer;
+something has to set a mode on the CRTC before the device scans any of it out,
+and QEMU reports "Display output is not active" until it does. `fbcon` does
+that on an ordinary Linux and was tried and backed out: with `CONFIG_VT` it
+also takes the system console, so the kernel log stopped reaching nk's serial
+port -- every test's only view of a boot -- and the guest hung after drawing.
+The right way is a KMS modeset from userspace, one ioctl against `card0`,
+changing nothing else.
+
+After that, Mesa needs two things nk does not have: **threads**
+(`CLONE_THREAD` and `futex`) and **shared file-backed `mmap`**, since DRM
+buffers are `MAP_SHARED` on `card0`. Then it is a rootfs problem -- `libdrm`
+and Mesa, with `llvmpipe` for software rendering. Accelerated Mesa through
+virgl remains a question about the *host*: `virtio-gpu-gl` and virglrenderer
+need a working host GL context under HVF, and that is worth settling with an
+experiment on QEMU alone before any of it involves nk.
+
+Three flags exist because this was hard to see into: `--gpu`, `QEMU_LOG` for
+the machine's own complaints about what the guest did, and `NK_MONITOR` for a
+screenshot.
 
 ### What a real binary still cannot do
 
