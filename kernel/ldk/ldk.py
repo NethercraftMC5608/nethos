@@ -620,14 +620,25 @@ cd linux
 # afternoon on backslashes.
 python3 /shim/ldk/patch-lkl.py /shim
 
-if [ ! -f .config ]; then
+# The configuration is derived from nk.config, and derived again whenever it
+# changes.
+#
+# The tree is a docker volume that survives between builds, so a .config
+# written once is whatever the first build decided. Appending on every build
+# fixes half of that and creates the other half: `olddefconfig` can turn an
+# option on and cannot turn one off by omission, so an experiment stays
+# switched on in the volume after the line that switched it on is deleted --
+# which is how a kernel with a megabyte of unused DRM in it went unnoticed.
+#
+# So: when nk.config changes, start from defconfig. Deterministic, and the
+# only cost is a full rebuild on a file that changes rarely.
+WANT=$(md5sum /shim/lkl/nk.config | cut -d" " -f1)
+if [ ! -f .config ] || [ "$(cat .nk-config-hash 2>/dev/null)" != "$WANT" ]; then
   make ARCH=lkl defconfig >/dev/null
-  # The ordinary console registers at core_initcall, which is a long way into
-  # start_kernel -- so a boot that fails before it produces no output at all,
-  # which is indistinguishable from one that never started. The early console
-  # registers at early_initcall and prints the whole log.
-  echo "CONFIG_LKL_EARLY_CONSOLE=y" >> .config
+  cat /shim/lkl/nk.config >> .config
   make ARCH=lkl olddefconfig >/dev/null
+  echo "$WANT" > .nk-config-hash
+  echo "  configured: from arch/lkl defconfig plus kernel/lkl/nk.config"
 fi
 # -mno-outline-atomics: without it gcc emits calls to __aarch64_*_sync
 # helpers that live in libgcc, and nk has no libgcc. Inline atomics are

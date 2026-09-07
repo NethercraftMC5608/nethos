@@ -845,18 +845,49 @@ process reading concurrently, can hang. The suspicion is the unmask handshake
 Linux's handler having acknowledged the device -- but that is a suspicion and
 the measurement has not been done.
 
-### What this means for graphics
+### What actually stands between here and graphics
 
-The path above is the path a GPU takes. `CONFIG_DRM` is present in
-`arch/lkl`'s configuration and switched off; virtio-gpu is a virtio-mmio
-device like the disk. What stands between here and Mesa is not the device
-plumbing:
+The path above is the path a GPU takes: virtio-gpu is a virtio-mmio device
+like the disk. So the obvious next step was to switch on `CONFIG_DRM` and
+`CONFIG_DRM_VIRTIO_GPU` and hand Linux the GPU transport.
 
-- **Threads.** `CLONE_THREAD` is refused, and Mesa is threaded throughout.
-- **Shared file-backed `mmap`, with writeback.** DRM buffers are `MAP_SHARED`
-  on `/dev/dri/card0`. Private file mappings work; shared ones do not.
-- Then a userland with `libdrm` and Mesa, which is a rootfs problem rather
-  than a kernel one, and `llvmpipe` for software rendering.
+`CONFIG_DRM_VIRTIO_GPU` **depends on `MMU`**, and `arch/lkl` has its own MMU
+implementation which is off by default. Turning it on builds cleanly and then
+Linux dies before it has printed anything, jumping through a null pointer in
+`bootmem_init`:
+
+```c
+	lkl_ops->shmem_init(mem_size);
+	_memory_start = lkl_ops->shmem_mmap(lkl_va_base, 0, mem_size, prot);
+```
+
+nk implements neither. On a Unix host they are a shared memory object and an
+`mmap` of it; what they *mean* is that Linux wants to map the same physical
+memory at more than one virtual address -- which is what an MMU is for, and
+what nk has never had to offer it. Every LKL host until now has been a process
+that could ask its own kernel for that. nk is the kernel, and would have to
+provide it: a region of address space that is Linux's, a way to map physical
+pages into it more than once, and the page tables underneath. nk has page
+tables and could do this. It is a piece of work, not a configuration line.
+
+**That is the real gate, and it was not the one I expected.** Threads and
+shared file-backed `mmap` are still missing and Mesa still needs both, but
+they are behind this: with `MMU` off there is no DRM to have buffers in.
+
+So, measured rather than estimated:
+
+1. **`shmem_init` and `shmem_mmap` in nk** -- give Linux virtual memory of its
+   own. Unlocks `CONFIG_MMU`, and with it DRM, and very likely shared
+   file-backed `mmap` as well, since that is the same machinery.
+2. **Threads** (`CLONE_THREAD`, `futex`). Mesa is threaded throughout.
+3. **A userland with `libdrm` and Mesa**, which is a rootfs problem rather
+   than a kernel one, and `llvmpipe` for software rendering.
+
+There is a shorter road to *pixels*, and it does not lead to Mesa: nk can
+speak virtio-gpu itself. The 2D protocol is a resource, some backing pages, a
+scanout and a flush -- a few hundred lines, no DRM, no `MMU`, and nothing a
+GL implementation could ever use. Worth knowing it exists; worth not
+confusing it with the road above.
 
 Accelerated Mesa through virgl is a further question and an uncertain one,
 because the uncertainty is on the *host* side: it needs `virtio-gpu-gl` and
@@ -865,9 +896,8 @@ settling with an experiment on QEMU alone before any of it involves nk.
 
 ### What a real binary still cannot do
 
-Threads, signals, and any `mmap` of a file. Nothing survives a reboot:
-the rootfs is memory-backed. The rootfs is memory-backed,
-so nothing survives a reboot.
+Threads, signals, and any `mmap` of a file. Nothing survives a reboot: the
+rootfs is memory-backed.
 
 ### The process image: a stack, a heap, and mappings
 
