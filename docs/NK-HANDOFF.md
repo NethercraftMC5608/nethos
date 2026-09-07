@@ -147,6 +147,27 @@ NETHOSD_STATUS_OK kernel=6.12.0+ uptime=3.41
 Next: M2 (compositor). Device MAP_SHARED for dumb buffers is still the
 known-absent display path; wl_shm memfd MAP_SHARED is green.
 
+**Update 2026-09-08, M2 IS GREEN (`3d46279`, merge of `3319251`).**
+Hand-rolled Wayland server+client probe (`kernel/init/wlprobe.c`,
+`scripts/build-wl-test.sh`): server binds `$XDG_RUNTIME_DIR/wayland-0`,
+speaks `wl_display.get_registry` → `wl_registry.global` per wayland.xml
+1.23.1, client prints the globals. Verified on the main checkout
+post-merge (`/tmp/m2-main.log`, 4/4 boots green overall, 0 faults):
+
+```
+WL_GLOBAL name=1 interface=wl_compositor version=4
+WL_GLOBAL name=2 interface=wl_shm version=1
+WL_GLOBAL name=3 interface=wl_output version=2
+WL_GLOBAL name=4 interface=xdg_wm_base version=2
+WL_REGISTRY_OK globals=4
+WL_PROBE_OK
+```
+
+No libwayland needed (probe 72KB + libc; libwayland itself measured only
+238KB installed, so it would also fit — chosen against for closure risk
+against the 99.5%-full address space). Next: bind wl_shm +
+wl_shm_create_pool over SCM_RIGHTS memfd (the M3 buffer path), then M3.
+
 **The live lead:** the serve wedge + the `MemoryError`: which `sys_mmap`
 -12 site fires under the real `nethosd.main()`, and whether the parked
 server `ppoll` is cause or consequence. Cheapest next step: clean

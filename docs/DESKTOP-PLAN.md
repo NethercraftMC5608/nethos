@@ -139,6 +139,18 @@ demand paging or a higher `USER_MMAP_TOP` will be needed before WebKit
 largest single range is 64MB and arenas are never freed, so free-list
 reuse alone cannot fit a 128MB arena either.
 
+## 8. M2 GREEN 2026-09-08 (merge `3d46279`)
+
+Compositor lane, hand-rolled wire protocol (no libwayland), verified on
+the main checkout post-merge (`/tmp/m2-main.log`): server binds
+`$XDG_RUNTIME_DIR/wayland-0`, client connects, receives `wl_registry`,
+prints 4 globals (`wl_compositor 4`, `wl_shm 1`, `wl_output 2`,
+`xdg_wm_base 2`) + `WL_REGISTRY_OK` + `WL_PROBE_OK`, exit 0, `nk: done`,
+0 faults over 4 boots. Files: `kernel/init/wlprobe.c` (258 lines),
+`scripts/build-wl-test.sh`. Next: client binds wl_shm,
+`wl_shm_create_pool` over SCM_RIGHTS memfd + MAP_SHARED (all green
+primitives) to prove the M3 buffer path; then M3 render + screendump.
+
 ## 4. Riskiest unknown + cheapest experiment per lane
 
 - kernel: unknown = WHERE the wedge lives (nk timers? LKL CPU-lock
