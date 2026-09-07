@@ -87,6 +87,18 @@ pub extern "C" fn rust_irq() {
         return;
     }
 
+    // Somebody typed. The bytes go into nk's own ring and Linux is told by an
+    // interrupt of its own: its console driver cannot be called from here,
+    // because LKL's kernel runs under a lock nk does not hold in a handler.
+    if intid != 0 && intid == crate::uart::rx_intid() {
+        crate::uart::console().drain_receive(|_b| {
+            #[cfg(nk_lkl)]
+            crate::console::input(_b);
+        });
+        crate::gic::eoi(intid);
+        return;
+    }
+
     if intid == crate::timer::intid() {
         unsafe { crate::timer::rearm() };
         crate::timer::on_tick();

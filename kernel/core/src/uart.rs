@@ -15,7 +15,14 @@ use core::fmt;
 const PL011_BASE: usize = 0x0900_0000;
 
 const DR: usize = 0x00; // data
-const FR: usize = 0x18; // flag; bit 5 is TXFF, transmit FIFO full
+const FR: usize = 0x18; // flag; bit 4 is RXFE, bit 5 TXFF
+const IMSC: usize = 0x38; // interrupt mask set/clear
+const MIS: usize = 0x40; // masked interrupt status
+const ICR: usize = 0x44; // interrupt clear
+
+const RXFE: u32 = 1 << 4; // receive FIFO empty
+const RXIM: u32 = 1 << 4; // receive interrupt
+const RTIM: u32 = 1 << 6; // receive timeout
 
 pub struct Uart {
     base: usize,
@@ -46,6 +53,55 @@ impl Uart {
             crate::mmio::writel(self.base + DR, byte as u32);
         }
     }
+
+    /// One byte, or None when the receive FIFO is empty.
+    pub fn get(&self) -> Option<u8> {
+        unsafe {
+            if crate::mmio::readl(self.base + FR) & RXFE != 0 {
+                return None;
+            }
+            // The low eight bits are the character; the rest are the framing,
+            // parity and overrun flags, which say the byte arrived badly
+            // rather than that it is a different byte.
+            Some(crate::mmio::readl(self.base + DR) as u8)
+        }
+    }
+
+    /// Ask to be interrupted when input arrives.
+    ///
+    /// Both the receive interrupt and the receive *timeout*. The first fires
+    /// when the FIFO reaches its trigger level -- a quarter full, so eight
+    /// characters -- and on its own it means a person typing one character
+    /// gets no interrupt until they have typed eight. The timeout fires when
+    /// the FIFO is non-empty and has been idle for the length of 32 bits,
+    /// which is what makes a single keystroke arrive.
+    ///
+    /// # Safety
+    /// The GIC must be up, or the interrupt has nowhere to go.
+    pub unsafe fn enable_receive(&self) {
+        // Nothing is cleared here, and that is the point. A character typed
+        // before the kernel got this far is already in the receive register
+        // with its interrupt raised, and the raw status is what remembers
+        // that -- the PL011 raises it once, when the character arrives, not
+        // for as long as the character is there. Clearing "anything stale"
+        // threw exactly that away, and the input then waited for a keystroke
+        // that had already happened. With both sources masked until now, a
+        // stale bit cannot have interrupted anything anyway.
+        crate::mmio::writel(self.base + IMSC, RXIM | RTIM);
+    }
+
+    /// Acknowledge and drain. Returns how many bytes it took.
+    pub fn drain_receive(&self, mut sink: impl FnMut(u8)) -> usize {
+        unsafe {
+            crate::mmio::writel(self.base + ICR, crate::mmio::readl(self.base + MIS));
+        }
+        let mut n = 0;
+        while let Some(b) = self.get() {
+            sink(b);
+            n += 1;
+        }
+        n
+    }
 }
 
 impl fmt::Write for Uart {
@@ -67,6 +123,23 @@ impl fmt::Write for Uart {
 /// path could deadlock on.
 pub fn console() -> Uart {
     Uart::new(PL011_BASE)
+}
+
+/// Which interrupt the PL011 raises, from the device tree. SPI 1 on QEMU's
+/// `virt`, which is INTID 33; the number is read rather than assumed because
+/// assuming it is how a kernel ends up working on exactly one machine.
+static mut RX_INTID: u32 = 0;
+
+pub fn rx_intid() -> u32 {
+    unsafe { RX_INTID }
+}
+
+/// # Safety
+/// The GIC must be initialised.
+pub unsafe fn init_receive(intid: u32) {
+    RX_INTID = intid;
+    console().enable_receive();
+    crate::gic::enable_spi(intid);
 }
 
 #[macro_export]

@@ -36,15 +36,20 @@
  */
 int nk_console_read(char *buf, int max);
 
+/*
+ * Told to nk once, at init, rather than asked for.
+ *
+ * The other direction does not survive: a global function that nothing inside
+ * the kernel calls is dropped by the kernel's own --gc-sections long before
+ * nk's reference to it is resolved, and the link fails with an undefined
+ * symbol whose definition is plainly in the source. An initcall is always
+ * kept, so pushing the number out of one is the arrangement that works.
+ */
+void nk_console_ready(int irq);
+
 static struct tty_driver *nk_tty_driver;
 static struct tty_port nk_tty_port;
 static int nk_console_irq_no = -1;
-
-/* The host asks for this once and raises it whenever input arrives. */
-int lkl_console_irq(void)
-{
-	return nk_console_irq_no;
-}
 
 static irqreturn_t nk_console_isr(int irq, void *dev)
 {
@@ -146,6 +151,8 @@ static int __init nk_console_init(void)
 		nk_console_irq_no = -1;
 
 	register_console(&nk_console);
+	/* Now the host can raise it. */
+	nk_console_ready(nk_console_irq_no);
 	return 0;
 }
 device_initcall(nk_console_init);

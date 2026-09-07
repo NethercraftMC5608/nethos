@@ -266,7 +266,13 @@ if [ "$TIMEOUT" -gt 0 ]; then
     # For the tests: QEMU has no self-imposed deadline and a kernel that hangs
     # would hang CI with it. No coreutils `timeout` on a stock macOS, hence
     # the background-and-wait rather than a one-liner.
-    qemu-system-aarch64 "${ARGS[@]}" &
+    # <&3, because a background command in a non-interactive shell has its
+    # standard input redirected from /dev/null -- so with --timeout the
+    # console became write-only and a key typed at it went nowhere. Nothing
+    # about that is visible from inside the kernel: the PL011 simply never
+    # raises its receive interrupt.
+    exec 3<&0
+    qemu-system-aarch64 "${ARGS[@]}" <&3 &
     qpid=$!
     ( sleep "$TIMEOUT"; kill -TERM "$qpid" 2>/dev/null ) &
     watchdog=$!

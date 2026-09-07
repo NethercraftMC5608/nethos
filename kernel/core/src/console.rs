@@ -21,10 +21,61 @@ static mut HEAD: usize = 0;
 static mut TAIL: usize = 0;
 
 extern "C" {
-    /// Which interrupt to raise. The driver reserves it at init and nk asks
-    /// once; a plain read of an integer, so it needs no lock.
-    fn lkl_console_irq() -> i32;
     fn lkl_trigger_irq(irq: i32) -> i32;
+}
+
+/// Which interrupt to raise, told to nk by the driver's initcall.
+///
+/// Pushed rather than pulled: a global function in the driver that nothing
+/// inside Linux calls is dropped by the kernel's own `--gc-sections`, and the
+/// link then fails on a symbol whose definition is plainly in the source.
+static mut IRQ: i32 = -1;
+
+#[no_mangle]
+pub extern "C" fn nk_console_ready(irq: i32) {
+    unsafe {
+        let flags = crate::sync::irq_save();
+        IRQ = irq;
+        // Anything typed while Linux was still booting is in the ring and the
+        // thread is asleep with nowhere to have sent it.
+        if PUMP != 0 && PENDING {
+            crate::sched::wake(PUMP);
+        }
+        crate::sync::irq_restore(flags);
+    }
+}
+
+/// The thread that tells Linux input has arrived.
+///
+/// Raising LKL's interrupt takes LKL's CPU lock, and taking a lock in an
+/// interrupt handler is the mistake nk already made once with timers: it
+/// blocks the task that happened to be interrupted, on a half-finished
+/// exception stack. So the handler only buffers and marks, and this does the
+/// part that can wait.
+static mut PENDING: bool = false;
+static mut PUMP: usize = 0;
+
+extern "C" fn pump(_: usize) {
+    loop {
+        let flags = crate::sync::irq_save();
+        // Nothing to say, or nowhere yet to say it. A key typed before the
+        // console driver has registered stays pending rather than being
+        // consumed: the driver wakes this thread when it is ready, and the
+        // bytes are already safe in the ring.
+        if !unsafe { PENDING } || unsafe { IRQ } < 0 {
+            crate::sched::block(flags);
+            continue;
+        }
+        unsafe { PENDING = false };
+        unsafe { crate::sync::irq_restore(flags) };
+
+        unsafe { lkl_trigger_irq(IRQ) };
+    }
+}
+
+pub fn start_input_thread() {
+    let id = crate::sched::spawn("console", pump, 0);
+    unsafe { PUMP = id };
 }
 
 /// Accept a byte from the UART. Dropped when the ring is full, which is what
@@ -39,9 +90,14 @@ pub fn input(byte: u8) {
         }
         crate::sync::irq_restore(flags);
     }
-    let irq = unsafe { lkl_console_irq() };
-    if irq >= 0 {
-        unsafe { lkl_trigger_irq(irq) };
+    // Zero until the thread exists, and task zero is the boot thread: waking
+    // it because somebody typed early would mark it ready while it waits on
+    // something else entirely.
+    unsafe {
+        PENDING = true;
+        if PUMP != 0 {
+            crate::sched::wake(PUMP);
+        }
     }
 }
 

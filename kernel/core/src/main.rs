@@ -132,6 +132,13 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
         .expect("no virtual timer in the device tree");
     unsafe { timer::init(ppi + 16) };
 
+    // The console can now be typed into. An SPI's device-tree number is
+    // relative to the first SPI, and the GIC's first SPI is INTID 32.
+    if let Some((_, spi, _)) = fdt.find_compatible("arm,pl011").and_then(|n| n.interrupt(0)) {
+        unsafe { uart::init_receive(spi + 32) };
+        println!("  pl011:  receive on SPI {} (INTID {})", spi, spi + 32);
+    }
+
     sched::init();
 
     psci::init(&fdt);
@@ -148,6 +155,7 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
         // Before Linux starts: its timer callbacks run here, in thread
         // context, not in the interrupt that noticed they were due.
         hostops::start_timer_thread();
+        console::start_input_thread();
         // A watchdog rather than a timeout. Linux either finishes booting or
         // deadlocks, and the difference between the two from outside is
         // nothing at all -- both are a machine that has stopped printing. The
