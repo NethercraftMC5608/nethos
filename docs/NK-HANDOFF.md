@@ -79,17 +79,57 @@ these:**
   1.000s after the UDP round trip.
 - **thread-id aliasing** — real bug, fixed, symptom unchanged.
 - **the IRQ pump wake race** — real bug, fixed, symptom unchanged.
+- **disk presence moving the C repro** — `exitpoll` passes with the virtio
+  disk attached, mounted, and 4MB read through it. Disk alone is not the
+  trigger.
+- **the late #16 face as a kernel wedge** — it was the watchdog stopping the
+  machine after 4x100-tick rounds, not a wedge: `/proc/timer_list` showed the
+  in-flight poll's `hrtimer_wakeup` still queued in the future, and a fresh
+  `lkl_syscall(getpid)` returned 1 at the same moment. Fixed by waiting for
+  init (121-round backstop) in `826e305`.
+- **virtio `intr 0x0` / `status 0x7`** — identical in green boots; no
+  discriminating power for the late face.
+- **lost wakeups in nk's sem layer** — per-sem ups/downs balance on every
+  parked sem; nk delivers every wakeup.
+- **LKL CPU lock stuck mid-wedge** — acquirable from a fresh watchdog entry
+  mid-wedge; no dead owner.
+- **per-task `brk`/`mmap_next` copies** — diverged across threads sharing page
+  tables and handed out overlapping mappings (two overlapping 128MB PROT_NONE
+  reserves measured, EL0 permission fault DFSC 0b001111 in an innocent
+  thread). Fixed by per-TTBR0 shared layout in `826e305`.
+- **`set_user_memory` reading TTBR0** — named the wrong address space at
+  spawn/exec; fixed by passing the root explicitly in `826e305`.
+- **thread-count/lock shape, import size, diag volume for the serve wedge** —
+  5 sleepers + ThreadingHTTPServer + GET serves; +`import nethosd` serves;
+  +real `diag()` at 0.2s serves; +real `backend()`/`SWAY.request` serves. All
+  exonerated; the wedge needs the real `nethosd.main()`.
+- **aarch64 syscall numbers in watchdog reports** — there is no `poll`
+  syscall; glibc `poll()` arrives as `ppoll` (73). 115 is `clock_nanosleep`,
+  not `clone` (220). A growing 115 with exits lagging is healthy sleep loops.
+- **`sys_brk` as the MemoryError source** — it returns the old break on every
+  failure path, never an errno; only `sys_mmap` returning -ENOMEM surfaces to
+  CPython as MemoryError (five sites in `user.rs`, undetermined which).
 
 Those last two are the shape of this bug: it hides behind other real bugs.
 Two correct fixes landed today and neither closed it.
 
-**The live lead:** pseudo-fs mounts (`devtmpfs`, `proc`, `sysfs`) are fine;
-the ext4-on-virtio-blk mount is where the shell wedges. The only thing that
-distinguishes them is a **device interrupt**. Every dump in the whole
-investigation has `lkl-irq blocked` in it, and where we looked, `intr 0x0` on
-the transport. `docs/KERNEL.md` has said for months: *"Not yet reliable past
-the first read; unmask handshake suspected, not measured."* That is still the
-best-supported line and it is still not measured.
+**Update 2026-09-08 (unattended desktop run, `826e305` merged):** the
+netprobe shape is green — `poll-timeout` + `request`/`json` +
+`NETHOSD_SHAPE_OK` in one boot, soak/writeback/signals 3/3. Full nethosd
+moved from the #17 EL0 NULL fault (gone: zero esr/fault lines) to a serve
+wedge: ThreadingHTTPServer binds/listens, the client connects, the GET times
+out; server thread parked in `ppoll`, main thread READY-spinning in
+userspace; snapper + main thread raise `MemoryError` (mmap -ENOMEM site
+still undetermined — needs one `println!` per `sys_mmap` -12 return). The
+rare early face (frozen `armed=224`, child stuck pre-python in execve/fork
+handshake) is still open. M1 still red.
+
+**The live lead:** the serve wedge + the `MemoryError`: which `sys_mmap`
+-12 site fires under the real `nethosd.main()`, and whether the parked
+server `ppoll` is cause or consequence. Cheapest next step: clean
+real-`main()` repro with a net.cpio-identical nk-init (drop the `ip -o`
+pipeline), then the mmap-site logging above. `virtio intr 0x0` and the
+unmask handshake are retired as leads for the late face (see negatives).
 
 ## Also open
 
