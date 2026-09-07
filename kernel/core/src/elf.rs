@@ -1,4 +1,4 @@
-//! A bounded static ELF64 loader description, independent of the MMU.
+//! A bounded ELF64 loader description, independent of the MMU.
 //! Reject unsupported layouts before allocating or modifying any page tables.
 extern crate alloc;
 use alloc::vec::Vec;
@@ -23,6 +23,8 @@ pub struct Image {
     /// them.
     pub phoff: usize,
     pub phnum: usize,
+    pub interpreter: Option<alloc::vec::Vec<u8>>,
+    pub load_bias: u64,
 }
 fn n(bytes: &[u8], off: usize, len: usize) -> Result<u64, &'static str> {
     let s = bytes
@@ -33,42 +35,59 @@ fn n(bytes: &[u8], off: usize, len: usize) -> Result<u64, &'static str> {
         .fold(0, |v, (i, b)| v | ((*b as u64) << (8 * i))))
 }
 pub fn parse(b: &[u8], low: u64, high: u64) -> Result<Image, &'static str> {
+    parse_at(b, low, high, low)
+}
+pub fn parse_at(b: &[u8], low: u64, high: u64, bias: u64) -> Result<Image, &'static str> {
+    let kind = n(b, 16, 2)?;
+    let bias = if kind == 3 { bias } else { 0 };
     if b.get(..7) != Some(b"\x7fELF\x02\x01\x01")
-        || n(b, 16, 2)? != 2
+        || !matches!(kind, 2 | 3)
         || n(b, 18, 2)? != 183
         || n(b, 20, 4)? != 1
         || n(b, 52, 2)? != 64
         || n(b, 54, 2)? != 56
     {
-        return Err("expected static little-endian AArch64 ELF64");
+        return Err("expected little-endian AArch64 ELF64");
     }
-    let entry = n(b, 24, 8)?;
+    let entry = n(b, 24, 8)?.checked_add(bias).ok_or("entry overflow")?;
     let phoff = usize::try_from(n(b, 32, 8)?).map_err(|_| "overflow")?;
     let count = n(b, 56, 2)? as usize;
     if count == 0 || count > 32 {
         return Err("invalid program header count");
     }
+    let mut interpreter = None;
     let mut segments: Vec<Segment> = Vec::new();
     for i in 0..count {
         let p = phoff.checked_add(i * 56).ok_or("overflow")?;
         b.get(p..p.checked_add(56).ok_or("overflow")?)
             .ok_or("truncated headers")?;
         let kind = n(b, p, 4)?;
-        // PT_DYNAMIC and PT_INTERP mean something has to be relocated or an
-        // interpreter mapped, and nk does neither. PT_TLS does *not* belong
-        // on that list: a static glibc sets its own thread pointer from its
-        // own program headers, so the loader's whole part in TLS is to map
-        // the segment (which PT_LOAD already covers) and report AT_PHDR
-        // correctly. Refusing it refused every static binary gcc produces.
-        if kind == 2 || kind == 3 {
-            return Err("dynamic ELF is not supported yet");
+        if kind == 3 {
+            if interpreter.is_some() {
+                return Err("multiple interpreters");
+            }
+            let offset = n(b, p + 8, 8)?;
+            let size = n(b, p + 32, 8)?;
+            if size < 2 || size > 4096 {
+                return Err("invalid interpreter");
+            }
+            let end = offset.checked_add(size).ok_or("interpreter overflow")?;
+            let path = b
+                .get(offset as usize..end as usize)
+                .ok_or("truncated interpreter")?;
+            if path[0] != b'/' || path.last() != Some(&0) || path[..path.len() - 1].contains(&0) {
+                return Err("invalid interpreter path");
+            }
+            interpreter = Some(path.to_vec());
         }
         if kind != 1 {
             continue;
         }
         let flags = n(b, p + 4, 4)?;
         let offset = n(b, p + 8, 8)?;
-        let address = n(b, p + 16, 8)?;
+        let address = n(b, p + 16, 8)?
+            .checked_add(bias)
+            .ok_or("address overflow")?;
         let filesz = n(b, p + 32, 8)?;
         let memsz = n(b, p + 40, 8)?;
         let align = n(b, p + 48, 8)?;
@@ -110,7 +129,14 @@ pub fn parse(b: &[u8], low: u64, high: u64) -> Result<Image, &'static str> {
     {
         return Err("entry is not executable file data");
     }
-    Ok(Image { entry, segments, phoff, phnum: count })
+    Ok(Image {
+        entry,
+        segments,
+        phoff,
+        phnum: count,
+        interpreter,
+        load_bias: bias,
+    })
 }
 
 #[cfg(test)]
@@ -162,7 +188,6 @@ mod tests {
     fn invalid_headers_and_segments() {
         for (off, value, len) in [
             (18, 62, 2),
-            (16, 3, 2),
             (64, 3, 4),
             (64, 2, 4),
             (64, 7, 4),
@@ -186,6 +211,32 @@ mod tests {
                 "field {off}, value {value}"
             );
         }
+    }
+    #[test]
+    fn pie_is_rebased() {
+        let mut b = fixture();
+        put(&mut b, 16, 3, 2);
+        let image = parse_at(&b, 0x1000, 0x10000, 0x4000).unwrap();
+        assert_eq!(image.entry, 0x5000);
+        assert_eq!(image.segments[0].address, 0x5000);
+        assert!(parse_at(&b, 0x1000, 0x10000, u64::MAX).is_err());
+    }
+    #[test]
+    fn interpreter_path_is_bounded_and_nul_terminated() {
+        let mut b = fixture();
+        put(&mut b, 56, 2, 2);
+        put(&mut b, 120, 3, 4);
+        put(&mut b, 128, 200, 8);
+        put(&mut b, 152, 8, 8);
+        b[200..208].copy_from_slice(b"/ld.so\0\0");
+        assert!(parse(&b, 0x1000, 0x10000).is_err());
+        put(&mut b, 152, 7, 8);
+        assert_eq!(
+            parse(&b, 0x1000, 0x10000).unwrap().interpreter.unwrap(),
+            b"/ld.so\0"
+        );
+        b[206] = b'x';
+        assert!(parse(&b, 0x1000, 0x10000).is_err());
     }
     #[test]
     fn overlapping_pages_rejected() {

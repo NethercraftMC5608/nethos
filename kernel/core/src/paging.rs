@@ -416,8 +416,9 @@ pub unsafe fn copy_user_address_space(parent: u64) -> Option<u64> {
             // AP_RO_ANY is *both* AP bits, and AP_RW_ANY is one of them, so
             // "read-only" is the pair being present rather than the field
             // being non-zero -- a writable page has bit 6 set too.
-            let writable = e3 & pte::AP_RO_ANY != pte::AP_RO_ANY;
+            let writable = e3 & (1 << 7) == 0;
             map_user_permissions(child, va, page as u64, 4096, exec, writable);
+            if e3 & (1 << 6) == 0 { protect_user_none(child, va, 4096); }
         }
     }
     Some(child)
@@ -744,4 +745,18 @@ pub unsafe fn destroy_user_address_space(root: u64) {
         crate::frames::free(l1 as *mut u8);
     }
     crate::frames::free(l0 as *mut u8);
+}
+
+/// Retain backing pages while removing all EL0 access (PROT_NONE).
+/// # Safety
+/// Same address-space ownership requirements as protect_user.
+pub unsafe fn protect_user_none(root: u64, va: u64, size: u64) -> bool {
+    if !protect_user(root,va,size,false,false) { return false; }
+    for v in (va..va+size).step_by(4096) {
+        let mut table = table_of(root) as *mut u64;
+        for shift in [39,30,21] { table = (*table.add(((v>>shift)&511) as usize) & ADDR) as *mut u64; }
+        *table.add(((v>>12)&511) as usize) &= !(1<<6);
+    }
+    core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack));
+    true
 }

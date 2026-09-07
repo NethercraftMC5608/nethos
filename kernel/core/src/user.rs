@@ -19,6 +19,7 @@
 
 use crate::frames::{self, PAGE};
 use crate::paging;
+use alloc::vec::Vec;
 use crate::println;
 
 /// Where a process's image goes: 0x400000, which is where aarch64 links a
@@ -199,6 +200,10 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // The same rule as `write`, and it has to be here too because this is
         // the call a libc `printf` actually makes.
         sys_writev(frame.x[0], frame.x[1], frame.x[2])
+    } else if frame.x[8] == 435 {
+        // clone3 describes an EL0 context, not an LKL kernel-thread entry.
+        // libc will fall back to clone; forwarding it can call a null fn.
+        -38
     } else if matches!(frame.x[8], 220 | 260) {
         // clone and wait4. Both are nk's for the same reason execve is: the
         // address space and the exit status are nk's, not Linux's.
@@ -215,7 +220,7 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // reach. They are the calls nk has to answer itself.
         match frame.x[8] {
             214 => sys_brk(frame.x[0]),
-            222 => sys_mmap(frame.x[0], frame.x[1], frame.x[3]),
+            222 => sys_mmap(frame.x[0], frame.x[1], frame.x[2], frame.x[3], frame.x[4] as i64, frame.x[5]),
             215 => sys_munmap(frame.x[0], frame.x[1]),
             226 => sys_mprotect(frame.x[0], frame.x[1], frame.x[2]),
             96 => sys_set_tid_address(),
@@ -361,42 +366,57 @@ fn sys_brk(addr: u64) -> i64 {
 
 /// # mmap(addr, len, prot, flags, fd, off)
 ///
-/// Anonymous private mappings only, which is what a libc's malloc asks for.
-/// A file mapping needs the page cache to be nk's problem as well as Linux's
-/// and is a separate piece of work; refusing it is better than returning
-/// memory that does not contain the file.
-fn sys_mmap(addr: u64, len: u64, flags: u64) -> i64 {
-    const MAP_ANONYMOUS: u64 = 0x20;
-    const ENOMEM: i64 = -12;
-    const EINVAL: i64 = -22;
-    if flags & MAP_ANONYMOUS == 0 {
-        println!("  mmap of a file is not implemented");
-        return -38; // -ENOSYS
+/// Anonymous/private file mappings, eagerly populated through Linux pread.
+/// MAP_SHARED and file-page coherence/writeback are not implemented.
+fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
+    // Private file mappings are snapshots: Linux reads its filesystem into
+    // nk-owned pages. Shared/writeback mappings need a different contract.
+    if length == 0 || length > USER_MEM_LIMIT || offset & 4095 != 0 || prot & !7 != 0 {
+        return -22;
     }
-    // MAP_FIXED would have to unmap whatever is there and honour the exact
-    // address; nothing needs it yet, and quietly ignoring the hint would give
-    // a caller that does need it the wrong answer.
-    if flags & 0x10 != 0 {
-        return EINVAL;
+    if flags & !(0x2 | 0x10 | 0x20 | 0x800 | 0x1000 | 0x20000) != 0 { return -95; }
+    if flags & 3 != 2 { return -95; } // MAP_PRIVATE only
+    if prot & 6 == 6 { return -13; }
+    let len = length.div_ceil(4096)*4096;
+    let (brk, _, next) = crate::sched::user_memory();
+    let fixed = flags & 0x10 != 0;
+    let at = if fixed { addr } else { match next.checked_sub(len) { Some(v) => v, None => return -12 } };
+    let Some(end) = at.checked_add(len) else { return -22; };
+    // The current low-half layout still contains QEMU's devices. Never
+    // replace those inherited mappings, even for a caller using MAP_FIXED.
+    if at & 4095 != 0 || at < brk || end > USER_MMAP_TOP || (at < 0x0a20_0000 && end > 0x0800_0000) {
+        return -12;
     }
-    let _ = addr;
-    if len == 0 || len > USER_MEM_LIMIT {
-        return EINVAL;
+    let anonymous = flags & 0x20 != 0;
+    let mut pages = Vec::new();
+    for off in (0..len).step_by(PAGE) {
+        let Some(page) = frames::alloc() else {
+            for page in pages { unsafe { frames::free(page); } }
+            return -12;
+        };
+        unsafe { core::ptr::write_bytes(page,0,PAGE); }
+        if !anonymous {
+            #[cfg(nk_lkl)]
+            let rc = crate::lkl::syscall(67, [fd, page as i64, PAGE as i64,
+                match offset.checked_add(off) { Some(v) if v <= i64::MAX as u64 => v as i64, _ => -1 },0,0]);
+            #[cfg(not(nk_lkl))]
+            let rc = -38;
+            if rc < 0 {
+                unsafe { frames::free(page); }
+                for page in pages { unsafe { frames::free(page); } }
+                return rc;
+            }
+        }
+        if prot & 4 != 0 { unsafe { publish_code(page, PAGE); } }
+        pages.push(page);
     }
-    let len = len.div_ceil(PAGE as u64) * PAGE as u64;
-    let (_, brk_min, mmap_next) = crate::sched::user_memory();
-    if brk_min == 0 || mmap_next < len {
-        return ENOMEM;
+    let root = current_ttbr0();
+    if fixed { unsafe { paging::unmap_user(root,at,len); } }
+    for (i,page) in pages.into_iter().enumerate() {
+        unsafe { paging::map_user_permissions(root,at+i as u64*4096,page as u64,4096,prot&4!=0,prot&2!=0); }
     }
-    let at = mmap_next - len;
-    let (brk, _, _) = crate::sched::user_memory();
-    if at <= brk {
-        return ENOMEM; // the heap and the mappings have met
-    }
-    if !map_anonymous(at, len) {
-        return ENOMEM;
-    }
-    crate::sched::set_user_mmap_next(at);
+    if prot == 0 { unsafe { paging::protect_user_none(root, at, len); } }
+    if !fixed { crate::sched::set_user_mmap_next(at); }
     at as i64
 }
 
@@ -781,6 +801,7 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
     if exec && writable {
         return -13; // -EACCES, and nk will not make an exception
     }
+    if prot == 0 { return if unsafe { paging::protect_user_none(current_ttbr0(), addr, size) } { 0 } else { -12 }; }
     if unsafe { !paging::protect_user(current_ttbr0(), addr, size, exec, writable) } {
         return -12; // -ENOMEM: Linux's answer for a hole in the range
     }
@@ -1098,12 +1119,78 @@ pub fn load(
     envs: &[&[u8]],
 ) -> Result<Process, &'static str> {
     let image = crate::elf::parse(bytes, USER_BASE, USER_MMAP_TOP)?;
+    if image.segments.iter().any(|s| s.address < 0x0a20_0000 && s.address+s.memsz as u64 > 0x0800_0000) {
+        return Err("ELF overlaps kernel device mappings");
+    }
     let ttbr0 = paging::new_address_space();
+    if let Err(e) = map_elf_segments(ttbr0, &image, bytes) {
+        unsafe { paging::destroy_user_address_space(ttbr0); }
+        return Err(e);
+    }
+    let mut entry = image.entry;
+    let mut interpreter_base = 0;
+    if let Some(path) = &image.interpreter {
+        let result = (|| {
+            let bytes = crate::lkl::read_file(core::ffi::CStr::from_bytes_with_nul(path).map_err(|_| "interpreter path")?)
+                .map_err(|_| "cannot read ELF interpreter")?;
+            let loader = crate::elf::parse_at(&bytes, USER_MMAP_TOP, USER_STACK_TOP-USER_STACK_SIZE as u64, USER_MMAP_TOP)?;
+            if loader.interpreter.is_some() { return Err("recursive ELF interpreter"); }
+            map_elf_segments(ttbr0, &loader, &bytes)?;
+            Ok((loader.entry, loader.load_bias))
+        })();
+        match result { Ok((pc, bias)) => { entry = pc; interpreter_base = bias; },
+            Err(e) => { unsafe { paging::destroy_user_address_space(ttbr0); } return Err(e); } }
+    }
+    let Some(stack) = frames::alloc_contiguous(USER_STACK_SIZE / PAGE) else {
+        unsafe { paging::destroy_user_address_space(ttbr0); }
+        return Err("no memory for the ELF stack");
+    };
+    unsafe { core::ptr::write_bytes(stack, 0, USER_STACK_SIZE) };
+    let sp = match build_initial_stack(stack, &image, interpreter_base, args, envs) {
+        Ok(sp) => sp,
+        Err(e) => {
+            unsafe {
+                for off in (0..USER_STACK_SIZE).step_by(PAGE) { frames::free(stack.add(off)); }
+                paging::destroy_user_address_space(ttbr0);
+            }
+            return Err(e);
+        }
+    };
+    unsafe {
+        paging::map_user(
+            ttbr0,
+            USER_STACK_TOP - USER_STACK_SIZE as u64,
+            stack as u64,
+            USER_STACK_SIZE as u64,
+            false,
+        );
+        core::arch::asm!("dsb ish", "ic iallu", "dsb ish", "isb", options(nostack));
+    }
+    println!(
+        "  ELF: {} PT_LOAD segment(s), entry {:#x}, zero-filled BSS",
+        image.segments.len(),
+        image.entry
+    );
+    // The heap starts on the first page boundary past everything the image
+    // asked for, so growing it can never land on the program's own bss.
+    let brk = image
+        .segments
+        .iter()
+        .map(|s| s.address + s.memsz as u64)
+        .max()
+        .unwrap_or(USER_BASE)
+        .div_ceil(PAGE as u64)
+        * PAGE as u64;
+    Ok(Process { ttbr0, entry, stack: sp, brk })
+}
+
+#[cfg(nk_lkl)]
+fn map_elf_segments(ttbr0: u64, image: &crate::elf::Image, bytes: &[u8]) -> Result<(), &'static str> {
     for s in &image.segments {
         let base = s.address & !(PAGE as u64 - 1);
         let end = (s.address + s.memsz as u64).div_ceil(PAGE as u64) * PAGE as u64;
         for va in (base..end).step_by(PAGE) {
-            let page = frames::alloc().expect("no memory for ELF");
+            let page = frames::alloc().ok_or("no memory for ELF")?;
             // Zero first, always. A PT_LOAD's memsz runs past its filesz --
             // that tail is the .bss -- and a frame handed back by the
             // allocator holds whatever the last user of it left there. The
@@ -1139,36 +1226,7 @@ pub fn load(
             }
         }
     }
-    let stack = frames::alloc_contiguous(USER_STACK_SIZE / PAGE)
-        .ok_or("no memory for the ELF stack")?;
-    unsafe { core::ptr::write_bytes(stack, 0, USER_STACK_SIZE) };
-    let sp = build_initial_stack(stack, &image, args, envs)?;
-    unsafe {
-        paging::map_user(
-            ttbr0,
-            USER_STACK_TOP - USER_STACK_SIZE as u64,
-            stack as u64,
-            USER_STACK_SIZE as u64,
-            false,
-        );
-        core::arch::asm!("dsb ish", "ic iallu", "dsb ish", "isb", options(nostack));
-    }
-    println!(
-        "  ELF: {} PT_LOAD segment(s), entry {:#x}, zero-filled BSS",
-        image.segments.len(),
-        image.entry
-    );
-    // The heap starts on the first page boundary past everything the image
-    // asked for, so growing it can never land on the program's own bss.
-    let brk = image
-        .segments
-        .iter()
-        .map(|s| s.address + s.memsz as u64)
-        .max()
-        .unwrap_or(USER_BASE)
-        .div_ceil(PAGE as u64)
-        * PAGE as u64;
-    Ok(Process { ttbr0, entry: image.entry, stack: sp, brk })
+    Ok(())
 }
 
 /// Sixteen bytes for AT_RANDOM, from which a libc takes its stack guard.
@@ -1216,6 +1274,7 @@ fn stack_seed() -> Result<[u8; 16], &'static str> {
 fn build_initial_stack(
     page: *mut u8,
     image: &crate::elf::Image,
+    interpreter_base: u64,
     args: &[&[u8]],
     envs: &[&[u8]],
 ) -> Result<u64, &'static str> {
@@ -1238,9 +1297,9 @@ fn build_initial_stack(
         (AT_PHENT, 56),
         (AT_PHNUM, image.phnum as u64),
         (AT_PAGESZ, PAGE as u64),
-        // No interpreter: the loader refuses dynamic images, so nothing was
-        // mapped for one and AT_BASE has to say so rather than lie.
-        (AT_BASE, 0),
+        // The executable owns AT_ENTRY/PHDR; ld.so owns the initial PC
+        // and gets its relocation base separately.
+        (AT_BASE, interpreter_base),
         (AT_FLAGS, 0),
         (AT_ENTRY, image.entry),
         (AT_UID, 0),
