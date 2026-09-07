@@ -1620,13 +1620,28 @@ twelve seconds spends them waiting for a build it did not ask for. The plain
 build keeps `kernel/target`, which is what a bare `cargo build` produces and
 what gdb and the tests name.
 
-**The suite used to take six and a half minutes and now takes eight seconds.**
-None of that was the kernel. `psci::poweroff` asks the firmware to switch the
-machine off when nk finishes -- the device tree says `hvc`, nk issues it, and
-QEMU under HVF does not oblige -- so every class ran to its watchdog: twelve
-seconds for a run that takes one, ninety for one that takes a second. Three
-things had to be right before reading nk's own end marker actually ended a
-run, and each of them looked like the fix on its own:
+**The suite used to take six and a half minutes and now takes eight seconds,
+and none of it was the kernel.** Every class ran to its watchdog -- twelve
+seconds for a run that takes one, ninety for one that takes a second -- and
+the reason was a `sleep`.
+
+`run-kernel.sh --timeout N` runs QEMU in the background and starts a watchdog
+beside it, `( sleep N; kill ... ) &`. When QEMU exits the script kills the
+watchdog, and killing a subshell does not kill the `sleep` inside it. The
+orphan goes on holding this script's standard output -- a pipe, for anything
+reading the run -- so a reader waiting for end-of-file waits the whole
+watchdog after the machine has already switched itself off. The fix is
+`</dev/null >/dev/null` on the watchdog, so it never holds the pipe at all.
+
+**This was diagnosed wrongly for most of a day**, and the wrong diagnosis is
+worth recording: `psci::poweroff` was blamed, and written up here as not
+working under HVF. It works. A run that takes four seconds took four seconds;
+it was the reader that waited thirty. The lesson is the ordinary one -- the
+symptom was "the process does not end", and the process that would not end was
+never measured, only the one that was interesting.
+
+Three other things had to be right before reading nk's own end marker ended a
+run, and each looked like the fix on its own:
 
 - **`for line in proc.stdout` reads ahead.** Iterating a file object buffers
   several kilobytes, so on a pipe it hands back nothing until the buffer
@@ -1647,10 +1662,10 @@ Getting the variants separated mattered for correctness, not only speed:
 kernels, and while they shared a directory whichever built last won and the
 other silently booted the wrong program.
 
-`psci::poweroff` still does not switch the machine off under HVF. It no longer
-costs anything, and it is still worth fixing -- a clean exit distinguishes "the
-kernel finished" from "the kernel hung", which is the whole reason the code is
-there.
+`psci::poweroff` does switch the machine off, under HVF and under TCG, and
+always did. A clean exit is what distinguishes "the kernel finished" from "the
+kernel hung", which is the whole reason that code is there, and it has been
+earning its keep the entire time.
 
 **Run the tests with `tests/run-kernel-tests.sh`.** Every class boots QEMU
 from scratch in `setUpClass`, so `unittest discover` is a dozen independent

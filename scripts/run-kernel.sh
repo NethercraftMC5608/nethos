@@ -310,7 +310,15 @@ if [ "$TIMEOUT" -gt 0 ]; then
     exec 3<&0
     qemu-system-aarch64 "${ARGS[@]}" <&3 &
     qpid=$!
-    ( sleep "$TIMEOUT"; kill -TERM "$qpid" 2>/dev/null ) &
+    # </dev/null >/dev/null, and it is not tidiness. The watchdog inherits
+    # this script's standard output, which for anything reading the run is a
+    # pipe -- and `kill` on the subshell does not kill the `sleep` inside it,
+    # so an orphaned sleep goes on holding the pipe open for the full timeout
+    # after QEMU has exited. A reader waiting for end-of-file then waits the
+    # whole watchdog on every successful run, which is exactly what made the
+    # test suite take six and a half minutes and looked for a long time like
+    # psci::poweroff failing to switch the machine off.
+    ( sleep "$TIMEOUT"; kill -TERM "$qpid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
     watchdog=$!
     wait "$qpid" || true
     kill -TERM "$watchdog" 2>/dev/null || true
