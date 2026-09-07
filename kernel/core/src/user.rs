@@ -711,6 +711,19 @@ fn sys_execve(path: u64, argv: u64, envp: u64) -> i64 {
         }
     };
 
+    // A script names the program that can read it, and that program is what
+    // is actually loaded. execve of a script with no argv at all is not a
+    // thing a libc does, but argv[0] is what gets replaced by the script's
+    // path, so there has to be one to replace.
+    let mut args = args;
+    if args.is_empty() {
+        args.push(name[..name.len() - 1].to_vec());
+    }
+    let (bytes, args) =
+        match follow_interpreters(name[..name.len() - 1].to_vec(), bytes, args) {
+            Ok(both) => both,
+            Err(e) => return e,
+        };
     // Borrowed views, because the loader wants slices and the owners are the
     // vectors above -- which must outlive the stack that is built from them.
     let argv: alloc::vec::Vec<&[u8]> = args.iter().map(|v| v.as_slice()).collect();
@@ -989,7 +1002,84 @@ pub fn spawn_from_rootfs() -> Result<Process, &'static str> {
         println!("  rootfs: /nk-init came from the initrd ({} bytes)", b.len());
         b
     };
-    load(&bytes, &[b"/nk-init"], &[b"PATH=/bin", b"HOME=/"])
+    // The init may be a script, and usually is. Following the `#!` here as
+    // well as in execve means an initrd can ship `#!/bin/busybox sh` and no
+    // part of nk has to know what busybox is.
+    let (bytes, args) = follow_interpreters(
+        b"/nk-init".to_vec(),
+        bytes,
+        alloc::vec![b"/nk-init".to_vec()],
+    )
+    .map_err(|_| "the init names an interpreter that cannot be read")?;
+    let argv: alloc::vec::Vec<&[u8]> = args.iter().map(|v| v.as_slice()).collect();
+    load(&bytes, &argv, &[b"PATH=/bin", b"HOME=/"])
+}
+
+/// Follow `#!` lines until something is an ELF.
+///
+/// An init is usually a shell script, and a script is not a thing a loader can
+/// enter: the file names the program that can read it. Linux resolves this in
+/// `binfmt_script`, and the rules are its rules -- the first line only, up to
+/// a fixed length, the first word is the interpreter and *everything after it
+/// is one argument* however many spaces it contains, and the script's own path
+/// is inserted as the interpreter's first argument while `argv[0]` is
+/// discarded.
+///
+/// That last part is why busybox as `/nk-init` exits 127 without this: it
+/// chooses its applet from `basename(argv[0])`, nk passes the path it loaded,
+/// and there is no applet called `nk-init`. `#!/bin/busybox sh` says what was
+/// meant.
+///
+/// Bounded at four, as Linux is. A script whose interpreter is itself is not
+/// an error anyone can act on, and following it is a loop.
+#[cfg(nk_lkl)]
+fn follow_interpreters(
+    mut path: alloc::vec::Vec<u8>,
+    mut bytes: alloc::vec::Vec<u8>,
+    mut args: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+) -> Result<(alloc::vec::Vec<u8>, alloc::vec::Vec<alloc::vec::Vec<u8>>), i64> {
+    use alloc::vec::Vec;
+    /// Linux's own BINPRM_BUF_SIZE. A longer first line is not truncated into
+    /// something plausible; it is refused, because a truncated interpreter
+    /// path is a different program.
+    const LINE: usize = 256;
+
+    for _ in 0..4 {
+        if bytes.len() < 2 || &bytes[..2] != b"#!" {
+            return Ok((bytes, args));
+        }
+        let end = bytes.iter().take(LINE).position(|&c| c == b'\n').ok_or(-8i64)?;
+        let line = &bytes[2..end];
+        let line = &line[line.iter().take_while(|c| **c == b' ' || **c == b'\t').count()..];
+        if line.is_empty() {
+            return Err(-8); // -ENOEXEC: "#!" and nothing to run
+        }
+        let split = line.iter().position(|&c| c == b' ' || c == b'\t').unwrap_or(line.len());
+        let interp = line[..split].to_vec();
+        let rest = line[split..].iter().copied().skip_while(|c| *c == b' ' || *c == b'\t')
+            .collect::<Vec<u8>>();
+        let rest = match rest.iter().rposition(|c| *c != b' ' && *c != b'\t') {
+            Some(last) => rest[..=last].to_vec(),
+            None => Vec::new(),
+        };
+
+        // argv[0] is the interpreter, then its one optional argument, then the
+        // script's path, then whatever the caller passed after argv[0].
+        let mut next: Vec<Vec<u8>> = alloc::vec![interp.clone()];
+        if !rest.is_empty() {
+            next.push(rest);
+        }
+        next.push(path.clone());
+        next.extend(args.into_iter().skip(1));
+        args = next;
+
+        let mut c = interp.clone();
+        c.push(0);
+        let name = core::ffi::CStr::from_bytes_with_nul(&c).map_err(|_| -22i64)?;
+        bytes = crate::lkl::read_file(name)?;
+        path = interp;
+    }
+    Err(-36) // -ENAMETOOLONG, which is what Linux returns for too many levels
 }
 
 /// Build a fresh address space around an ELF image and the arguments it is to

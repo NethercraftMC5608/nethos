@@ -401,8 +401,9 @@ the one below it.
       interrupt nk raises. Each process opens `/dev/console` onto 0, 1 and 2,
       and `busybox sh -c` now forks children, redirects into a file and reads
       it back.
-- [ ] **`#!` interpreter lines**, so an init can be a shell script -- which is
-      what an init usually is.
+- [x] **`#!` interpreter lines.** An init can be a shell script, which is what
+      an init usually is. Linux's rules, including the one that matters --
+      argv[0] is discarded and the script's path takes its place.
 - [ ] **Interactive input.** The console can carry it; nk's UART receive path
       is not wired up.
 - [ ] `mmap` of a file, `futex`, signals, `epoll` -- the long tail, and

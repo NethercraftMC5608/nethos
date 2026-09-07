@@ -510,6 +510,57 @@ def make_cpio(root, name):
 
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class Shebang(unittest.TestCase):
+    """An init that is a shell script, which is what an init usually is.
+
+    A script is not a thing a loader can enter: the file names the program
+    that can read it. Linux resolves that in binfmt_script and nk does the
+    same, including the part that matters most here -- argv[0] is discarded
+    and the script's own path becomes the interpreter's first argument. That
+    is why `#!/bin/busybox sh` works where a plain copy of busybox at
+    /nk-init exits 127: busybox picks its applet from basename(argv[0]).
+    """
+
+    SCRIPT = ('#!/bin/busybox sh\n'
+              'echo "hello from a shell script, on nk"\n'
+              'echo "argv0 is $0"\n'
+              'echo written > /tmp/from-script\n'
+              'busybox cat /tmp/from-script\n')
+
+    @classmethod
+    def setUpClass(cls):
+        bb = ROOT / 'kernel/ldk/build/busybox'
+        if not bb.exists():
+            raise unittest.SkipTest('busybox not built; run the Busybox class first')
+        root = ROOT / 'kernel/ldk/build/shebang-root'
+        shutil.rmtree(root, ignore_errors=True)
+        (root / 'bin').mkdir(parents=True)
+        (root / 'dev').mkdir()
+        (root / 'tmp').mkdir()
+        shutil.copy(bb, root / 'bin/busybox')
+        init = root / 'nk-init'
+        init.write_text(cls.SCRIPT)
+        init.chmod(0o755)
+        cls.out = boot('--lkl', '--initrd', str(make_cpio(root, 'shebang.cpio')),
+                       timeout=240, watchdog=120)
+
+    def test_the_script_runs(self):
+        self.assertIn('hello from a shell script, on nk', self.out)
+
+    def test_the_scripts_path_becomes_argv0(self):
+        # binfmt_script discards the caller's argv[0] and puts the script
+        # there instead, which is how a script knows its own name.
+        self.assertIn('argv0 is /nk-init', self.out)
+
+    def test_the_script_redirects_and_reads_back(self):
+        self.assertIn('written', self.out)
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('fault in user space', self.out)
+        self.assertNotIn('kernel panic', self.out)
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
 class Busybox(unittest.TestCase):
     """A program nobody wrote for nk, doing something real.
 

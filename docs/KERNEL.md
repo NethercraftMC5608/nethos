@@ -703,9 +703,42 @@ written for a host that is a Unix process, and nk is a host that is a kernel
 with hardware. Where the two disagree the fix belongs in the architecture
 port, not in a translation layer on nk's side.
 
+### An init that is a shell script
+
+A script is not a thing a loader can enter: the file names the program that
+can read it. Linux resolves that in `binfmt_script`, and nk follows the same
+rules -- the first line only, bounded at Linux's own 256 bytes, the first word
+is the interpreter and *everything after it is one argument* however many
+spaces it contains, four levels of nesting at most.
+
+The part that matters is the part that is easy to miss: **`argv[0]` is
+discarded and the script's own path becomes the interpreter's first
+argument.** That is exactly why a copy of busybox at `/nk-init` exits 127 --
+busybox chooses its applet from `basename(argv[0])`, nk passes the path it
+loaded, and there is no applet called `nk-init` -- and why `#!/bin/busybox sh`
+says what was meant. nk follows `#!` for the init as well as for `execve`, so
+an initrd can ship a script and no part of nk has to know what busybox is.
+
+```
+#!/bin/busybox sh
+echo "hello from a shell script, on nk"
+echo "argv0 is $0, and I am pid $$"
+busybox ls -l /bin
+echo written > /tmp/from-script
+busybox cat /tmp/from-script
+```
+
+```
+hello from a shell script, on nk
+argv0 is /nk-init, and I am pid 26
+total 1932
+-rwxr-xr-x    1 0        0          1975064 Jan  1 00:00 busybox
+written
+```
+
 ### What a real binary still cannot do
 
-Threads, signals, `#!` interpreter lines, and any `mmap` of a file. There is
+Threads, signals, and any `mmap` of a file. There is
 no interactive input yet: the console can carry it and nothing feeds the ring,
 because nk's UART receive path is not wired up. The rootfs is memory-backed,
 so nothing survives a reboot.
