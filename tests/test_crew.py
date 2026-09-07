@@ -205,6 +205,20 @@ class Tasks(CrewCase):
         self.assertEqual(
             self.crew('spark', 'task', 'take', '--any').returncode, 0)
 
+    def test_reassigning_returns_it_to_the_queue(self):
+        # The case this exists for: an agent registered under the wrong name
+        # owns work nobody can take back.
+        self.crew('mac', 'task', 'take', '--id', '1')
+        self.crew('mac', 'task', 'set', '1', '--owner', 'spark')
+        self.assertIn('a subtle race', self.crew('spark', 'task', 'take').stdout)
+
+    def test_a_note_can_be_corrected(self):
+        # A note written before a diagnosis is often wrong afterwards, and a
+        # wrong note is worse than none: the next agent believes it.
+        self.crew('mac', 'task', 'set', '1', '--note', 'was misdiagnosed')
+        self.assertIn('was misdiagnosed',
+                      self.crew('mac', 'task', 'list', '-v').stdout)
+
     def test_done_takes_it_off_the_queue(self):
         self.crew('opus', 'task', 'take')
         self.crew('opus', 'task', 'done', '1')

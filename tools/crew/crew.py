@@ -627,12 +627,18 @@ def do_task_take(args) -> int:
                           if args.any or suited(i, me, available)]
             # Order, most important first:
             #   asks addressed to me   -- somebody is blocked waiting
+            #   assigned to me by name -- a decision, not a heuristic
             #   work that suits me     -- opus prefers hard, others prefer not
             #   oldest                 -- so nothing starves
             # Sorted rather than picked in a loop because the loop version
             # took whichever came first and quietly ignored the priority.
+            # Explicit assignment sits above the model preference on purpose:
+            # somebody who put your name on a task knows something the
+            # hard/not-hard guess does not, and a `task set --owner` that the
+            # queue then ignores is worse than not having one.
             candidates.sort(key=lambda i: (
                 not (i.get("ask") and i.get("owner") == me),
+                i.get("owner") != me,
                 (me == "opus") != bool(i.get("hard")),
                 i["id"],
             ))
@@ -685,6 +691,46 @@ def do_task_done(args) -> int:
 
 def do_task_drop(args) -> int:
     return _set_task_state(args.id, "todo", whoami())
+
+
+def do_task_set(args) -> int:
+    """Correct a task's owner or its note.
+
+    Both go stale in ways that matter on a shared board. An agent that
+    registered under the wrong name owns work nobody can take back -- which
+    happened: opencode ran as the human for an hour, and the tasks it picked
+    up stayed owned by `mac` after its identity was fixed, so `task take`
+    would not give them back. And a note written before a diagnosis is often
+    wrong afterwards, which is worse than no note at all: the next agent
+    reads it and believes it.
+    """
+    me = whoami()
+    with Lock():
+        t = load("tasks.json", {"next": 1, "items": []})
+        for item in t["items"]:
+            if item["id"] != args.id:
+                continue
+            if args.owner is not None:
+                who = args.owner.lower()
+                item["owner"] = "" if who in ("", "none", "nobody") else who
+                # An owner change means somebody else is expected to pick it
+                # up, so it goes back on the queue rather than sitting in
+                # `doing` under a name that is not working on it.
+                if item["state"] == "doing":
+                    item["state"] = "todo"
+            if args.note is not None:
+                item["note"] = args.note
+            item["at"] = now()
+            save("tasks.json", t)
+            append_log({"kind": "task-set", "agent": me, "id": args.id,
+                        "title": item["title"]})
+            print(f"#{args.id} owner={item.get('owner') or '-'} "
+                  f"state={item['state']}")
+            if item.get("note"):
+                print(f"  {item['note']}")
+            return 0
+    print(f"no task #{args.id}", file=sys.stderr)
+    return 1
 
 
 def do_task_list(args) -> int:
@@ -1169,6 +1215,12 @@ def main(argv=None) -> int:
     s.add_argument("--any", action="store_true",
                    help="ignore which model a task is meant for")
     s.set_defaults(fn=do_task_take)
+
+    s = tsub.add_parser("set", help="correct a task's owner or note")
+    s.add_argument("id", type=int)
+    s.add_argument("--owner", help="agent name, or 'none' to unassign")
+    s.add_argument("--note")
+    s.set_defaults(fn=do_task_set)
 
     s = tsub.add_parser("done")
     s.add_argument("id", type=int)
