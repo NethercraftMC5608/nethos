@@ -21,7 +21,7 @@ docker run --rm --platform linux/arm64 \
         weston python3 python3-gi gir1.2-gtk-4.0 gir1.2-webkit-6.0 \
         libwebkitgtk-6.0-4 gir1.2-gtk4layershell-1.0 \
         libgl1-mesa-dri libegl1 libegl-mesa0 libgles2 libgbm1 libdrm2 \
-        e2fsprogs >/dev/null 2>&1
+        xkb-data e2fsprogs >/dev/null 2>&1
 
     R=/tmp/comp
     mkdir -p $R/lib $R/bin $R/share $R/nethos $R/dri $R/glvnd
@@ -56,6 +56,11 @@ docker run --rm --platform linux/arm64 \
     cp -a $D/webkitgtk-6.0 $R/lib/ 2>/dev/null || true
     cp -a /usr/share/glib-2.0 $R/share/ 2>/dev/null || true
     cp -a /usr/share/weston $R/share/ 2>/dev/null || true
+    # libxkbcommon reads the keymap data at runtime. Without it weston stops
+    # at "failed to create XKB context" -- a compositor with no input devices
+    # still builds a keymap, so this is not optional even headless.
+    mkdir -p $R/share/X11
+    cp -a /usr/share/X11/xkb $R/share/X11/ 2>/dev/null || true
     cp /payload/bin/nethos-view $R/nethos/nethos-view
 
     echo "  payload: $(du -sh $R | cut -f1), $(ls $R/lib | wc -l) libraries"
