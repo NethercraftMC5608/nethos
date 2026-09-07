@@ -168,6 +168,26 @@ No libwayland needed (probe 72KB + libc; libwayland itself measured only
 against the 99.5%-full address space). Next: bind wl_shm +
 wl_shm_create_pool over SCM_RIGHTS memfd (the M3 buffer path), then M3.
 
+**Update 2026-09-08, M3 pixel path GREEN (`d4d047f` + `def2cfa`).**
+M3 lane proved the exact pixel path twice over in worktree `../nk-lane-m3`:
+(A) client binds wl_shm+wl_compositor, memfd pool over SCM_RIGHTS,
+server reads back through the shared mapping — `SHM_SERVER_CKSUM ==
+SHM_CLIENT_CKSUM` + post-map coherence `coh=1`; (B) slate `#14181f` to
+scanout via fbdev write()+modeset, `M3_PIXELS_OK 1 1.0000` on 1280x800;
+(C) full shell slate linear-layer ramp, `M3_GRADIENT_OK 17 1.0000 0`
+(17 integer-ramp colours, 0 mismatched rows of 800). Verified on the main
+checkout post-merge (`M3_GRADIENT_OK 17 1.0000 0` via `scripts/m3-check.py
+--gradient` on a monitor-socket screendump). Found along the way and fixed
+in `def2cfa`: PROT_READ shared mappings faulted on first EL0 read
+(`protect_user_none` applied to any `!writable && !executable`, clearing
+AP to EL0-no-access, DFSC 0b001111) — now gated on `prot == 0`, proven by
+`PROT_READ_OK readable` from a MAP_SHARED memfd readback probe.
+NOT claimed: WebKit rendering — no HTML/CSS/JS ran. Numbered gaps to true
+M3-render: (i) WebKit closure (~96MB lib + 145MB debs) vs the 99.5%-full
+window (demand paging and/or raised USER_MMAP_TOP needed); (ii) device
+MAP_SHARED for dumb buffers still refused (real compositor cannot scan out
+client buffers yet); (iii) done — the PROT_READ AP bug above.
+
 **The live lead:** the serve wedge + the `MemoryError`: which `sys_mmap`
 -12 site fires under the real `nethosd.main()`, and whether the parked
 server `ppoll` is cause or consequence. Cheapest next step: clean

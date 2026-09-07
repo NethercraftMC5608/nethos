@@ -151,6 +151,21 @@ prints 4 globals (`wl_compositor 4`, `wl_shm 1`, `wl_output 2`,
 `wl_shm_create_pool` over SCM_RIGHTS memfd + MAP_SHARED (all green
 primitives) to prove the M3 buffer path; then M3 render + screendump.
 
+## 9. M3 pixel path GREEN 2026-09-08 (merges `a7e31f6`, `0c328de`, `d4d047f`)
+
+M3 lane, three commits, all verified on the main checkout post-merge:
+(A) wl_shm pool over SCM_RIGHTS with matching FNV checksums +
+post-map coherence; (B) flat slate to scanout, `M3_PIXELS_OK 1 1.0000`;
+(C) shell slate linear-layer ramp, `M3_GRADIENT_OK 17 1.0000 0` via
+`scripts/m3-check.py --gradient` on a monitor-socket screendump
+(1280x800 PPM, 17 colours, 0/800 rows mismatched). Plus kernel fix
+`def2cfa`: PROT_READ shared mappings no longer cleared to EL0-no-access
+(proven by `PROT_READ_OK` probe; SHM_OK + soak/writeback/signals still
+green). What is NOT claimed: WebKit rendering. Per the brief this is
+still a result with numbers: WebKit closure (~96MB + 145MB debs) vs the
+99.5%-full window, device MAP_SHARED still refused — demand paging
+and/or raised USER_MMAP_TOP is the next build before any engine fits.
+
 ## 4. Riskiest unknown + cheapest experiment per lane
 
 - kernel: unknown = WHERE the wedge lives (nk timers? LKL CPU-lock
