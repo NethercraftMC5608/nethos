@@ -88,6 +88,11 @@ def main():
     if b"200 OK" not in data:
         step("request", False, repr(data[:80]))
         return 3
+    first = data.split(b"\r\n", 1)[0]
+    if b"HTTP/1.1 200" not in first and b"HTTP/1.0 200" not in first:
+        step("request", False, "not HTTP/1.x 200: %r" % (first[:60],))
+        return 3
+    step("statusline", True, first.decode("ascii", "replace"))
     body = data.split(b"\r\n\r\n", 1)[-1]
     try:
         parsed = json.loads(body)
