@@ -1,0 +1,5 @@
+#!/bin/sh
+# `crew` on PATH, so the protocol reads the same in a hook, a plugin, a
+# document and a terminal. Put tools/crew on your PATH, or symlink this into
+# ~/.local/bin.
+exec python3 "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/crew.py" "$@"

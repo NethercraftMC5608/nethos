@@ -15,7 +15,10 @@ __pycache__/
 build/
 
 # Agent scratch: worktrees are separate checkouts, aider keeps its own caches.
-.claude/
+# settings.json is the exception: it carries the crew hooks, which every agent
+# working in this checkout needs. settings.local.json stays personal.
+.claude/*
+!.claude/settings.json
 .aider*
 
 # Debian archive indexes fetched during a build — large and reproducible.
@@ -52,3 +55,6 @@ kernel/ldk/build/root.img
 kernel/ldk/build/root-src/
 kernel/ldk/build/disk-root/
 kernel/ldk/build/disk.cpio
+
+# crew: live coordination state, per-machine and per-checkout
+.crew/

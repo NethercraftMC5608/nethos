@@ -1,0 +1,57 @@
+{
+  "$comment": "crew: this checkout is shared with another agent and a human. tools/crew/crew.py is the board; docs/CREW.md explains it. These hooks make the protocol automatic rather than something a session has to remember.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CREW_AGENT=opus python3 \"$CLAUDE_PROJECT_DIR/tools/crew/crew.py\" hook sessionstart"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CREW_AGENT=opus python3 \"$CLAUDE_PROJECT_DIR/tools/crew/crew.py\" hook userpromptsubmit"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CREW_AGENT=opus python3 \"$CLAUDE_PROJECT_DIR/tools/crew/crew.py\" hook pretooluse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CREW_AGENT=opus python3 \"$CLAUDE_PROJECT_DIR/tools/crew/crew.py\" hook posttooluse"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CREW_AGENT=opus python3 \"$CLAUDE_PROJECT_DIR/tools/crew/crew.py\" hook sessionend"
+          }
+        ]
+      }
+    ]
+  }
+}
