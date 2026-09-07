@@ -488,6 +488,14 @@ fn build_frame(frame: &mut crate::user::Frame, me: usize, sig: u64, act: &Action
     uc[m + 256..m + 264].copy_from_slice(&frame.sp.to_le_bytes());
     uc[m + 264..m + 272].copy_from_slice(&frame.elr.to_le_bytes());
     uc[m + 272..m + 280].copy_from_slice(&frame.spsr.to_le_bytes());
+    // The frame's own address, so `sigreturn` finds it without trusting
+    // any register: the handler may clobber `x2` (caller-saved, held the
+    // ucontext pointer on entry) and move `sp` (any call spills). Linux
+    // hides a cookie in `uc_flags` (`0x5050534f`, "SOSP"); nk writes the
+    // ucontext's own address at uc_flags instead -- same hiding place,
+    // exact rather than probabilistic. `sigreturn` reads it back and
+    // validates it points at readable memory before restoring.
+    uc[0..8].copy_from_slice(&(sp + 128).to_le_bytes());
     // __reserved (m+288, 4096 bytes) stays zero: no extra context.
     let saved_mask = sched::signal_mask(me);
     if uaccess::copy_to_user(sp, &info).is_err() || uaccess::copy_to_user(sp + 128, &uc).is_err() {
@@ -525,20 +533,41 @@ fn build_frame(frame: &mut crate::user::Frame, me: usize, sig: u64, act: &Action
 /// # rt_sigreturn()
 ///
 /// Leave the handler: restore the interrupted registers, stack pointer and
-/// mask from the `ucontext` the frame was built with. The address is the
-/// interrupted stack pointer plus 128 -- the frame layout `build_frame`
-/// made -- not `x2`: that register carried the pointer *into* the handler
-/// but is caller-saved, so a handler that uses it (any non-trivial one)
-/// arrives here with it clobbered. Linux finds the frame via `sp` for the
-/// same reason. A zero or unreadable address is `-EFAULT`.
+/// mask from the `ucontext` the frame was built with.
+///
+/// The ucontext is found via the self-pointer `build_frame` hid in
+/// `uc_flags` (the frame's own address), not via `x2` and not via live
+/// `sp`: `x2` carried the pointer into the handler but is caller-saved,
+/// and `sp` moves the moment the handler calls anything. Both were tried;
+/// both fail on any non-trivial handler (busybox `sh` mounting a disk was
+/// the one that proved it: `sp` had moved to `0x2fffe260`, `x2` held
+/// whatever the handler left, and the restore read garbage). The
+/// self-pointer survives either clobber. It is validated -- 16-byte
+/// aligned, below `USER_STACK_TOP`, readable -- before use; anything else
+/// is `-EFAULT`.
 #[cfg(nk_lkl)]
 pub fn sigreturn(frame: &mut crate::user::Frame) -> i64 {
-    // sp+128: siginfo (128) then ucontext. The handler ran on this stack,
-    // so sp points inside the frame build_frame made -- unless the handler
-    // switched stacks, in which case there is nothing to restore from.
-    let uc_at = frame.sp.checked_add(128).unwrap_or(0);
+    // Two candidate sources: live sp+128 (handler kept the stack) and x2
+    // (handler moved sp but preserved the pointer, e.g. a leaf). Each
+    // candidate is validated by its self-pointer -- uc_flags must equal
+    // the base it was read from -- before the 4560-byte read, so a wrong
+    // guess costs one word probe, not a garbage restore.
+    let mut uc_at = 0u64;
+    for base in [frame.sp.checked_add(128).unwrap_or(0), frame.x[2]] {
+        if base == 0 || base & 15 != 0 || base >= crate::user::USER_STACK_TOP {
+            continue;
+        }
+        let mut flag_b = [0u8; 8];
+        if crate::uaccess::copy_from_user(&mut flag_b, base).is_err() {
+            continue;
+        }
+        if u64::from_le_bytes(flag_b) == base {
+            uc_at = base;
+            break;
+        }
+    }
     if uc_at == 0 {
-        return -14; // -EFAULT
+        return -14; // -EFAULT: no recognisable frame at either source
     }
     let mut uc = [0u8; 4560];
     // Read the whole ucontext first: a half-restored frame is worse than
