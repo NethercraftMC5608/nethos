@@ -650,6 +650,62 @@ class Shebang(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
+class Gpu(unittest.TestCase):
+    """A GPU, driven by Linux, on nk.
+
+    virtio-gpu is a virtio-mmio device like the disk: nk finds it in its own
+    device tree, hands it to Linux with virtio_mmio_device_add, and routes its
+    interrupt. What comes back is DRM -- card0, a render node, a connector
+    with modes, and an fbdev a program can write pixels to.
+
+    Nothing is scanned out yet: no mode has been set on the CRTC, so QEMU
+    reports "Display output is not active". That is a KMS modeset away and is
+    the next piece of work; everything below it is here.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        bb = ROOT / 'kernel/ldk/build/busybox'
+        if not bb.exists():
+            raise unittest.SkipTest('busybox not built; run the Busybox class first')
+        root = ROOT / 'kernel/ldk/build/gpu-root'
+        shutil.rmtree(root, ignore_errors=True)
+        (root / 'bin').mkdir(parents=True)
+        (root / 'dev').mkdir()
+        shutil.copy(bb, root / 'bin/busybox')
+        shutil.copy(build_c('fbtest', 'fbtest'), root / 'bin/fbtest')
+        init = root / 'nk-init'
+        init.write_text('#!/bin/busybox sh\n'
+                        'busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null\n'
+                        'busybox ls /dev/dri\n'
+                        '/bin/fbtest\n')
+        init.chmod(0o755)
+        cls.out = boot('--lkl', '--gpu', '--initrd', str(make_cpio(root, 'gpu.cpio')),
+                       timeout=240, watchdog=120)
+
+    def test_nk_hands_the_gpu_to_linux(self):
+        self.assertRegex(self.out, r'virtio: device 16 at 0x[0-9a-f]+ -> Linux')
+
+    def test_the_driver_initialises(self):
+        self.assertIn('Initialized virtio_gpu', self.out)
+
+    def test_the_drm_nodes_exist(self):
+        # renderD128 is the one Mesa opens.
+        self.assertIn('card0', self.out)
+        self.assertIn('renderD128', self.out)
+
+    def test_a_program_can_draw_on_the_framebuffer(self):
+        # Through write(), not mmap: a DRM dumb buffer has to be mapped and a
+        # shared file-backed mapping is not something nk can do yet.
+        self.assertRegex(self.out, r'fb: \d+x\d+ at 32 bpp')
+        self.assertRegex(self.out, r'fb: drew \d+ lines')
+
+    def test_nothing_faulted(self):
+        self.assertNotIn('fault in user space', self.out)
+        self.assertNotIn('kernel panic', self.out)
+
+
+@unittest.skipUnless(HAVE, 'needs cargo and qemu-system-aarch64')
 class Busybox(unittest.TestCase):
     """A program nobody wrote for nk, doing something real.
 

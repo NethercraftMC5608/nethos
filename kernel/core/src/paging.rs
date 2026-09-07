@@ -203,6 +203,22 @@ pub unsafe fn map_normal(va: u64, pa: u64, size: u64) {
 pub const LINUX_VA_BASE: u64 = 4 << 30;
 pub const LINUX_VA_SIZE: u64 = 4 << 30;
 
+/// The physical memory Linux treats as its own, at a fixed address.
+///
+/// It has to be fixed, and it has to be the address `CONFIG_LKL_MEMORY_START`
+/// names, because LKL's `__pa()` is the identity: a physical address *is* the
+/// virtual address it was mapped at. On a host that is a Unix process nothing
+/// notices, since nothing does real DMA. nk hands Linux real hardware, and a
+/// device programmed with an address Linux invented reads memory that is not
+/// there -- which presents as a driver probe that simply never returns.
+///
+/// So Linux's linear map is identity with real physical memory, the way a
+/// linear map is on every real architecture. nk keeps this range out of the
+/// frame allocator and hands it back from `shmem_init`; it is already mapped,
+/// because nk identity maps RAM.
+pub const LINUX_PHYS_BASE: u64 = 0x5000_0000;
+pub const LINUX_PHYS_SIZE: u64 = 64 << 20;
+
 /// Make the page tables for Linux's window exist, before any process does.
 ///
 /// The tables below a level-1 entry are shared by pointer with every address
@@ -242,6 +258,12 @@ pub unsafe fn reserve_linux_window() {
 /// # Safety
 /// `reserve_linux_window` has run and the range is inside it.
 pub unsafe fn map_linux(va: u64, pa: u64, size: u64) -> bool {
+    // The linear map needs no work: it is identity with physical memory and
+    // nk already maps RAM that way. Saying so here rather than mapping it
+    // again keeps one mapping of those pages rather than two that must agree.
+    if va == pa && va >= LINUX_PHYS_BASE && va + size <= LINUX_PHYS_BASE + LINUX_PHYS_SIZE {
+        return true;
+    }
     if va < LINUX_VA_BASE || va + size > LINUX_VA_BASE + LINUX_VA_SIZE {
         return false;
     }

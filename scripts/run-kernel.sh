@@ -7,6 +7,7 @@
 #   scripts/run-kernel.sh --build-only     build this variant and stop
 #   scripts/run-kernel.sh --disk FILE      attach FILE as virtio-blk  (stage 3)
 #   scripts/run-kernel.sh --net            attach virtio-net, user mode (stage 4)
+#   scripts/run-kernel.sh --gpu            attach virtio-gpu (needs --lkl)
 #   scripts/run-kernel.sh --smp N          more CPUs than the one boot.s uses
 #   scripts/run-kernel.sh --port NAME      link an ldk port's Linux drivers in
 #   scripts/run-kernel.sh --lkl            link the whole Linux kernel in
@@ -35,6 +36,7 @@ SMP=1
 MEM=512
 DISK=""
 NET=0
+GPU=0
 INIT=""
 INITRD=""
 TRACE=""
@@ -52,6 +54,7 @@ while [ $# -gt 0 ]; do
         --build-only) BUILD_ONLY=1; shift ;;
         --disk)      DISK="${2:?--disk needs a file}"; shift 2 ;;
         --net)       NET=1; shift ;;
+        --gpu)       GPU=1; shift ;;
         --smp)       SMP="${2:?--smp needs a count}"; shift 2 ;;
         --mem)       MEM="${2:?--mem needs MB}"; shift 2 ;;
         --port)      PORT="${2:?--port needs a name, e.g. virtio-blk}"; shift 2 ;;
@@ -252,6 +255,39 @@ if [ -n "$INITRD" ]; then
     [ "$LKL" -eq 1 ] || die "--initrd needs --lkl: the rootfs it unpacks into is Linux's"
     ARGS+=( -initrd "$INITRD" )
     say "Initrd: $INITRD ($(du -h "$INITRD" | cut -f1))"
+fi
+
+# virtio-gpu on the mmio transport, like every other device here. -display none
+# stays: nk cannot draw yet and an empty window only makes it look as though
+# something failed. What the guest can see is that the device probes and
+# /dev/dri and /dev/fb0 come into being.
+if [ "$GPU" -eq 1 ]; then
+    [ "$LKL" -eq 1 ] || die "--gpu needs --lkl: the driver is Linux's"
+    # force-legacy=false, or the driver refuses the device.
+    #
+    # QEMU's `virt` builds its virtio-mmio transports with force-legacy left
+    # at its default of true, so they report version 1 and never offer
+    # VIRTIO_F_VERSION_1. virtio_blk does not mind -- it still speaks the
+    # legacy protocol -- and virtio_gpu does: it returns -ENODEV, silently,
+    # because that path is a pr_debug. The device appears on the bus with its
+    # status set to DRIVER_FAILED and nothing anywhere says why.
+    ARGS+=( -global virtio-mmio.force-legacy=false -device virtio-gpu-device )
+fi
+
+# QEMU's own complaints, which are the only account of what the machine
+# thought of what the guest did. Invalid MMIO, unassigned addresses, a device
+# told something it cannot do -- none of which the guest can see.
+if [ -n "${QEMU_LOG:-}" ]; then
+    ARGS+=( -d guest_errors,unimp -D "$QEMU_LOG" )
+fi
+
+# QEMU's monitor on a socket, so the host can ask the machine for things the
+# guest cannot report about itself -- a screenshot, most usefully. There is no
+# display: what the guest drew is still in the device, and screendump reads it
+# from there.
+if [ -n "${NK_MONITOR:-}" ]; then
+    rm -f "$NK_MONITOR"
+    ARGS+=( -monitor "unix:$NK_MONITOR,server,nowait" )
 fi
 
 if [ "$GDB" -eq 1 ]; then

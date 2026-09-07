@@ -343,6 +343,8 @@ extern "C" fn watchdog(_: usize) {
             sched::yield_now();
         }
         println!();
+        #[cfg(nk_lkl)]
+        report_virtio();
         unsafe {
             println!(
                 "  watchdog {} at {} ticks: armed={} due={} fired={} last_deadline={}",
@@ -587,6 +589,38 @@ fn map_vmemmap(ram_base: u64, ram_size: u64) {
 /// QEMU happens to put the DTB above the kernel; U-Boot does not always, and
 /// a boot that hands out the pages the kernel is executing from fails in a
 /// way that has no useful symptom at all.
+/// The transport to report on when a probe stops answering. Read from the
+/// watchdog, which is the only thread still running when a driver has blocked
+/// waiting for a device that never replied.
+#[cfg(nk_lkl)]
+static mut PROBE: usize = 0;
+
+/// What the driver told the device, and what the device says back.
+///
+/// A blocked probe is invisible from inside Linux -- the task that would have
+/// reported it is the one that is waiting -- but the registers it programmed
+/// are still there to be read, and reading them says whether the queue was
+/// ever set up and whether the device has an interrupt pending that nobody
+/// collected.
+#[cfg(nk_lkl)]
+fn report_virtio() {
+    let base = unsafe { PROBE };
+    if base == 0 {
+        return;
+    }
+    unsafe {
+        println!(
+            "  virtio {:#x}: status {:#x} intr {:#x} qsel-num {} pfn {:#x} pagesz {}",
+            base,
+            crate::mmio::readl(base + 0x70), // Status
+            crate::mmio::readl(base + 0x60), // InterruptStatus
+            crate::mmio::readl(base + 0x38), // QueueNum
+            crate::mmio::readl(base + 0x40), // QueuePFN (legacy)
+            crate::mmio::readl(base + 0x28), // GuestPageSize (legacy)
+        );
+    }
+}
+
 /// Give Linux every virtio-mmio device the machine actually has.
 #[cfg(nk_lkl)]
 fn attach_virtio(fdt: &dt::Fdt) {
@@ -609,10 +643,12 @@ fn attach_virtio(fdt: &dt::Fdt) {
         };
         lklirq::map_gic(spi + 32, irq);
         unsafe { gic::enable_spi(spi + 32) };
+        unsafe { PROBE = base as usize };
         if !lkl::add_virtio_mmio(base, size, irq) {
             println!("  virtio: Linux refused the device at {:#x}", base);
             return;
         }
+
         println!(
             "  virtio: device {} at {:#x} -> Linux, GIC {} as LKL irq {}",
             id,
@@ -639,10 +675,23 @@ unsafe fn claim_memory(fdt: &dt::Fdt, ram_start: usize, ram_end: usize) {
     // anywhere near the initrd: it fails later, in whatever happened to be
     // given the page, with the archive's bytes in it.
     let (istart, iend) = fdt.initrd().unwrap_or((0, 0));
+    // Linux's own physical memory, when Linux is managing memory. Fixed
+    // rather than allocated, because LKL's __pa() is the identity and a
+    // device has to be programmed with an address that is really there; see
+    // paging::LINUX_PHYS_BASE.
+    #[cfg(nk_lkl)]
+    let linux = (
+        paging::LINUX_PHYS_BASE as usize,
+        (paging::LINUX_PHYS_BASE + paging::LINUX_PHYS_SIZE) as usize,
+    );
+    #[cfg(not(nk_lkl))]
+    let linux = (0, 0);
+
     let mut reserved = [
         (image_start, image_end),
         (fdt.base(), fdt.base() + fdt.total_size()),
         (istart as usize, iend as usize),
+        linux,
     ];
     reserved.sort_unstable();
 

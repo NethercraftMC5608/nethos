@@ -482,12 +482,18 @@ static mut SHMEM: (u64, u64) = (0, 0);
 /// offsets into it and a gap would be a frame that is not where Linux thinks.
 #[no_mangle]
 pub extern "C" fn nk_shmem_init(size: usize) {
-    let pages = size.div_ceil(crate::frames::PAGE);
-    let base = crate::frames::alloc_contiguous(pages)
-        .expect("no contiguous memory for Linux's own address space");
+    // The fixed range, not one the allocator picks. See LINUX_PHYS_BASE: this
+    // address is also CONFIG_LKL_MEMORY_START, and the two being the same is
+    // what makes Linux's idea of a physical address true.
+    let base = crate::paging::LINUX_PHYS_BASE;
+    assert!(
+        size as u64 <= crate::paging::LINUX_PHYS_SIZE,
+        "Linux asked for {size} bytes and nk reserved {}",
+        crate::paging::LINUX_PHYS_SIZE
+    );
     unsafe {
-        core::ptr::write_bytes(base, 0, pages * crate::frames::PAGE);
-        SHMEM = (base as u64, (pages * crate::frames::PAGE) as u64);
+        core::ptr::write_bytes(base as *mut u8, 0, size);
+        SHMEM = (base, size as u64);
     }
 }
 
@@ -506,6 +512,10 @@ pub extern "C" fn nk_shmem_mmap(addr: usize, pg_off: usize, size: usize, _prot: 
     if ok {
         addr as *mut u8
     } else {
+        crate::println!(
+            "  nk: Linux asked to map {:#x} (offset {:#x}, {:#x} bytes) and nk has no window there",
+            addr, pg_off, size
+        );
         core::ptr::null_mut()
     }
 }

@@ -21,7 +21,12 @@ VMALLOC_BASE = '0x100000000UL'
 VMALLOC_TOP = '0x17fffffffUL'
 # Linux's linear map at six gigabytes and its user mmap base at seven, both
 # inside the window nk reserves and clear of its vmalloc arena.
-MEMORY_START = '0x180000000'
+# The linear map is a real physical address: nk reserves this range and hands
+# it back from shmem_init, so Linux's identity __pa() tells the truth.
+MEMORY_START = '0x50000000'
+# The stack top, which arch/lkl otherwise puts just below the linear map --
+# and therefore inside nk's identity map of RAM.
+STACK_TOP = '0x1e0000000UL'
 TASK_BASE = '0x1c0000000'
 
 UACCESS_H = '''/* SPDX-License-Identifier: GPL-2.0 */
@@ -187,55 +192,103 @@ def linux_address_space():
     _linear_map()
 
 
-def _vmalloc_arena():
-    path = 'arch/lkl/include/asm/pgtable.h'
+def define(path, values):
+    """Set `#define NAME ...` to the value wanted, for each name given.
+
+    Every run, and only rewriting when something differs. The tree is a docker
+    volume that survives between builds, so a patch here is a migration rather
+    than an edit: one that only knows how to apply itself can never be changed
+    afterwards, and deleting the line that set an address does not put the old
+    one back.
+
+    Matched by tokens, because these headers separate a name from its value
+    with tabs and a patch that has to reproduce invisible whitespace is one
+    that breaks on whitespace nobody can see.
+    """
     s = open(path).read()
-    if VMALLOC_BASE in s:
-        return
-    out, seen = [], 0
+    out, seen, changed = [], set(), False
     for line in s.split(chr(10)):
         word = line.split()
-        if len(word) >= 3 and word[0] == '#define' and word[1] == 'VMALLOC_START':
-            out.append('/* nk: above nk itself. See kernel/ldk/patch-lkl.py. */')
-            out.append('#define VMALLOC_START ' + VMALLOC_BASE)
-            seen += 1
-        elif len(word) >= 3 and word[0] == '#define' and word[1] == 'VMALLOC_END':
-            out.append('#define VMALLOC_END ' + VMALLOC_TOP)
-            seen += 1
+        if len(word) >= 3 and word[0] == '#define' and word[1] in values:
+            seen.add(word[1])
+            fixed = '#define ' + word[1] + ' ' + values[word[1]]
+            changed = changed or fixed != line
+            out.append(fixed)
         else:
             out.append(line)
-    if seen != 2:
-        sys.exit('patch-lkl: expected VMALLOC_START and VMALLOC_END in ' + path)
-    open(path, 'w').write(chr(10).join(out))
-    say("Linux's vmalloc arena moved above nk")
+    missing = set(values) - seen
+    if missing:
+        sys.exit('patch-lkl: ' + path + ' has no ' + ', '.join(sorted(missing)))
+    if changed:
+        open(path, 'w').write(chr(10).join(out))
+    return changed
+
+
+def _vmalloc_arena():
+    """Move everything Linux places by address into the window nk reserved.
+
+    The definitions that matter are the MMU ones. arch/lkl's pgtable.h has a
+    VMALLOC_START of its own, and it is in the `#ifndef CONFIG_MMU` half --
+    patching that one changes nothing and looks like it worked. With MMU the
+    values come from pgtable-mmu-3level.h, where VMALLOC_START is
+    `memory_end + VMALLOC_OFFSET`: directly on top of Linux's memory, which on
+    nk is inside the identity map of RAM.
+
+    STACK_TOP is the same problem from the other side -- it is
+    CONFIG_LKL_MEMORY_START minus a little, so it lands just *below* the linear
+    map, also in nk's RAM.
+    """
+    changed = define('arch/lkl/include/asm/pgtable-mmu-3level.h', {
+        'VMALLOC_START': VMALLOC_BASE,
+        'VMALLOC_END': VMALLOC_TOP,
+    })
+    changed |= define('arch/lkl/include/asm/processor.h', {
+        'STACK_TOP': STACK_TOP,
+        'STACK_TOP_MAX': STACK_TOP,
+    })
+    if changed:
+        say("Linux's vmalloc arena and stack moved into nk's window")
 
 
 def _linear_map():
-    # The linear map and the task mmap base are hex symbols with no prompt,
-    # so Kconfig takes their value from the `default` line and ignores any
-    # assignment in .config -- which is silent, and looks exactly like an
-    # assignment that worked until Linux asks the host to map its memory at
-    # the address it was always going to use.
+    """Set arch/lkl's memory-layout defaults to the ones nk agrees with.
+
+    Both are hex symbols with no prompt, so Kconfig takes their value from the
+    `default` line and ignores anything .config says -- silently, which looks
+    exactly like an assignment that worked.
+
+    Written every run rather than once, because the tree is a docker volume
+    that survives between builds: a patch here is a migration, not an edit, and
+    one that only knows how to apply itself cannot be changed later. Deleting
+    the line that set an address does not put the old one back, and the symptom
+    of that is a device programmed with an address that used to be right.
+
+    LKL_MEMORY_START is the linear map, and it is a *physical* address because
+    LKL's __pa() is the identity -- a physical address is the virtual address
+    it was mapped at. On a host that is a Unix process nothing notices, since
+    nothing does real DMA. nk hands Linux real hardware, so this has to be
+    memory that is really there, and nk reserves exactly this range.
+    """
     path = 'arch/lkl/Kconfig'
     s = open(path).read()
-    if MEMORY_START in s:
-        return
-    out, seen = [], 0
     want = {'LKL_MEMORY_START': MEMORY_START, 'LKL_TASK_UNMAPPED_BASE': TASK_BASE}
-    symbol = None
+    out, seen, changed, symbol = [], 0, False, None
     for line in s.split(chr(10)):
         word = line.split()
         if len(word) == 2 and word[0] == 'config':
             symbol = word[1]
         if len(word) == 2 and word[0] == 'default' and symbol in want:
-            out.append(line.split('default')[0] + 'default ' + want[symbol])
             seen += 1
+            fixed = line.split('default')[0] + 'default ' + want[symbol]
+            changed = changed or fixed != line
+            out.append(fixed)
         else:
             out.append(line)
-    if seen != 2:
-        sys.exit('patch-lkl: expected two defaults to move in ' + path)
-    open(path, 'w').write(chr(10).join(out))
-    say("Linux's linear map moved above nk")
+    if seen != len(want):
+        sys.exit('patch-lkl: expected ' + str(len(want)) + ' defaults in ' + path)
+    if changed:
+        open(path, 'w').write(chr(10).join(out))
+        say("Linux's memory layout set to nk's")
 
 
 def console_driver(shim):
