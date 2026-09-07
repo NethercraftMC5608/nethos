@@ -632,18 +632,83 @@ A wait status is not an exit code: the low byte says how the process died and
 the second says with what, so a normal exit is the code shifted up by eight.
 A libc's `WEXITSTATUS` undoes exactly that and gets nonsense from a plain code.
 
-**What fork does not yet do is inherit the parent's descriptors.** The child
-gets a fresh Linux task with its own filesystem context and its own empty
-descriptor table, because that is what `attach_process` builds. Real fork
-copies the table, and a shell needs it to -- redirection is a `dup2` in the
-child of an fd the parent opened. That is the next piece.
+**The child inherits its parent's descriptors, and not through LKL.** LKL's
+`new_host_task` clones every task from LKL's own init, never from the caller
+-- `kernel_thread()` clones `current`, and it switches to `host0` first -- so
+a forked child started with an empty table no matter who forked it.
+
+Rather than patch that, nk uses the syscalls Linux already has for reaching
+into another process's table: `pidfd_open` to name the parent and
+`pidfd_getfd` to pull each descriptor across. It is what a debugger or a
+container runtime does, it needs no kernel change, and it copies the *file
+description* rather than opening the file again -- so parent and child share
+the offset, which is what fork means and what stops two processes appending to
+the same log from overwriting each other.
+
+`pidfd_getfd` allocates the lowest free descriptor, which is not the number
+the parent used, and the number is what a program depends on; so each is moved
+into place with `dup3`. That cannot dislodge one already placed, because
+descriptors in use are not free and the lowest free is therefore never one of
+them. The copy happens before the parent is told the child exists, so the
+parent cannot close a descriptor in between.
+
+There is no syscall for "list the open descriptors", so it is a scan of the
+first sixty-four.
+
+### A console Linux owns, and a shell
+
+nk answered writes to descriptors 1 and 2 itself: it looked at the number, and
+if it was 1 or 2 the bytes went to the PL011 without Linux being told. That
+works for a program that prints and is exactly wrong for a shell, because
+`echo x > /tmp/out` is a `dup2` of a *file* onto descriptor 1 and nk would
+have gone on writing to the UART. Descriptors have to mean what Linux says
+they mean, which means the console has to be a file.
+
+`arch/lkl/drivers/nk-console.c` is a real tty driver, and a small one, because
+everything hard about a tty -- line discipline, canonical mode, echo, job
+control -- is Linux's and already written. What it adds is a way out
+(`lkl_ops->print`, the host operation LKL already uses for printk) and a way
+in (an interrupt nk raises when a key arrives, and a host call to collect it).
+`/dev/console` reaches it through `struct console.device`: Linux's
+`console_device()` walks the registered consoles and asks each for the tty
+driver behind it, and LKL's own console has none.
+
+Input is decoupled the way every LKL device is, and for a reason: a key
+arrives in an interrupt, and Linux cannot be called from there -- LKL's kernel
+runs under a lock nk does not hold. So nk buffers the byte and raises an
+interrupt; Linux's handler calls back to collect it. The ring is nk's memory
+and nothing in Linux touches it, which is what makes `nk_console_read` safe to
+call from Linux's interrupt context.
+
+Each process opens `/dev/console` onto 0, 1 and 2 before it enters EL0, and nk
+only answers by descriptor number for a process that has none.
+
+**One thing had to be fixed in LKL for a shell to fork more than twice.** LKL
+makes every host task with `kernel_thread()`, switching to `host0` -- its own
+init -- to do it. `kernel_thread()` returns `-ERESTARTNOINTR` when a signal is
+pending on the caller, which is right for a task that will handle the signal
+and retry. `host0` never handles anything: it is a kernel thread with no
+signal handling at all, so one pending signal is pending for ever and no host
+task can be created again. busybox reported `can't fork: Unknown error 513`.
+`patch-lkl.py` drops them, which is safe for the reason it is necessary --
+nothing reads them.
+
+With all of that, `busybox sh -c 'echo redirected > /tmp/out; busybox ls -l /;
+busybox cat /tmp/out'` runs: a shell, three children of its own, a file it
+created, and output sent somewhere other than the console and read back.
+
+**The patches to `arch/lkl` live in `kernel/ldk/patch-lkl.py`**, one function
+each with its reason. They are all the same kind of change: `arch/lkl` was
+written for a host that is a Unix process, and nk is a host that is a kernel
+with hardware. Where the two disagree the fix belongs in the architecture
+port, not in a translation layer on nk's side.
 
 ### What a real binary still cannot do
 
-Threads, signals, and any `mmap` of a file. A forked child does not inherit
-its parent's open descriptors. The rootfs is
-memory-backed and `/nk-init` is seeded from the kernel image, so the binary
-travels inside `nk.bin` rather than being read from a disk.
+Threads, signals, `#!` interpreter lines, and any `mmap` of a file. There is
+no interactive input yet: the console can carry it and nothing feeds the ring,
+because nk's UART receive path is not wired up. The rootfs is memory-backed,
+so nothing survives a reboot.
 
 ### The process image: a stack, a heap, and mappings
 

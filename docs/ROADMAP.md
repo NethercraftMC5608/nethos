@@ -396,9 +396,15 @@ the one below it.
 - [x] **Descriptor inheritance across fork**, with `pidfd_open` and
       `pidfd_getfd` rather than a patch to LKL's task creation -- it clones
       every task from its own init, never from the caller.
-- [ ] **A console Linux owns**, so fd 0/1/2 are ordinary descriptors and
-      redirection works. nk still answers writes to 1 and 2 itself, which
-      means a shell could not send its output to a file.
+- [x] **A console Linux owns.** A tty driver in `arch/lkl`, output through the
+      host operation LKL already uses for printk and input through an
+      interrupt nk raises. Each process opens `/dev/console` onto 0, 1 and 2,
+      and `busybox sh -c` now forks children, redirects into a file and reads
+      it back.
+- [ ] **`#!` interpreter lines**, so an init can be a shell script -- which is
+      what an init usually is.
+- [ ] **Interactive input.** The console can carry it; nk's UART receive path
+      is not wired up.
 - [ ] `mmap` of a file, `futex`, signals, `epoll` -- the long tail, and
       the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.
