@@ -89,6 +89,16 @@ pub struct Task {
     /// records -- Linux knows about its tasks but nk owns the address spaces
     /// and the exit statuses, so the relation has to live where those do.
     pub parent: usize,
+    /// Whether this task shares its address space with the one that made it.
+    ///
+    /// A thread does. It must not have the address space torn down when it
+    /// exits, because the threads it shares with are still using it -- and
+    /// the tables are the same tables, not a copy.
+    pub shares_mm: bool,
+    /// Where to write a zero and wake a futex when this task exits, if
+    /// `CLONE_CHILD_CLEARTID` asked for it. That write is what `pthread_join`
+    /// is waiting for.
+    pub clear_child_tid: u64,
     /// Whether this process has descriptors 0, 1 and 2 open on a real
     /// console. When it has not, nk answers writes to 1 and 2 itself, which
     /// prints and cannot redirect.
@@ -130,6 +140,8 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     brk_min: 0,
     mmap_next: 0,
     parent: 0,
+    shares_mm: false,
+    clear_child_tid: 0,
     has_console: false,
     user_syscall: false,
     tpidr: 0,
@@ -216,6 +228,8 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             brk_min: 0,
             mmap_next: 0,
             parent: 0,
+            shares_mm: false,
+            clear_child_tid: 0,
             has_console: false,
             user_syscall: false,
             tpidr: 0,
@@ -306,6 +320,19 @@ pub fn in_user_syscall() -> bool {
 }
 
 /// Record who forked whom, and answer questions about it.
+/// Mark a task as sharing its creator's address space, and say where to
+/// clear a thread id when it goes.
+pub fn set_thread(id: usize, clear_child_tid: u64) {
+    unsafe {
+        TASKS[id].shares_mm = true;
+        TASKS[id].clear_child_tid = clear_child_tid;
+    }
+}
+
+pub fn clear_child_tid() -> u64 {
+    unsafe { TASKS[CURRENT].clear_child_tid }
+}
+
 pub fn set_parent(child: usize, parent: usize) {
     unsafe { TASKS[child].parent = parent }
 }
@@ -518,7 +545,11 @@ pub fn reap_process(id: usize) {
         assert_ne!(id, CURRENT);
         let task = TASKS[id];
         assert!(task.state == State::Finished && task.linux_pid > 1);
-        crate::paging::destroy_user_address_space(task.ttbr0);
+        // A thread's address space belongs to the threads it shared it with,
+        // and they are still running in it.
+        if !task.shares_mm {
+            crate::paging::destroy_user_address_space(task.ttbr0);
+        }
         for i in 0..STACK_PAGES {
             frames::free((task.stack + i * PAGE) as *mut u8);
         }

@@ -960,8 +960,11 @@ is a real distinction and this does not claim to have crossed it.
 
 ### What a real binary still cannot do
 
-Threads, signals, and any `mmap` of a file. Nothing survives a reboot: the
-rootfs is memory-backed.
+Signals, and any *shared* file mapping -- `MAP_SHARED` on a file is refused
+rather than faked, because honouring it means writeback and a page cache
+shared with Linux's. Private file mappings and threads both work; they have
+their own sections below. Nothing survives a reboot unless it is on the
+virtio disk: the rootfs itself is memory-backed.
 
 ### The process image: a stack, a heap, and mappings
 
@@ -992,10 +995,13 @@ with no user half at all, so forwarding them would move Linux's own break and
 hand back an address the process cannot reach. The heap grows up from the
 first page past the loaded image; anonymous mappings grow down from 16MB below
 the stack. The two run out of room by *meeting*, which nk detects and refuses,
-rather than by one silently landing on the other. File-backed `mmap` is
-refused rather than faked: it would make the page cache nk's problem as well
-as Linux's, and returning memory that does not contain the file is worse than
-returning nothing.
+rather than by one silently landing on the other. A private file mapping (`MAP_PRIVATE` on a
+descriptor) is read through Linux at map time and never written back, which
+is exactly what a private mapping promises and is all a dynamic loader needs.
+`MAP_SHARED` on a file is still refused rather than faked: honouring it means
+writeback and a page cache that is nk's problem as well as Linux's, and
+returning memory that does not contain the file is worse than returning
+nothing.
 
 `brk` reports failure the way Linux does -- by returning the old break, never
 an errno -- because a libc that receives an errno here will not recognise it.
@@ -1069,14 +1075,59 @@ compiles the actual parser for host tests, including every truncated prefix
 of a valid file. `test_kernel_boot.py` exercises the VFS-to-ELF-to-EL0 chain
 and keeps the standalone and driver-shim boot paths covered.
 
+### Threads, and a futex that had to be nk's
+
+`pthread_create` is `clone` with `CLONE_VM|CLONE_THREAD|CLONE_SETTLS` and the
+two `*_SETTID` flags, and `pthread_join` is a futex. Both are nk's, and the
+futex is the more interesting of the two.
+
+**The futex could not be forwarded to Linux.** A futex is an address two
+threads agree on, and everything about that is a fact about the *address
+space* -- which is nk's. Linux has no mapping for the address and could not
+hash it into the same bucket for two threads even if it did, so forwarding
+would give each thread a private queue and a `pthread_join` that never
+returns. `kernel/core/src/futex.rs` keys on `(table_of(TTBR0), address)`
+instead: threads share a page table so they share a key, processes do not so
+the same numeric address in each is a different futex -- which is precisely
+what `FUTEX_PRIVATE_FLAG` means. It is a linear scan of 64 slots, because a
+handful of threads each waiting on one address is not a hash table's problem.
+
+The wake/sleep window is the classic one: check the value, then sleep, and a
+wake landing in between is lost. Interrupts are masked across both, a waker
+sets the waiter's `woken` flag before making the task runnable, and
+`block_on` restores interrupts only after the task is already marked blocked.
+
+**The bug worth recording is the one that was not in the futex at all.** The
+probe passed once, then failed every time the debugging prints came out --
+the signature of a race that printing had been hiding. Instrumentation
+recorded in the waiter rather than printed (a hang is exactly the state in
+which nothing is printing) showed the joining thread reading `26` at an
+address the exiting thread had provably written `0` to, in the same address
+space, with the write returning success. Nothing about that is possible in
+the order it appeared to happen -- which meant the order was wrong.
+
+It was. glibc passes the *same* address for `parent_tid` and `child_tid`, and
+nk's `clone` wrote the new thread id there after its handshake with the new
+task, so a thread short enough to finish first had its `clear_child_tid` zero
+overwritten by its creator writing the tid back. The join then waited on a
+thread id belonging to a task that had already exited. Linux writes both tids
+inside `copy_process`, before the child can run, and for this exact reason;
+nk now has the child write them itself before it releases its creator and
+before it reaches user code. The lesson is the general one: a value that must
+be visible before a task runs cannot be written by whoever is waiting for
+that task to start.
+
+`CLONE_VM` also means the address space outlives the thread, so `sched` grew
+`shares_mm` and reaping a thread no longer tears down page tables its
+siblings are still executing from.
+
 ### What is next
 
-Attach a persistent root device to LKL, walk nested pointer arguments
-(`execve`, `writev`, `sendmsg`), supply the full libc startup contract, and
-extend process inheritance beyond the bootstrap parent. Dynamic linking,
-signals, shared memory, futexes, thread register state and DRM/device access
-still require integration and validation. A working PID call and ELF fixture do not establish desktop
-compatibility or GPU acceleration.
+Signals, `MAP_SHARED` file mappings with writeback, and `switch_root` for a
+genuine root filesystem. Threads, dynamic linking, private file mappings,
+futexes and DRM/device access are done and covered by tests; a working thread
+and a framebuffer still do not establish desktop compatibility or GPU
+acceleration -- Mesa is now a rootfs problem rather than a kernel one.
 
 ## Historical symbol survey
 

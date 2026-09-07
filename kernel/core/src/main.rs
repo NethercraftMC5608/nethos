@@ -23,6 +23,8 @@ pub mod dt;
 pub mod elf;
 pub mod exceptions;
 pub mod frames;
+#[cfg(nk_lkl)]
+pub mod futex;
 pub mod gic;
 pub mod heap;
 pub mod hostops;
@@ -364,6 +366,8 @@ extern "C" fn watchdog(_: usize) {
         println!();
         #[cfg(nk_lkl)]
         report_virtio();
+        #[cfg(nk_lkl)]
+        futex::report();
         unsafe {
             println!(
                 "  watchdog {} at {} ticks: armed={} due={} fired={} last_deadline={}",

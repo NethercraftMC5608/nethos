@@ -16,24 +16,27 @@ class DynamicRuntime(unittest.TestCase):
                                 capture_output=True, text=True, timeout=60)
         cls.output = result.stdout + result.stderr
 
+    # Once each: nk starts one init, the way a kernel does. It ran two until
+    # the second was recognised as belonging to nk's own fixture, where the
+    # point is to check that two processes are independent.
     def test_debian_dynamic_libc(self):
-        self.assertEqual(self.output.count('DYNAMIC_LIBC_OK'), 2, self.output)
+        self.assertEqual(self.output.count('DYNAMIC_LIBC_OK'), 1, self.output)
 
     def test_private_file_mapping(self):
-        self.assertEqual(self.output.count('PRIVATE_FILE_MMAP_OK'), 2, self.output)
+        self.assertEqual(self.output.count('PRIVATE_FILE_MMAP_OK'), 1, self.output)
 
     def test_fixed_mapping_and_protection(self):
-        self.assertEqual(self.output.count('FIXED_MAPPING_OK'), 2, self.output)
+        self.assertEqual(self.output.count('FIXED_MAPPING_OK'), 1, self.output)
 
-    def test_thread_attempt_does_not_crash_kernel(self):
+    def test_nothing_faulted(self):
         self.assertNotIn('!!EXC', self.output)
         self.assertNotIn('!! kernel panic', self.output)
         self.assertIn('nk: done.', self.output)
-        self.assertTrue('PTHREAD_CREATE_FAILED: 38' in self.output or
-                        'PTHREAD_TLS_JOIN_OK' in self.output, self.output)
 
-    @unittest.expectedFailure
     def test_pthread_tls_and_join(self):
-        # Real pthread_create currently reaches nk's explicit CLONE_THREAD
-        # rejection. Keep the desired outcome visible, not a fake success.
-        self.assertEqual(self.output.count('PTHREAD_TLS_JOIN_OK'), 2, self.output)
+        # A real pthread_create, a worker that changes shared state and its
+        # own thread-local, a join, and a parent whose thread-local was left
+        # alone. This was an expected failure until nk had CLONE_THREAD and a
+        # futex of its own.
+        self.assertNotIn('PTHREAD_CREATE_FAILED', self.output)
+        self.assertEqual(self.output.count('PTHREAD_TLS_JOIN_OK'), 1, self.output)

@@ -409,8 +409,7 @@ the one below it.
 - [x] **`fork` and `wait4`.** The child is a copy of the parent at the
       instruction it forked on -- entered by restoring the parent's exception
       frame with x0 zeroed, not by jumping to an entry point -- with a real
-      copy of its memory and its permissions. `clone` refuses the flags that
-      would make a thread rather than quietly giving it its own memory. What
+      copy of its memory and its permissions. What
       is missing is descriptor inheritance: the child gets a fresh Linux task
       with an empty fd table, and a shell needs the parent's.
 - [x] **Descriptor inheritance across fork**, with `pidfd_open` and
@@ -429,8 +428,21 @@ the one below it.
       from a thread, and the driver holding the bytes until somebody has the
       console open -- because a flip buffer with no tty behind it accepts
       every byte and delivers none.
-- [ ] `mmap` of a file, `futex`, signals, `epoll` -- the long tail, and
-      the actual size of the problem. `docs/KERNEL.md` has the measurement of
+- [x] **Dynamic linking and private file mappings.** A Debian binary against
+      the real `ld-linux-aarch64.so.1` and shared glibc, with `MAP_PRIVATE`
+      file mappings read through Linux at map time and `MAP_FIXED` honoured.
+- [x] **Threads.** `pthread_create` and `pthread_join`, with thread-local
+      storage: `CLONE_VM|CLONE_THREAD|CLONE_SETTLS`, a futex that is nk's
+      because a futex key is a fact about an address space and the address
+      space is nk's, and an address space that outlives the threads sharing
+      it. The bug worth the section in `docs/KERNEL.md`: glibc passes the
+      same address for `parent_tid` and `child_tid`, so a thread short enough
+      to finish first had its `clear_child_tid` zero overwritten by its
+      creator writing the tid back, and the join waited forever on a thread
+      that had already exited. Linux writes both tids before the child runs,
+      for exactly this reason; nk does now too.
+- [ ] `MAP_SHARED` file mappings with writeback, signals, `epoll` -- the long
+      tail, and the actual size of the problem. `docs/KERNEL.md` has the measurement of
       what a desktop needs and why borrowing stops helping here.
 
 ### Not started, and honest about why

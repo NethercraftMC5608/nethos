@@ -204,6 +204,9 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // clone3 describes an EL0 context, not an LKL kernel-thread entry.
         // libc will fall back to clone; forwarding it can call a null fn.
         -38
+    } else if frame.x[8] == 98 && cfg!(nk_lkl) {
+        // The futex is nk's because the address space is: see futex.rs.
+        futex(frame)
     } else if matches!(frame.x[8], 220 | 260) {
         // clone and wait4. Both are nk's for the same reason execve is: the
         // address space and the exit status are nk's, not Linux's.
@@ -442,6 +445,23 @@ fn sys_munmap(addr: u64, len: u64) -> i64 {
     0
 }
 
+#[cfg(nk_lkl)]
+fn futex(frame: &Frame) -> i64 {
+    crate::futex::futex(
+        frame.x[0],
+        frame.x[1],
+        frame.x[2] as u32,
+        frame.x[3],
+        frame.x[4],
+        frame.x[5] as u32,
+    )
+}
+
+#[cfg(not(nk_lkl))]
+fn futex(_frame: &Frame) -> i64 {
+    -38
+}
+
 /// clone and wait4, or -ENOSYS on a build with no Linux behind them.
 #[cfg(nk_lkl)]
 fn process(frame: &Frame) -> i64 {
@@ -469,6 +489,16 @@ struct Forked {
     tpidr: u64,
     /// Whose descriptors the child is to inherit.
     parent_pid: i64,
+    /// A thread shares its creator's address space rather than owning a copy.
+    /// The failure path has to know: freeing it would take the address space
+    /// out from under the threads still running in it.
+    shares_mm: bool,
+    /// Addresses the clone asked to have the new thread id written to, or 0.
+    /// Written by the thread itself rather than by its creator: the creator
+    /// only regains control after the thread is already running, by which
+    /// time a short thread may have exited and cleared the very word we are
+    /// about to write. Linux writes these in copy_process for that reason.
+    set_tid: (u64, u64),
     /// Signalled once the child has a Linux pid, because `fork` has to return
     /// that pid to the parent and only the child can obtain one: attaching
     /// binds the Linux task to the host thread it runs on.
@@ -493,10 +523,15 @@ fn fork(frame: &Frame) -> i64 {
     // parent finds out here. Anything asking to share memory or files is a
     // thread and is refused.
     const CLONE_VM: u64 = 0x0100;
-    const CLONE_FILES: u64 = 0x0400;
     const CLONE_THREAD: u64 = 0x00010000;
-    if frame.x[0] & (CLONE_VM | CLONE_FILES | CLONE_THREAD) != 0 {
-        println!("  clone: threads are not implemented (flags {:#x})", frame.x[0]);
+    if frame.x[0] & CLONE_THREAD != 0 {
+        return thread(frame);
+    }
+    if frame.x[0] & CLONE_VM != 0 {
+        // Sharing memory without being a thread is vfork, and vfork's promise
+        // -- the parent stops until the child execs or exits -- is a thing nk
+        // would have to implement rather than approximate.
+        println!("  clone: CLONE_VM without CLONE_THREAD is not implemented");
         return -38; // -ENOSYS
     }
 
@@ -529,6 +564,8 @@ fn fork(frame: &Frame) -> i64 {
         mmap_next,
         tpidr,
         parent_pid: crate::sched::linux_pid(crate::sched::current_id()),
+        shares_mm: false,
+        set_tid: (0, 0),
         ready,
         pid,
     })) as usize;
@@ -562,17 +599,28 @@ extern "C" fn forked_entry(arg: usize) {
         Err(e) => {
             f.pid.store(e, Ordering::Release);
             f.ready.up();
-            unsafe { paging::destroy_user_address_space(f.ttbr0) };
+            if !f.shares_mm {
+                unsafe { paging::destroy_user_address_space(f.ttbr0) };
+            }
             return;
         }
     };
     crate::sched::bind_linux_pid(pid);
+    // Both before ready.up(): the creator must not observe the thread until
+    // its id is where the caller asked for it, and the thread must not reach
+    // user code — where it could exit and clear these words — before then.
+    let bytes = (pid as u32).to_le_bytes();
+    for addr in [f.set_tid.0, f.set_tid.1] {
+        if addr != 0 {
+            let _ = crate::uaccess::copy_to_user(addr, &bytes);
+        }
+    }
     // Before the parent is told the child exists, so the parent cannot close
     // a descriptor between forking and the child copying it.
     let inherited = crate::lkl::inherit_fds(f.parent_pid);
     f.pid.store(pid, Ordering::Release);
     f.ready.up();
-    if inherited > 0 {
+    if inherited > 0 && !f.shares_mm {
         println!("  fork: child {} inherited {} descriptors", pid, inherited);
     }
 
@@ -585,6 +633,90 @@ extern "C" fn forked_entry(arg: usize) {
             crate::sched::kernel_stack_top() as u64,
         )
     }
+}
+
+/// # clone(flags, stack, parent_tid, tls, child_tid) -- the thread column
+///
+/// A thread is the same program in the same address space with a stack of its
+/// own. So there is no copy here: the new task takes its creator's `TTBR0`
+/// unchanged, and the scheduler is told not to tear that address space down
+/// when the thread exits, because the threads it shares with are still in it.
+///
+/// What arrives in the new thread is the caller's register frame with three
+/// things changed -- `x0` is zero, the stack pointer is the one the caller
+/// passed, and `TPIDR_EL0` is the thread pointer it passed. glibc puts its
+/// whole thread-local area behind that pointer, so a thread with its parent's
+/// is a thread sharing its parent's `errno`.
+///
+/// On aarch64 the argument order is flags, stack, parent_tid, **tls**,
+/// child_tid -- the last two are the other way round on x86, and getting it
+/// wrong gives a thread whose thread pointer is a pointer to a thread id.
+#[cfg(nk_lkl)]
+fn thread(frame: &Frame) -> i64 {
+    use core::sync::atomic::{AtomicI64, Ordering};
+    const CLONE_PARENT_SETTID: u64 = 0x00100000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x00200000;
+    const CLONE_CHILD_SETTID: u64 = 0x01000000;
+    const CLONE_SETTLS: u64 = 0x00080000;
+
+    let flags_arg = frame.x[0];
+    let stack = frame.x[1];
+    let parent_tid = frame.x[2];
+    let tls = frame.x[3];
+    let child_tid = frame.x[4];
+
+    if stack == 0 {
+        // A thread with no stack of its own would run on its creator's, which
+        // is the one thing sharing an address space makes possible and fatal.
+        return -22; // -EINVAL
+    }
+
+    let ready: &'static crate::sync::Semaphore =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(crate::sync::Semaphore::new(0)));
+    let tid: &'static AtomicI64 =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(AtomicI64::new(0)));
+
+    let mut new = Frame { x: frame.x, elr: frame.elr, spsr: frame.spsr, sp: stack };
+    new.x[0] = 0;
+
+    let (brk, brk_min, mmap_next) = crate::sched::user_memory();
+    let mine: u64;
+    unsafe { core::arch::asm!("mrs {}, tpidr_el0", out(reg) mine, options(nomem, nostack)) };
+
+    let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(Forked {
+        frame: new,
+        ttbr0: current_ttbr0(),
+        brk,
+        brk_min,
+        mmap_next,
+        tpidr: if flags_arg & CLONE_SETTLS != 0 { tls } else { mine },
+        parent_pid: crate::sched::linux_pid(crate::sched::current_id()),
+        shares_mm: true,
+        set_tid: (
+            if flags_arg & CLONE_PARENT_SETTID != 0 { parent_tid } else { 0 },
+            if flags_arg & CLONE_CHILD_SETTID != 0 { child_tid } else { 0 },
+        ),
+        ready,
+        pid: tid,
+    })) as usize;
+
+    let me = crate::sched::current_id();
+    let flags = crate::sync::irq_save();
+    let id = crate::sched::spawn("thread", forked_entry, arg);
+    crate::sched::set_parent(id, me);
+    crate::sched::set_thread(
+        id,
+        if flags_arg & CLONE_CHILD_CLEARTID != 0 { child_tid } else { 0 },
+    );
+    unsafe { crate::sync::irq_restore(flags) };
+
+    ready.down();
+    let got = tid.load(Ordering::Acquire);
+    if got < 0 {
+        return got;
+    }
+
+    got
 }
 
 /// # wait4(pid, status, options, rusage)
@@ -870,8 +1002,32 @@ fn map_anonymous(at: u64, len: u64) -> bool {
 }
 
 fn sys_exit(status: i32) -> ! {
-    println!();
-    println!("  the process exited with status {}", status);
+    #[cfg(nk_lkl)]
+    {
+        // What pthread_join is waiting for.
+        //
+        // CLONE_CHILD_CLEARTID asks the kernel to zero a word in the thread's
+        // descriptor when it dies and wake anything sleeping on it. That is
+        // the entire mechanism behind a join: glibc does not poll, it futexes
+        // on that word, and a kernel that forgets this half gives a join that
+        // never returns and no other symptom.
+        let tidptr = crate::sched::clear_child_tid();
+        if tidptr != 0 {
+            let _ = crate::uaccess::copy_to_user(tidptr, &0u32.to_le_bytes());
+            crate::futex::futex(tidptr, 1, u32::MAX, 0, 0, u32::MAX);
+        }
+        crate::futex::forget(crate::sched::current_id());
+    }
+    // A thread exiting is not the process exiting, and saying so would be a
+    // lie in the middle of a program that is still running.
+    #[cfg(nk_lkl)]
+    let thread = crate::sched::clear_child_tid() != 0;
+    #[cfg(not(nk_lkl))]
+    let thread = false;
+    if !thread {
+        println!();
+        println!("  the process exited with status {}", status);
+    }
     #[cfg(nk_lkl)]
     {
         crate::sched::set_exit_status(status);
