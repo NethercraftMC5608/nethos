@@ -945,6 +945,14 @@ The image is built with `mke2fs -d`, which populates a filesystem from a
 directory without mounting anything or being root -- worth knowing, because
 the usual way to build a root image needs both.
 
+nk starts **one** init, the way a kernel does. It runs a second process only
+for its own fixture, where the whole point is to check that two of them are
+independent -- different Linux pids, separate descriptor tables, address
+spaces that survive being preempted into each other. Those are claims about
+nk, provable only against a program written to prove them, and running a
+supplied init twice made every demo read oddly: two shells racing for the same
+disk, two greetings, a spurious "another process has it".
+
 The disk is mounted by the program nk runs, not by nk. A root filesystem
 proper means `switch_root`, and that wants to be pid 1 in an initramfs, which
 nk's processes are not: they are ordinary Linux tasks that nk attached. That

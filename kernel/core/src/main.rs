@@ -208,55 +208,74 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             }
 
             println!("Now the same question from EL0:");
+            // One init, unless nk is running its own fixture.
+            //
+            // A kernel starts one init. The second process here exists to
+            // check that two of them are independent -- different Linux pids,
+            // separate descriptor tables, address spaces that survive being
+            // preempted into each other -- and every one of those is a claim
+            // about nk, provable only against a program written to prove it.
+            // Running a supplied init twice made every demo read oddly: two
+            // shells racing for the same disk, two greetings, a spurious
+            // "another process has it".
             let first = user::spawn_from_rootfs().expect("cannot load rootfs executable");
-            let second = user::spawn_from_rootfs().expect("cannot load rootfs executable");
-            let parent_mask = lkl::syscall(166, [0o22,0,0,0,0,0]);
-            let fd = lkl::syscall(56, [-100,c"/nk-init".as_ptr() as i64,0,0,0,0]);
+            let selftest = user::ran_fixture();
+
+            let parent_mask = lkl::syscall(166, [0o22, 0, 0, 0, 0, 0]);
+            let fd = lkl::syscall(56, [-100, c"/nk-init".as_ptr() as i64, 0, 0, 0, 0]);
             assert!(fd >= 0);
             selftest::process_descriptor(fd);
+
             let a = user::launch(first, Some(selftest::process_context));
-            let b = user::launch(second, Some(selftest::process_context));
+            let b = if selftest {
+                let second =
+                    user::spawn_from_rootfs().expect("cannot load rootfs executable");
+                Some(user::launch(second, Some(selftest::process_context)))
+            } else {
+                None
+            };
             sched::join(a);
-            sched::join(b);
+            if let Some(b) = b {
+                sched::join(b);
+            }
+
             let pa = sched::linux_pid(a);
-            let pb = sched::linux_pid(b);
-            assert!(pa > 1 && pb > 1 && pa != pb);
-            // The fixture exits with its own Linux pid, which is how the two
-            // processes prove they were told different ones. An externally
-            // supplied init exits with whatever it likes.
-            if user::ran_fixture() {
+            assert!(pa > 1);
+            if !selftest {
+                println!("  init: exited with {}", sched::exit_status(a));
+            }
+            assert_eq!(lkl::syscall(57, [fd, 0, 0, 0, 0, 0]), 0);
+            assert_eq!(lkl::syscall(166, [parent_mask, 0, 0, 0, 0, 0]), 0o22);
+
+            if let Some(b) = b {
+                let pb = sched::linux_pid(b);
+                assert!(pb > 1 && pa != pb);
+                // The fixture exits with its own Linux pid, which is how the
+                // two processes prove they were told different ones.
                 assert_eq!(sched::exit_status(a), pa as i32);
                 assert_eq!(sched::exit_status(b), pb as i32);
-            } else {
+                // That both Linux tasks are gone is only answerable while
+                // nothing else has been created since -- a pid Linux has
+                // finished with is one it is free to hand out again.
+                assert_eq!(lkl::syscall(129, [pa, 0, 0, 0, 0, 0]), -3);
+                assert_eq!(lkl::syscall(129, [pb, 0, 0, 0, 0, 0]), -3);
                 println!(
-                    "  init: exited with {} and {}",
-                    sched::exit_status(a),
-                    sched::exit_status(b)
+                    "  processes: distinct PIDs, private files/fs, both Linux tasks reaped"
                 );
-            }
-            assert_eq!(lkl::syscall(57, [fd,0,0,0,0,0]), 0);
-            assert_eq!(lkl::syscall(166, [parent_mask,0,0,0,0,0]), 0o22);
-            // Also claims about the fixture, and about a *quiet* one: that
-            // both Linux tasks are gone is only checkable while nothing else
-            // has been created since. A real init forks, and a pid it has
-            // finished with is one Linux is free to hand out again.
-            if user::ran_fixture() {
-                assert_eq!(lkl::syscall(129, [pa,0,0,0,0,0]), -3);
-                assert_eq!(lkl::syscall(129, [pb,0,0,0,0,0]), -3);
-                println!("  processes: distinct PIDs, private files/fs, both Linux tasks reaped");
-                assert_eq!(lkl::syscall(172, [0;6]), 1);
+                assert_eq!(lkl::syscall(172, [0; 6]), 1);
                 println!("  parent: Linux init survived both exits");
+                // The fixture spins long enough to be preempted several times
+                // on purpose, which is how it shows that address spaces
+                // survive a switch. A real binary is simply too quick.
+                assert!(sched::user_irqs(a) > 0 && sched::user_irqs(b) > 0);
+                println!(
+                    "  processes: EL0 IRQs {} and {}, private stacks survived",
+                    sched::user_irqs(a),
+                    sched::user_irqs(b)
+                );
+                sched::reap_process(b);
             }
-            // The fixture spins long enough to be preempted several times on
-            // purpose, which is how it demonstrates that address spaces
-            // survive a switch. A real binary is simply too quick, so this
-            // is a claim about the fixture and not about the kernel.
-            assert!(
-                !user::ran_fixture() || (sched::user_irqs(a) > 0 && sched::user_irqs(b) > 0)
-            );
-            println!("  processes: EL0 IRQs {} and {}, private stacks survived", sched::user_irqs(a), sched::user_irqs(b));
             sched::reap_process(a);
-            sched::reap_process(b);
             println!("  processes: nk page tables, pages and task stacks reclaimed");
         }
         stop();

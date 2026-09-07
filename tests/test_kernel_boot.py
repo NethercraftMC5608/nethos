@@ -703,10 +703,8 @@ class PersistentDisk(unittest.TestCase):
         init.write_text(
             '#!/bin/busybox sh\n'
             'busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null\n'
-            # nk launches two processes; the second finds the disk already
-            # mounted, which is a race in the test rather than in the kernel.
-            'busybox mount -t ext4 /dev/vda /mnt 2>/dev/null || {\n'
-            '  echo "root: another process has it"; exit 0; }\n'
+            'busybox mount -t ext4 /dev/vda /mnt || {\n'
+            '  echo "root: mount failed"; exit 1; }\n'
             'echo "root: ext4 mounted from /dev/vda"\n'
             'busybox cat /mnt/etc/greeting\n'
             'echo "root: boot log so far:"\n'
@@ -737,6 +735,14 @@ class PersistentDisk(unittest.TestCase):
         # on nk put it there, on a previous boot of the machine.
         self.assertIn('a boot happened', self.second)
         self.assertNotIn('(none: first boot)', self.second)
+
+    def test_only_one_init_runs(self):
+        # A kernel starts one init. nk runs a second process only for its own
+        # fixture, where the point is to check that two of them are
+        # independent; a supplied init running twice raced itself for the
+        # disk.
+        self.assertEqual(self.first.count('root: ext4 mounted from /dev/vda'), 1)
+        self.assertNotIn('root: mount failed', self.first)
 
     def test_nothing_faulted(self):
         for out in (self.first, self.second):
