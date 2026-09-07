@@ -225,12 +225,14 @@ pub unsafe extern "C" fn nk_thread_create(f: unsafe extern "C" fn(*mut u8), arg:
     entries[slot] = Some((f, arg));
     let task = sched::spawn("linux", trampoline, slot);
     irq_restore(flags);
-    task
+    // The unique id, not the slot: Linux keeps this for the thread's whole
+    // life and compares it with `thread_self()`. See `sched::uid`.
+    sched::uid(task)
 }
 
 #[no_mangle]
 pub extern "C" fn nk_thread_self() -> usize {
-    sched::current_id()
+    sched::current_uid()
 }
 
 #[no_mangle]
@@ -240,7 +242,12 @@ pub extern "C" fn nk_thread_exit() -> ! {
 
 #[no_mangle]
 pub extern "C" fn nk_thread_join(id: usize) -> i32 {
-    sched::join(id);
+    // A stale id resolves to nothing rather than to whoever took the slot
+    // next, so joining a thread that has already gone succeeds immediately
+    // instead of waiting on a stranger.
+    if let Some(task) = sched::from_uid(id) {
+        sched::join(task);
+    }
     0
 }
 

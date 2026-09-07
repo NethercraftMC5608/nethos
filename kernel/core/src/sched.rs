@@ -94,6 +94,18 @@ pub struct Task {
     /// A thread does. It must not have the address space torn down when it
     /// exits, because the threads it shares with are still using it -- and
     /// the tables are the same tables, not a copy.
+    /// How many times this slot has been used.
+    ///
+    /// A task id is a slot index and slots are reused, so an id alone does
+    /// not identify a thread over time: a task exits, its slot is taken by
+    /// the next one, and the two are indistinguishable. That is fine inside
+    /// nk, which only ever asks about live tasks -- and wrong for Linux,
+    /// which holds `cpu.owner` across a task's whole life and compares it
+    /// with `thread_self()` to decide whether it already owns the CPU lock.
+    /// An alias there is not a cosmetic mix-up: matching a dead owner takes
+    /// the lock without acquiring it, and failing to match one waits on a
+    /// thread that no longer exists. See `uid`.
+    pub generation: u64,
     pub shares_mm: bool,
     /// Where to write a zero and wake a futex when this task exits, if
     /// `CLONE_CHILD_CLEARTID` asked for it. That write is what `pthread_join`
@@ -168,6 +180,7 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     brk_min: 0,
     mmap_next: 0,
     parent: 0,
+    generation: 0,
     shares_mm: false,
     clear_child_tid: 0,
     has_console: false,
@@ -239,6 +252,10 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             .position(|t| t.state == State::Unused)
             .expect("no free task slots");
 
+        // Bumped before the task exists, so no id for this incarnation can
+        // ever equal one handed out for the last occupant of the slot.
+        let generation = tasks[slot].generation.wrapping_add(1);
+
         let stack = frames::alloc_contiguous(STACK_PAGES).expect("out of memory for a task stack");
         let top = stack as usize + STACK_PAGES * PAGE;
 
@@ -274,6 +291,7 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             brk_min: 0,
             mmap_next: 0,
             parent: 0,
+            generation,
             shares_mm: false,
             clear_child_tid: 0,
             has_console: false,
@@ -713,6 +731,34 @@ pub fn yield_now() {
 }
 
 /// Which task is running. The identity a semaphore or a join needs.
+/// An identity for a task that is unique for the life of the machine.
+///
+/// The slot in the low bits, the generation above it. Linux is given this
+/// rather than the slot: it keeps `cpu.owner` for as long as a thread lives
+/// and compares it against `thread_self()`, so an identity that a later
+/// thread can repeat makes it take a lock it never acquired or wait for a
+/// thread that has gone.
+pub fn uid(id: usize) -> usize {
+    debug_assert!(id < MAX_TASKS);
+    unsafe { ((TASKS[id].generation as usize) << 16) | id }
+}
+
+/// The slot a `uid` names, if that incarnation is still the one in it.
+/// `None` once the task has exited, which is the whole point: a stale id
+/// must resolve to nothing rather than to whoever took the slot next.
+pub fn from_uid(uid: usize) -> Option<usize> {
+    let id = uid & 0xffff;
+    if id >= MAX_TASKS {
+        return None;
+    }
+    let generation = (uid >> 16) as u64;
+    unsafe { (TASKS[id].generation == generation).then_some(id) }
+}
+
+pub fn current_uid() -> usize {
+    uid(current_id())
+}
+
 pub fn current_id() -> usize {
     unsafe { core::ptr::read(&raw const CURRENT) }
 }
