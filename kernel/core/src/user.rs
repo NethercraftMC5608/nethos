@@ -49,6 +49,15 @@ pub const USER_STACK_TOP: u64 = 0x3000_0000;
 /// Between the heap growing up from the end of the image and this growing
 /// down, the two run out of room by meeting -- which nk can detect and refuse
 /// -- rather than by one silently landing on the other.
+///
+/// The 16MB gap below the stack is the main thread's stack guard plus room
+/// for the signal trampoline page (0x3FF0_0000); mappings must stay clear of
+/// both. The gap is not the budget: the budget is TOP itself. nethosd with
+/// six threads peaks at ~730MB of live anonymous reservations against a
+/// ~732MB usable window (measured 2026-09-08: green boot's lowest base
+/// 0x1782000, red boot's extra 128MB arena refused) -- so this number is
+/// the M1 ceiling, not a guess. Raising it toward RAM top (0x4000_0000)
+/// is possible but moves the stack too; see USER_STACK_TOP.
 pub const USER_MMAP_TOP: u64 = USER_STACK_TOP - 16 * 1024 * 1024;
 
 /// How much stack a process starts with. One page was enough for a program
@@ -270,7 +279,7 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // reach. They are the calls nk has to answer itself.
         match frame.x[8] {
             214 => sys_brk(frame.x[0]),
-            222 => sys_mmap(frame.x[0], frame.x[1], frame.x[2], frame.x[3], frame.x[4] as i64, frame.x[5]),
+            222 => sys_mmap(frame.x[0], frame.x[1], frame.x[2], frame.x[3], frame.x[4] as i64, frame.x[5], frame.elr),
             215 => sys_munmap(frame.x[0], frame.x[1]),
             226 => {
                 let r = sys_mprotect(frame.x[0], frame.x[1], frame.x[2]);
@@ -639,7 +648,7 @@ fn sys_brk(addr: u64) -> i64 {
 /// A shared mapping is the same physical pages for every holder, filled once
 /// from the file and written back on `munmap` or `msync`. Anonymous shared
 /// mappings have no file and are never written back.
-fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
+fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64, elr: u64) -> i64 {
     if length == 0 || length > USER_MAP_LIMIT || offset & 4095 != 0 || prot & !7 != 0 {
         return -22;
     }
@@ -665,13 +674,22 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
     // `PROT_NONE` reserve. Fixed mappings name their address and need none.
     // The reservation only guarantees non-overlap with other reservations;
     // the range checks below still apply, and a rejected reservation leaks
-    // address space (not memory) -- see `reserve_mmap`.
+    // address space (not memory) -- see `reserve_mmap`. Failure lines name
+    // the requester (elr) so the consumer can be found, not guessed.
     let at = if fixed {
         addr
     } else {
         match crate::sched::reserve_mmap(len) {
             Some(v) => v,
-            None => return -12,
+            None => {
+                let (used, total) = crate::frames::stats();
+                let (brk0, _, next0) = crate::sched::user_memory();
+                crate::println!(
+                    "  mmapfail reserve len {:#x} flags {:#x} fd {} brk {:#x} mmap_next {:#x} frames {}/{} elr {:#x}",
+                    len, flags, fd, brk0, next0, used, total, elr
+                );
+                return -12;
+            }
         }
     };
     let (brk, _, _) = crate::sched::user_memory();
@@ -681,6 +699,11 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
     // The current low-half layout still contains QEMU's devices. Never
     // replace those inherited mappings, even for a caller using MAP_FIXED.
     if at & 4095 != 0 || at < brk || end > USER_MMAP_TOP || (at < 0x0a20_0000 && end > 0x0800_0000) {
+        let (_, _, next0) = crate::sched::user_memory();
+        crate::println!(
+            "  mmapfail range len {:#x} at {:#x} end {:#x} brk {:#x} mmap_next {:#x} flags {:#x} fd {} elr {:#x}",
+            len, at, end, brk, next0, flags, fd, elr
+        );
         return -12;
     }
     let executable = prot & 4 != 0;
@@ -1490,6 +1513,7 @@ fn current_ttbr0() -> u64 {
     v
 }
 
+/// ELR of the EL0 caller is threaded through from the dispatch frame.
 pub fn current_ttbr0_pub() -> u64 {
     current_ttbr0()
 }
