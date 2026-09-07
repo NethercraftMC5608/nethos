@@ -141,7 +141,7 @@ pub fn run(p: &Process) -> ! {
     println!();
     // The memory layout belongs to the running task, because `brk` and `mmap`
     // are answered from whichever thread makes the call, and this is it.
-    crate::sched::set_user_memory(p.brk, USER_MMAP_TOP);
+    crate::sched::set_user_memory_for(p.ttbr0, p.brk, USER_MMAP_TOP);
     unsafe { enter_user(p.entry, p.stack, p.ttbr0) }
 }
 
@@ -184,6 +184,21 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // address is an unmapped page; an alignment fault is the pc itself.
         println!("!! fault in user space: esr {:#x} ec {:#b} il {} iss {:#x} far {:#x}", esr, ec, (esr >> 25) & 1, esr & 0x1ffffff, far);
         println!("   pc {:#x}  sp {:#x}  lr {:#x}", frame.elr, frame.sp, frame.x[30]);
+        // Which task faulted, in whose tables. Threads share an address space
+        // and a fault in one stops only that task; without the id a fault in
+        // a server thread reads like the death of the main process.
+        {
+            let me = crate::sched::current_id();
+            let ttbr0: u64;
+            unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) ttbr0, options(nomem, nostack)) };
+            println!(
+                "   task {} ttbr0 {:#x} linux_pid {}",
+                me,
+                ttbr0,
+                crate::sched::linux_pid(me)
+            );
+            crate::paging::dump_walk(ttbr0, far);
+        }
         // The process is what should die here, not the machine. nk has
         // nothing else to run yet, so it stops -- but reporting it as a user
         // fault rather than a kernel one is the distinction the whole
@@ -595,13 +610,21 @@ fn sys_brk(addr: u64) -> i64 {
         return brk as i64;
     }
     if want > brk {
+        // Mapped before committing: a sibling thread growing the heap at
+        // the same time re-checks in `commit_brk`, so an overlap fails
+        // rather than silently sharing pages.
         if !map_anonymous(brk, want - brk) {
             return brk as i64;
         }
+        let committed = crate::sched::commit_brk(addr, want);
+        if committed != addr {
+            unsafe { crate::paging::unmap_user(current_ttbr0(), brk, want - brk) };
+            return committed as i64;
+        }
     } else if want < brk {
         unsafe { crate::paging::unmap_user(current_ttbr0(), want, brk - want) };
+        crate::sched::set_user_brk(want);
     }
-    crate::sched::set_user_brk(want);
     // The *requested* address, not the page it rounded up to. Linux tracks
     // the break at byte granularity even though it maps whole pages, and a
     // libc told it got more than it asked for will hand the difference out
@@ -634,10 +657,27 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
     // is ignored, by the same rule Linux applies.
     let anonymous = flags & 0x20 != 0;
     let len = length.div_ceil(4096)*4096;
-    let (brk, _, next) = crate::sched::user_memory();
     let fixed = flags & 0x10 != 0;
-    let at = if fixed { addr } else { match next.checked_sub(len) { Some(v) => v, None => return -12 } };
-    let Some(end) = at.checked_add(len) else { return -22; };
+    // Non-fixed mappings draw from the address space's shared pool, reserved
+    // up front under one critical section: threads share these tables, so
+    // two of them reading `mmap_next` apart and both subtracting is two
+    // overlapping mappings, one thread's committed page inside another's
+    // `PROT_NONE` reserve. Fixed mappings name their address and need none.
+    // The reservation only guarantees non-overlap with other reservations;
+    // the range checks below still apply, and a rejected reservation leaks
+    // address space (not memory) -- see `reserve_mmap`.
+    let at = if fixed {
+        addr
+    } else {
+        match crate::sched::reserve_mmap(len) {
+            Some(v) => v,
+            None => return -12,
+        }
+    };
+    let (brk, _, _) = crate::sched::user_memory();
+    let Some(end) = at.checked_add(len) else {
+        return -22;
+    };
     // The current low-half layout still contains QEMU's devices. Never
     // replace those inherited mappings, even for a caller using MAP_FIXED.
     if at & 4095 != 0 || at < brk || end > USER_MMAP_TOP || (at < 0x0a20_0000 && end > 0x0800_0000) {
@@ -671,7 +711,6 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
             if region == usize::MAX {
                 return -12; // -ENOMEM
             }
-            if !fixed { crate::sched::set_user_mmap_next(at); }
             if !crate::sched::add_shared_map(SharedMap { start: at, len, region, fd: -1, anonymous: true }) {
                 unsafe { crate::paging::unmap_user_nofree(current_ttbr0(), at, len) };
                 crate::shm::release_anon(region);
@@ -686,7 +725,6 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
             Ok(r) => r,
             Err(e) => return e,
         };
-        if !fixed { crate::sched::set_user_mmap_next(at); }
         if !crate::sched::add_shared_map(SharedMap { start: at, len, region, fd, anonymous: false }) {
             // The table is full. Undo the mapping and say so: the pool
             // reference is released, the pages stay for other holders.
@@ -757,7 +795,6 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64)
         unsafe { paging::map_user_permissions(root,at+i as u64*4096,page as u64,4096,prot&4!=0,prot&2!=0); }
     }
     if prot == 0 { unsafe { paging::protect_user_none(root, at, len); } }
-    if !fixed { crate::sched::set_user_mmap_next(at); }
     at as i64
 }
 
@@ -843,9 +880,6 @@ fn process(frame: &Frame) -> i64 {
 struct Forked {
     frame: Frame,
     ttbr0: u64,
-    brk: u64,
-    brk_min: u64,
-    mmap_next: u64,
     tpidr: u64,
     /// Whose descriptors the child is to inherit.
     parent_pid: i64,
@@ -931,8 +965,10 @@ fn fork(frame: &Frame) -> i64 {
     let Some(ttbr0) = (unsafe { paging::copy_user_address_space(parent) }) else {
         return -12; // -ENOMEM
     };
+    // The child's tables are a copy; so is its layout entry. From here the
+    // two address spaces allocate independently.
+    crate::sched::set_user_memory_full(ttbr0, false);
 
-    let (brk, brk_min, mmap_next) = crate::sched::user_memory();
     let tpidr: u64;
     unsafe { core::arch::asm!("mrs {}, tpidr_el0", out(reg) tpidr, options(nomem, nostack)) };
 
@@ -952,9 +988,6 @@ fn fork(frame: &Frame) -> i64 {
     let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(Forked {
         frame: child_frame,
         ttbr0,
-        brk,
-        brk_min,
-        mmap_next,
         tpidr,
         parent_pid: crate::sched::linux_pid(me0),
         shares_mm: false,
@@ -1018,6 +1051,7 @@ extern "C" fn forked_entry(arg: usize) {
             f.ready.up();
             if !f.shares_mm {
                 unsafe { paging::destroy_user_address_space(f.ttbr0) };
+                crate::sched::drop_user_memory(f.ttbr0);
             }
             return;
         }
@@ -1052,7 +1086,6 @@ extern "C" fn forked_entry(arg: usize) {
         println!("  fork: child {} inherited {} descriptors", pid, inherited);
     }
 
-    crate::sched::set_user_memory_full(f.brk, f.brk_min, f.mmap_next);
     crate::sched::set_shared_maps(&f.shared);
     if !f.shares_mm {
         // A forked child inherits dispositions, mask and altstack -- and
@@ -1119,16 +1152,12 @@ fn thread(frame: &Frame) -> i64 {
     let mut new = Frame { x: frame.x, elr: frame.elr, spsr: frame.spsr, sp: stack };
     new.x[0] = 0;
 
-    let (brk, brk_min, mmap_next) = crate::sched::user_memory();
     let mine: u64;
     unsafe { core::arch::asm!("mrs {}, tpidr_el0", out(reg) mine, options(nomem, nostack)) };
 
     let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(Forked {
         frame: new,
         ttbr0: current_ttbr0(),
-        brk,
-        brk_min,
-        mmap_next,
         tpidr: if flags_arg & CLONE_SETTLS != 0 { tls } else { mine },
         parent_pid: crate::sched::linux_pid(crate::sched::current_id()),
         shares_mm: true,
@@ -1367,12 +1396,13 @@ fn sys_execve(path: u64, argv: u64, envp: u64) -> i64 {
             in(reg) p.ttbr0, options(nostack)
         );
         paging::destroy_user_address_space(old);
+        crate::sched::drop_user_memory(old);
         // The thread pointer belonged to the program that is gone. A libc
         // sets its own before it needs one; leaving the old value would give
         // the new program a pointer into memory that has just been freed.
         core::arch::asm!("msr tpidr_el0, xzr", options(nomem, nostack));
     }
-    crate::sched::set_user_memory(p.brk, USER_MMAP_TOP);
+    crate::sched::set_user_memory_for(p.ttbr0, p.brk, USER_MMAP_TOP);
     println!("  execve: replaced this process with {} bytes at {:#x}", bytes.len(), p.entry);
     unsafe { enter_user_fresh(p.entry, p.stack, p.ttbr0, crate::sched::kernel_stack_top() as u64) }
 }

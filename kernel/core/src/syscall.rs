@@ -29,8 +29,78 @@ use crate::sched;
 /// descriptor", and now it means only that a build without Linux has nothing
 /// to forward to.
 pub fn forward(nr: u64, args: &[u64; 6]) -> Option<i64> {
+    count_entry(nr);
     let was = sched::set_user_syscall(true);
     let ret = lkl::syscall(nr as i64, args.map(|a| a as i64));
     sched::set_user_syscall(was);
+    count_exit(nr);
     Some(ret)
 }
+
+/// Entries and exits per syscall number, saturated. The wedge leaves the
+/// process task READY-spinning; if it spins through here some number runs
+/// away, and entry-minus-exit names a call that entered Linux and never came
+/// back. Printed by the watchdog.
+static mut ENTRIES: [u64; 512] = [0; 512];
+static mut EXITS: [u64; 512] = [0; 512];
+
+#[inline]
+fn count_entry(nr: u64) {
+    let i = (nr as usize).min(511);
+    unsafe {
+        let c = &raw mut ENTRIES;
+        (*c)[i] = (*c)[i].wrapping_add(1);
+    }
+}
+
+#[inline]
+fn count_exit(nr: u64) {
+    let i = (nr as usize).min(511);
+    unsafe {
+        let c = &raw mut EXITS;
+        (*c)[i] = (*c)[i].wrapping_add(1);
+    }
+}
+
+/// The busiest forwarded calls and any entered-but-not-returned one.
+pub fn report() {
+    unsafe {
+        let entries = &*(&raw const ENTRIES);
+        let exits = &*(&raw const EXITS);
+        // Ten busiest, by entries. A spinning forwarder shows up here as a
+        // count in the millions advancing between watchdog rounds.
+        for _ in 0..10 {
+            let mut best = 0usize;
+            let mut best_n = 0u64;
+            for (nr, n) in entries.iter().enumerate() {
+                if *n > best_n && !REPORTED[nr] {
+                    best_n = *n;
+                    best = nr;
+                }
+            }
+            if best_n == 0 {
+                break;
+            }
+            REPORTED[best] = true;
+            crate::println!(
+                "          syscall {:<4} entries {:<10} exits {}",
+                best,
+                best_n,
+                exits[best]
+            );
+        }
+        for nr in 0..512 {
+            REPORTED[nr] = false;
+        }
+        for nr in 0..512 {
+            if entries[nr] != exits[nr] {
+                crate::println!(
+                    "          syscall {:<4} IN FLIGHT (entries {} exits {})",
+                    nr, entries[nr], exits[nr]
+                );
+            }
+        }
+    }
+}
+
+static mut REPORTED: [bool; 512] = [false; 512];

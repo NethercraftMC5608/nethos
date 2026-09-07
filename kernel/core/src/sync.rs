@@ -110,8 +110,12 @@ pub fn report() {
             let (count, waiters) = (s.count.load(SeqCst), s.waiters.load(SeqCst));
             if waiters != 0 || count != 0 {
                 crate::println!(
-                    "          sem   {:<3} count {:<4} waiters {:#018b}",
-                    s.id, count, waiters
+                    "          sem   {:<3} count {:<4} waiters {:#018b} ups {} downs {}",
+                    s.id,
+                    count,
+                    waiters,
+                    s.ups.load(SeqCst),
+                    s.downs.load(SeqCst)
                 );
             }
         }
@@ -155,11 +159,25 @@ pub struct Semaphore {
     pub id: u32,
     count: AtomicI32,
     waiters: AtomicU64,
+    /// Lifetime totals. The watchdog prints them for any semaphore with a
+    /// waiter: `ups` counted but the waiter still there means the wake went
+    /// somewhere else (or nowhere); no `ups` at all means nobody left is in
+    /// a position to wake it -- the scheduler is dead, not lossy.
+    ups: AtomicU64,
+    /// Times `down` found no token and parked. Fast-path takes leave no
+    /// trace; every one of these is a sleep that needed a matching wake.
+    downs: AtomicU64,
 }
 
 impl Semaphore {
     pub fn new(count: i32) -> Self {
-        Semaphore { id: next_id(), count: AtomicI32::new(count), waiters: AtomicU64::new(0) }
+        Semaphore {
+            id: next_id(),
+            count: AtomicI32::new(count),
+            waiters: AtomicU64::new(0),
+            ups: AtomicU64::new(0),
+            downs: AtomicU64::new(0),
+        }
     }
 
     pub fn down(&self) {
@@ -172,6 +190,7 @@ impl Semaphore {
                 return;
             }
             self.waiters.fetch_or(1u64 << sched::current_id(), SeqCst);
+            self.downs.fetch_add(1, SeqCst);
             // Marks this task blocked, restores `flags`, and switches away.
             // An `up` arriving after the bit is set but before the switch
             // finds the task already blocked and makes it ready again.
@@ -182,6 +201,7 @@ impl Semaphore {
     pub fn up(&self) {
         let flags = irq_save();
         self.count.fetch_add(1, SeqCst);
+        self.ups.fetch_add(1, SeqCst);
         // Exactly one waiter, not all of them.
         //
         // Waking all of them and letting the losers re-check looks harmless

@@ -231,6 +231,7 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
             selftest::process_descriptor(fd);
 
             let a = user::launch(first, Some(selftest::process_context));
+            sched::set_init_task(a);
             let b = if selftest {
                 let second =
                     user::spawn_from_rootfs().expect("cannot load rootfs executable");
@@ -357,10 +358,17 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
     }
 }
 
-/// Report what the machine is doing, four times, then stop.
+/// Report what the machine is doing, once a second, until init finishes.
+///
+/// Used to be four rounds and then `stop()`: a four-second guillotine that
+/// killed every test longer than four seconds mid-syscall and presented as a
+/// kernel wedge. Now it waits for the init task and keeps a generous backstop
+/// (two minutes, past any `--timeout` a hung boot would hit first) so a real
+/// deadlock still ends with a wait graph rather than a killed QEMU.
 #[cfg(nk_lkl)]
 extern "C" fn watchdog(_: usize) {
-    for round in 0..4 {
+    let mut round = 0u32;
+    loop {
         let until = timer::ticks() + timer::HZ;
         while timer::ticks() < until {
             sched::yield_now();
@@ -383,10 +391,26 @@ extern "C" fn watchdog(_: usize) {
         }
         sched::report();
         sync::report();
+        crate::syscall::report();
         unsafe {
             if sched::LOST_WAKEUPS != 0 {
                 println!("          {} lost wakeups", sched::LOST_WAKEUPS);
             }
+        }
+        // LKL-side spot check on the last backstop round only (see below):
+        // is the CPU still acquirable from a fresh entry?
+        if round == 120 {
+            let pid = crate::lkl::syscall(172, [0; 6]);
+            println!("          watchdog getpid -> {}", pid);
+        }
+        round += 1;
+        if sched::init_done() {
+            println!("  watchdog: init finished after {}s", round);
+            break;
+        }
+        if round >= 121 {
+            println!("  watchdog: init still running after {}s -- stopping with the graph above", round);
+            break;
         }
     }
     stop();

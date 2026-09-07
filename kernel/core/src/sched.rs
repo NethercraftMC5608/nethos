@@ -354,28 +354,218 @@ pub fn schedule() {
     }
 }
 
+/// The memory layout of one address space: heap break, its floor, and where
+/// the next anonymous mapping goes.
+///
+/// Per address space, keyed by `TTBR0` -- not per task. Threads share their
+/// creator's tables, so two threads allocating at once must draw from the
+/// same pool: per-task copies diverge, hand out overlapping regions, and one
+/// thread's committed page lands in another's `PROT_NONE` reserve (an EL0
+/// permission fault in a thread that did nothing wrong, while the committing
+/// `mprotect` prints success a line later). `fork` copies the entry for the
+/// child's new root; a new thread shares its creator's.
+///
+/// Fixed-size and linear: one entry per live process at most, scanned with
+/// interrupts masked. Entries are dropped when the address space is
+/// destroyed (`reap_process` for processes, `execve` for the old root).
+#[derive(Clone, Copy)]
+struct MmLayout {
+    ttbr0: u64,
+    brk: u64,
+    brk_min: u64,
+    mmap_next: u64,
+    live: bool,
+}
+
+static mut MM: [MmLayout; MAX_TASKS] = [MmLayout {
+    ttbr0: 0,
+    brk: 0,
+    brk_min: 0,
+    mmap_next: 0,
+    live: false,
+}; MAX_TASKS];
+
+/// The layout for `ttbr0`, if it has one.
+fn mm_find(ttbr0: u64) -> Option<(u64, u64, u64)> {
+    unsafe {
+        (*(&raw const MM))
+            .iter()
+            .find(|e| e.live && e.ttbr0 == ttbr0)
+            .map(|e| (e.brk, e.brk_min, e.mmap_next))
+    }
+}
+
+fn mm_current_ttbr0() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+/// Give an address space its memory layout, just before a task enters EL0
+/// in it. The root is passed explicitly: at every call site the new tables
+/// exist but are not installed yet (spawn, `execve`), so reading TTBR0 would
+/// name the wrong address space. It is set here rather than carried in the
+/// `Process` because `brk` and `mmap` are answered from whatever thread is
+/// running, and that is this one.
+pub fn set_user_memory_for(ttbr0: u64, brk: u64, mmap_top: u64) {
+    // One entry per root: a stale one for a recycled table address is
+    // dropped first (table pages are reused after destroy).
+    mm_drop(ttbr0);
+    mm_create(ttbr0, brk, mmap_top);
+}
+
+/// A fresh layout for new tables. The tables are new, so no other task can
+/// hold this root yet and no lock is needed beyond the write itself.
+fn mm_create(ttbr0: u64, brk: u64, mmap_top: u64) {
+    let flags = crate::sync::irq_save();
+    unsafe {
+        if let Some(e) = (*(&raw mut MM)).iter_mut().find(|e| !e.live) {
+            *e = MmLayout {
+                ttbr0,
+                brk,
+                brk_min: brk,
+                mmap_next: mmap_top,
+                live: true,
+            };
+        } else {
+            panic!("out of address-space layouts");
+        }
+        crate::sync::irq_restore(flags);
+    }
+}
+
+/// Copy the calling task's layout to a new root, for `fork`. The values are
+/// read under the same mask that every reservation takes, so a sibling
+/// allocating concurrently cannot slip an update between the read and the
+/// copy.
+fn mm_copy_to(new_ttbr0: u64) {
+    let flags = crate::sync::irq_save();
+    unsafe {
+        let cur = mm_current_ttbr0();
+        let found = (*(&raw const MM))
+            .iter()
+            .find(|e| e.live && e.ttbr0 == cur)
+            .copied();
+        if let Some(src) = found {
+            if let Some(e) = (*(&raw mut MM)).iter_mut().find(|e| !e.live) {
+                *e = MmLayout {
+                    ttbr0: new_ttbr0,
+                    brk: src.brk,
+                    brk_min: src.brk_min,
+                    mmap_next: src.mmap_next,
+                    live: true,
+                };
+            } else {
+                panic!("out of address-space layouts");
+            }
+        }
+        crate::sync::irq_restore(flags);
+    }
+}
+
+/// Drop the layout for `ttbr0`, if any. Called when the tables are destroyed.
+/// Threads must not call this: the address space outlives any one of them.
+fn mm_drop(ttbr0: u64) {
+    let flags = crate::sync::irq_save();
+    unsafe {
+        if let Some(e) = (*(&raw mut MM))
+            .iter_mut()
+            .find(|e| e.live && e.ttbr0 == ttbr0)
+        {
+            e.live = false;
+        }
+        crate::sync::irq_restore(flags);
+    }
+}
+
 /// Give the current task a process's memory layout, just before it enters
 /// EL0. It is set here rather than carried in the `Process` because `brk` and
 /// `mmap` are answered from whatever thread is running, and that is this one.
 pub fn set_user_memory(brk: u64, mmap_top: u64) {
-    unsafe {
-        TASKS[CURRENT].brk = brk;
-        TASKS[CURRENT].brk_min = brk;
-        TASKS[CURRENT].mmap_next = mmap_top;
-    }
+    let ttbr0 = mm_current_ttbr0();
+    // A replaced-in-place root (execve reuses the caller's tables until it
+    // switches) keeps one entry: drop any stale one first.
+    mm_drop(ttbr0);
+    mm_create(ttbr0, brk, mmap_top);
 }
 
-/// (brk, brk_min, mmap_next) for the running task.
+/// (brk, brk_min, mmap_next) for the running task's address space.
 pub fn user_memory() -> (u64, u64, u64) {
-    unsafe { (TASKS[CURRENT].brk, TASKS[CURRENT].brk_min, TASKS[CURRENT].mmap_next) }
+    let ttbr0 = mm_current_ttbr0();
+    mm_find(ttbr0).unwrap_or((0, 0, 0))
+}
+
+/// Reserve `len` bytes of anonymous mapping space, growing down from the top.
+/// One critical section from read to store: two threads reserving at once
+/// must not read the same `mmap_next`. Returns the base, or `None` when the
+/// address space has no room. A later mapping failure leaks the reservation
+/// (address space, not memory); failures there are OOM/IO, not the path.
+pub fn reserve_mmap(len: u64) -> Option<u64> {
+    let ttbr0 = mm_current_ttbr0();
+    let flags = crate::sync::irq_save();
+    let at = unsafe {
+        (*(&raw mut MM))
+            .iter_mut()
+            .find(|e| e.live && e.ttbr0 == ttbr0)
+            .and_then(|e| {
+                let at = e.mmap_next.checked_sub(len)?;
+                e.mmap_next = at;
+                Some(at)
+            })
+    };
+    unsafe { crate::sync::irq_restore(flags) };
+    at
+}
+
+/// Commit a grown break previously mapped by the caller. Re-checks the range
+/// under the mask: a sibling that moved `brk` or `mmap_next` meanwhile makes
+/// this fail rather than silently overlap it. Returns the break to report.
+pub fn commit_brk(addr: u64, page_want: u64) -> u64 {
+    let ttbr0 = mm_current_ttbr0();
+    let flags = crate::sync::irq_save();
+    let ret = unsafe {
+        match (*(&raw mut MM))
+            .iter_mut()
+            .find(|e| e.live && e.ttbr0 == ttbr0)
+        {
+            Some(e) if page_want >= e.brk_min && page_want < e.mmap_next => {
+                e.brk = page_want;
+                addr
+            }
+            Some(e) => e.brk,
+            None => 0,
+        }
+    };
+    unsafe { crate::sync::irq_restore(flags) };
+    ret as i64 as u64
 }
 
 pub fn set_user_brk(v: u64) {
-    unsafe { TASKS[CURRENT].brk = v }
+    let ttbr0 = mm_current_ttbr0();
+    let flags = crate::sync::irq_save();
+    unsafe {
+        if let Some(e) = (*(&raw mut MM))
+            .iter_mut()
+            .find(|e| e.live && e.ttbr0 == ttbr0)
+        {
+            e.brk = v;
+        }
+        crate::sync::irq_restore(flags);
+    }
 }
 
 pub fn set_user_mmap_next(v: u64) {
-    unsafe { TASKS[CURRENT].mmap_next = v }
+    let ttbr0 = mm_current_ttbr0();
+    let flags = crate::sync::irq_save();
+    unsafe {
+        if let Some(e) = (*(&raw mut MM))
+            .iter_mut()
+            .find(|e| e.live && e.ttbr0 == ttbr0)
+        {
+            e.mmap_next = v;
+        }
+        crate::sync::irq_restore(flags);
+    }
 }
 
 /// Mark the running task as being inside a system call from EL0, and return
@@ -444,12 +634,21 @@ pub fn has_live_child(parent: usize, want_pid: i64) -> bool {
 }
 
 /// The task's own memory layout, for a child that inherits its parent's.
-pub fn set_user_memory_full(brk: u64, brk_min: u64, mmap_next: u64) {
-    unsafe {
-        TASKS[CURRENT].brk = brk;
-        TASKS[CURRENT].brk_min = brk_min;
-        TASKS[CURRENT].mmap_next = mmap_next;
+///
+/// For `fork` this copies the layout to the child's new root; for a thread
+/// (same root) there is nothing to do -- the layout is already shared, and
+/// writing the creation-time copy back would rewind allocations siblings
+/// made since. Takes the new root and whether the child shares memory.
+pub fn set_user_memory_full(new_ttbr0: u64, shares_mm: bool) {
+    if !shares_mm {
+        mm_copy_to(new_ttbr0);
     }
+}
+
+/// Drop the calling task's address-space layout, for `execve`'s old root.
+/// The new root gets its entry from `set_user_memory`.
+pub fn drop_user_memory(ttbr0: u64) {
+    mm_drop(ttbr0);
 }
 
 /// Shared mappings of the running task, copied out. `fork` hands them to the
@@ -901,6 +1100,7 @@ pub fn reap_process(id: usize) {
         // and they are still running in it.
         if !task.shares_mm {
             crate::paging::destroy_user_address_space(task.ttbr0);
+            mm_drop(task.ttbr0);
         }
         for i in 0..STACK_PAGES {
             frames::free((task.stack + i * PAGE) as *mut u8);
@@ -918,4 +1118,37 @@ pub fn record_user_irq() {
 }
 pub fn user_irqs(id: usize) -> u64 {
     unsafe { TASKS[id].user_irqs }
+}
+
+/// Whether the init process the watchdog waits for is still running.
+///
+/// Set once, after `user::launch`, from the boot task; read by the watchdog.
+/// The watchdog used to stop the machine after four one-second rounds no
+/// matter what init was doing, which guillotined every test longer than four
+/// seconds mid-syscall and read exactly like a kernel wedge: the process
+/// READY-spinning, timers advancing, one ppoll in flight with its hrtimer
+/// still queued in the future. Now it waits for init and only backstops a
+/// boot that never finishes.
+static mut INIT_TASK: usize = usize::MAX;
+
+pub fn set_init_task(id: usize) {
+    unsafe {
+        INIT_TASK = id;
+    }
+}
+
+/// True once init has exited (or was never launched): the watchdog may stop
+/// the machine. A task that finished but has not been reaped yet still counts
+/// as done -- reaping is the boot task's job, not the watchdog's.
+pub fn init_done() -> bool {
+    unsafe {
+        let id = INIT_TASK;
+        if id == usize::MAX {
+            return false;
+        }
+        matches!(
+            (*(&raw const TASKS))[id].state,
+            State::Finished | State::Unused
+        )
+    }
 }
