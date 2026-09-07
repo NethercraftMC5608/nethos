@@ -1152,11 +1152,12 @@ The frame is always the `rt_` shape: 128 bytes of `siginfo` (signo,
 errno, code, pid, uid at 0/4/8/16/20), then a 4560-byte `ucontext`
 whose `mcontext` carries the interrupted registers, stack pointer, pc
 and pstate -- 4704 bytes on the user's stack (or the alternate stack
-for `SA_ONSTACK`), 16-byte aligned. `rt_sigreturn` restores from the
-`ucontext` found via the stack pointer, not `x2`: that register carried
-the pointer *into* the handler but is caller-saved, so any non-trivial
-handler clobbers it, and Linux finds the frame via `sp` for the same
-reason.
+for `SA_ONSTACK`), 16-byte aligned. `rt_sigreturn` finds the frame by
+self-pointer, not register: the `ucontext`'s own address is written into
+`uc_flags` at build time (`04b0df6`), and `sigreturn` reads it back and
+validates it against `sp+128`/`x2`. The earlier version trusted a register
+that handlers clobber -- every forked shell died via `SIGCHLD` with `pc`
+left at `TRAMPOLINE_ADDR+8`, `lr` at the trampoline, `EC 0`.
 
 The return address is the hard part. glibc on aarch64 never fills
 `sa_restorer` and never sets `SA_RESTORER` -- the field is uninitialised
@@ -1291,6 +1292,22 @@ filesystem rather than a mounted one. Signals and `MAP_SHARED` file
 mappings with writeback are done -- they have their own sections above --
 and what a windowing system wants next is sharing a *device* buffer with
 a compositor, which is the contract nk still refuses.
+
+### First desktop component: nethosd imports and answers on nk
+
+`payload/nethosd/nethosd.py` -- stdlib only, `ThreadingHTTPServer` on
+`127.0.0.1:7777` -- runs on nk unmodified off the npkg disk, driven by
+`kernel/init/nethosd-e2e.py` (`scripts/build-nethosd-e2e.sh
+[full|import-only]`). Import-only is green: full `status()` key list
+(`battery,generation,host,kernel,load,mem,nethos,subscribers,time,uptime,user`)
+on a pre-`e19ff4b` kernel. The `/api/status` path needs no stubs -- every
+`/proc`/`/sys`/`/etc` read degrades to a default, `STATE_DIR`
+self-creates, and the background threads (compositor loop, tray, snapper,
+ticker) degrade to sleeps with no compositor. Threads sharing one fd
+table (`1ef91c6`) was the gate and it is gone. Full-daemon (spawn + serve
++ request) is blocked on two opus-owned bugs: the #16 virtio-blk
+interrupt race (silent stall after the ext4 mount) and the #17 EL0 NULL
+dereference in `_PyEval_EvalFrameDefault` after thread spawn.
 
 Mesa running does not mean GPU acceleration. llvmpipe is software; the GPU is
 still a display with dumb buffers, and virgl -- a command stream Mesa could

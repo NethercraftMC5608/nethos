@@ -1,29 +1,30 @@
 #!/bin/bash
 # Verify nk EL0 probes in one invocation: one kernel build, one boot each.
+# (With --count N: one kernel build, N boots each -- the #9 soak shape.)
 #
-#   scripts/nk-verify.sh [--no-build] [--no-build-probes] [--timeout N] [probe ...]
+#   scripts/nk-verify.sh [--no-build] [--no-build-probes] [--timeout N]
+#                          [--count N] [probe ...]
 #   scripts/nk-verify.sh --list
 #
-# Each shell invocation costs a round trip and each run-kernel.sh boot
-# rebuilds or re-links the kernel, so running soak/writeback/signals as
-# separate calls meant one kernel build per probe for a single question
-# ("is the desktop path green?"). This builds the kernel once
-# (--lkl --build-only), builds any missing probe initrds, then boots each
-# probe with --no-build and checks its markers. Probes default to soak
-# writeback signals; runtime and drm are opt-in (drm needs --gpu and
-# minutes, so it never runs by default).
+# --count N repeats every probe N times for #9 soaks. Written now, run only
+# once #16 is fixed: soaking on top of a known wedge measures the wedge.
+# With --count, one line per iteration (probe/i: PASS/FAIL + missing) and a
+# hang-signature hint (watchdog triple: boot slices, timers state, lkl-irq
+# state) so a failure says which face of #16 it wore.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 BUILD_KERNEL=1
 BUILD_PROBES=1
 TIMEOUT=30
+COUNT=1
 PROBES=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) BUILD_KERNEL=0; shift ;;
         --no-build-probes) BUILD_PROBES=0; shift ;;
         --timeout) TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
+        --count) COUNT="${2:?--count needs iterations}"; shift 2 ;;
         --list)
             printf 'soak      SOAK_SOCKETPAIR_OK SOAK_SCM_RIGHTS_OK SOAK_EPOLL_OK SOAK_EVENTFD_OK SOAK_MEMFD_OK SOAK_POLL_OK\n'
             printf 'writeback WB_MUNMAP_OK WB_MSYNC_OK WB_PRIVATE_OK WB_ANON_OK\n'
@@ -69,6 +70,8 @@ for p in "${PROBES[@]}"; do
     fi
     # $extra splits on purpose: empty, or --gpu.
     # shellcheck disable=SC2086
+    i=1
+    while [ "$i" -le "$COUNT" ]; do
     out=$(bash "$ROOT/scripts/run-kernel.sh" --lkl --no-build --initrd "$cpio" $extra --timeout "$timeout" 2>&1)
     missing=""
     # $markers splits on purpose: one token per marker.
@@ -88,13 +91,24 @@ for p in "${PROBES[@]}"; do
     case "$out" in
         *"!! kernel panic"*|*"!!EXC"*) missing="$missing [fault]" ;;
     esac
+    # Hang signature for #9 soaks: which face did a wedged boot wear.
+    sig=""
+    if [ -n "$missing" ]; then
+        boot=$(grep -a -o "\[0\] boot *[a-z]* *[0-9]* slices" <<<"$out" | head -1 || true)
+        timers=$(grep -a -o "\[1\] timers *[a-z]* *[0-9]* slices" <<<"$out" | head -1 || true)
+        irq=$(grep -a -o "\[2\] lkl-irq *[a-z]* *[0-9]* slices" <<<"$out" | head -1 || true)
+        [ -n "$boot$timers$irq" ] && sig=" {${boot:-no-watchdog} / ${timers:-?} / ${irq:-?}}"
+    fi
+    if [ "$COUNT" -gt 1 ]; then tag="$p/$i"; else tag="$p"; fi
     if [ -z "$missing" ]; then
-        printf 'PASS %-9s\n' "$p"
+        printf 'PASS %-12s\n' "$tag"
         pass=$((pass+1))
     else
-        printf 'FAIL %s:%s\n' "$p" "$missing"
+        printf 'FAIL %s:%s%s\n' "$tag" "$missing" "$sig"
         fail=$((fail+1))
     fi
+    i=$((i+1))
+    done
 done
-printf '%d/%d probes passed\n' "$pass" "$((pass+fail))"
+printf '%d/%d probe runs passed\n' "$pass" "$((pass+fail))"
 [ "$fail" -eq 0 ]
