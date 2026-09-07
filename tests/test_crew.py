@@ -68,6 +68,26 @@ class Claims(CrewCase):
         self.crew('opus', 'claim', 'kernel/core')
         self.assertEqual(self.crew('spark', 'claim', 'docs').returncode, 0)
 
+    def test_a_human_claim_cannot_be_forced(self):
+        # An agent forcing past a person editing a file means that person's
+        # next save silently discards the agent's work, and neither notices.
+        self.crew('mac', 'claim', 'a/b.rs', '-m', 'open in my editor')
+        r = self.crew('opus', 'claim', 'a/b.rs', '--force')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('cannot be forced', r.stderr)
+        self.assertEqual(self.board()['a/b.rs']['agent'], 'mac')
+
+    def test_the_human_is_told_how_to_ask_instead(self):
+        self.crew('mac', 'claim', 'a/b.rs')
+        r = self.crew('spark', 'claim', 'a/b.rs', '--force')
+        self.assertIn('crew say', r.stderr)
+
+    def test_the_human_may_still_force(self):
+        # It is their repository.
+        self.crew('opus', 'claim', 'a/b.rs')
+        self.assertEqual(
+            self.crew('mac', 'claim', 'a/b.rs', '--force').returncode, 0)
+
     def test_force_takes_it(self):
         self.crew('opus', 'claim', 'a/b.rs')
         self.assertEqual(
@@ -327,6 +347,16 @@ class Prompt(CrewCase):
 
     def test_it_covers_the_handoff(self):
         self.assertIn('crew handoff', self.crew('mac', 'prompt').stdout)
+
+    def test_it_says_how_to_answer_an_ask(self):
+        # An ask solved and never reported leaves the other agent waiting.
+        out = self.crew('mac', 'prompt').stdout
+        self.assertIn('crew task done', out)
+        self.assertIn('still waiting', out.replace('\n', ' '))
+
+    def test_it_warns_against_forcing_a_humans_claim(self):
+        self.assertIn('Never force a claim held by `mac`',
+                      self.crew('mac', 'prompt').stdout)
 
 
 class OpencodePlugin(CrewCase):

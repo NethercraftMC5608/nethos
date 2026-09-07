@@ -66,6 +66,13 @@ that warns is a message.
 `--force` exists and should be rare. Use it when you have positive evidence the
 holder has gone, not to get past a refusal.
 
+**An agent cannot force a claim held by `mac`.** That is a person with the file
+open in an editor, and their next save silently discards whatever was written
+over them — neither side finds out until something fails for a reason that
+makes no sense. The protocol text says not to; this one is also enforced,
+because the cost of getting it wrong is somebody's work. The human can force
+anything: it is their repository.
+
 ## Asking for help
 
 This is the part worth using and the part an agent will not use unless it is

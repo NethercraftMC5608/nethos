@@ -252,9 +252,15 @@ Who is here:
 
 ## The rules
 
-1. **Before editing, claim.** `crew claim <paths> -m "what you are doing"`.
-   It refuses if somebody else holds the file, and that refusal is the point.
-   Claim a directory when you are working across one.
+0. **Look before you start.** `crew status` -- who is here, what they hold,
+   what is queued, and whether anybody has asked you something.
+1. **Claim what you are about to work on.** `crew claim <paths> -m "what you
+   are doing"`. It refuses if somebody else holds the file, and that refusal
+   is the point. Claim a directory when you are working across one.
+
+   You do not have to claim every file before every edit: writing a file
+   claims it automatically. Claim ahead of time to stake out work you are
+   *going* to do, so the other agent does not start it too.
 2. **When you are finished with a file, release it.** `crew release <paths>`,
    or `crew release` for everything you hold. A claim you forget is a file
    nobody else can touch.
@@ -282,6 +288,16 @@ rename across a tree, writing out a test matrix, checking a hundred files.
 
 Asking early is cheaper than being wrong slowly. A question costs one message.
 
+Put what you have already ruled out in `--tried`. The expensive half of a
+handed-over problem is the other agent re-running the experiments you already
+ran.
+
+**Answering one.** An ask arrives as a task addressed to you and is the first
+thing `crew task take` gives you. When you have an answer, say it and close
+it -- `crew say "the IRQ was fine; the console was flooding" --to spark` then
+`crew task done <id>`. An ask you solve and never report is worse than one
+you decline, because the other agent is still waiting on it.
+
 ## When an agent runs out of budget
 
 `crew handoff opus --to spark --reason "out of budget"` releases everything
@@ -293,7 +309,12 @@ hand off before you stop rather than leaving claims behind.
 
 It advises; it does not lock the filesystem. If `crew` says a file is held,
 that is a person or an agent actively editing it -- go and do something else.
-Only use `--force` when you have positive evidence the holder has gone.
+
+`--force` takes a file somebody else holds. Use it only with positive
+evidence that the holder has gone, never to get past a refusal you found
+inconvenient. **Never force a claim held by `mac`**: that is a human with the
+file open in an editor, and their next save silently discards whatever you
+wrote. Ask them instead.
 """
 
 
@@ -385,6 +406,23 @@ def do_claim(args) -> int:
                 continue
             if any(overlaps(p, path) for p in paths):
                 clashes.append((path, info))
+        # A human's claim is not forceable by an agent. `--force` is for a
+        # holder that has demonstrably gone, and a person with the file open
+        # in an editor has not: their next save silently discards whatever was
+        # written over them, and neither side finds out until something fails
+        # for a reason that makes no sense. Advice in the protocol text was
+        # not enough here -- the cost of getting it wrong is somebody's work.
+        human = [(p, i) for p, i in clashes if i.get("agent") == HUMAN]
+        if human and me != HUMAN:
+            for path, info in human:
+                print(f"held by {HUMAN} (a person, editing): {path}"
+                      f"{'  -- ' + info['note'] if info.get('note') else ''}",
+                      file=sys.stderr)
+            print(f"\nthis one cannot be forced. ask them: "
+                  f"crew say \"can I take <path>?\" --to {HUMAN}",
+                  file=sys.stderr)
+            return 1
+
         if clashes and not args.force:
             for path, info in clashes:
                 print(f"held by {info['agent']}: {path}"
