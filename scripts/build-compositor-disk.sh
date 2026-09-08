@@ -18,7 +18,7 @@ docker run --rm --platform linux/arm64 \
     -v "$ROOT/payload:/payload:ro" -v "$BUILD:/out" nethos-ldk sh -ec '
     apt-get -qq update >/dev/null 2>&1
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        weston python3 python3-gi gir1.2-gtk-4.0 gir1.2-webkit-6.0 \
+        weston seatd python3 python3-gi gir1.2-gtk-4.0 gir1.2-webkit-6.0 \
         libwebkitgtk-6.0-4 gir1.2-gtk4layershell-1.0 \
         libgl1-mesa-dri libegl1 libegl-mesa0 libgles2 libgbm1 libdrm2 \
         xkb-data e2fsprogs >/dev/null 2>&1
@@ -31,6 +31,13 @@ docker run --rm --platform linux/arm64 \
     find $R/lib/python$V -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
     cp -a /usr/lib/python3/dist-packages $R/lib/dist-packages
     cp -L /usr/bin/weston $R/bin/weston
+    # seatd, and it must be able to run VT-less: nk has no virtual terminals,
+    # so the builtin libseat backend cannot open a seat at all. SEATD_VTBOUND=0
+    # makes seatd create a seat that is not bound to a VT, which is the only
+    # shape that exists on this machine.
+    cp -L /usr/sbin/seatd $R/bin/seatd
+    ldd /usr/sbin/seatd 2>/dev/null | sed -n "s/.*=> \(\/[^ ]*\).*/\1/p" \
+        | while read -r l; do cp -Ln "$l" $R/lib/ 2>/dev/null || true; done
 
     D=/usr/lib/aarch64-linux-gnu
     mkdir -p $R/share/girepository-1.0
@@ -62,6 +69,9 @@ docker run --rm --platform linux/arm64 \
     mkdir -p $R/share/X11
     cp -a /usr/share/X11/xkb $R/share/X11/ 2>/dev/null || true
     cp /payload/bin/nethos-view $R/nethos/nethos-view
+    # The shell itself: the pages nethos-view is there to host.
+    cp -a /payload/shell $R/nethos/shell
+    cp -a /payload/lib $R/nethos/lib
 
     echo "  payload: $(du -sh $R | cut -f1), $(ls $R/lib | wc -l) libraries"
     mke2fs -q -t ext4 -d $R -F /out/comp.img '"$SIZE"'

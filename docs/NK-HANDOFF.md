@@ -48,7 +48,33 @@ Reached since: WebKit 2.52.6 loads, nethos-view's whole binding stack loads
 (gi, GTK 4.18, WebKit 6.0, gtk4-layer-shell), weston 14.0.2 runs headless on
 nk and creates its socket, and GTK4 opens that display -- `VIEW_REACHED 6/6`.
 
-**The remaining stall is weston-specific and measured**, not general:
+**The remaining stall is narrowed to one thing: a compositor driving KMS.**
+Measured, single variable at a time:
+
+| workload | clean boots |
+| --- | --- |
+| virtio-gpu attached, WebKit + bindings, no compositor | 5/5 |
+| the same without the GPU | 5/5 |
+| weston headless (no KMS) on the big disk | 3/5 |
+| weston on the DRM backend, driving virtio-gpu KMS | 0/3 |
+
+So it is not the GPU being present, not disk size, not WebKit, not the
+bindings, and not Python. It is device interrupt traffic from a compositor
+actually using the display -- page flips and KMS -- which is the same
+suspect `docs/KERNEL.md` has carried for months: *"Not yet reliable past the
+first read; unmask handshake suspected, not measured."*
+
+When it stalls the console shows `syscall 64 IN FLIGHT` -- a `write` that
+never returns -- but that is a consequence: the writer is queued behind the
+LKL CPU semaphore, which is the thing with one more `down` than `up`.
+
+Two theories checked and discarded rather than left hanging: nk does tell LKL
+when a task exits (`sys_exit` reaches `task_exit`, which runs the TLS
+destructors LKL cleans up from), and no host task is leaked; and the LKL CPU
+semaphore is not a lost wakeup, since its counters show a missing hand-over
+rather than a wake that went astray.
+
+The older per-workload numbers, kept because they bound the problem:
 
 | workload | clean boots |
 | --- | --- |
