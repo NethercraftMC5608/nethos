@@ -1226,6 +1226,32 @@ extern "C" fn forked_entry(arg: usize) {
         }
     };
     crate::sched::bind_linux_pid(pid);
+    // The address space this task is *for*, installed before anything writes
+    // through a user pointer.
+    //
+    // A freshly spawned task runs with the kernel's tables (`spawn` sets
+    // that, and the switch installs it), and `resume_user` at the bottom of
+    // this function is where the child's would otherwise arrive. Everything
+    // between the two -- the tid writes below, most of all -- was therefore
+    // translating user addresses through tables that have no user half, so
+    // every one of them failed and was thrown away by `let _ =`.
+    //
+    // What that cost: glibc passes `&pd->tid` with CLONE_PARENT_SETTID and
+    // reads it back as the thread's own id. Never written, it stayed zero,
+    // and glibc's `pthread_rwlock_rdlock` compares an unlocked lock's writer
+    // (zero) against it -- so every read lock taken on any thread returned
+    // EDEADLK. GLib reports that as "Failed to get RW lock: Resource
+    // deadlock avoided", and WebKit's network and web processes died on it.
+    //
+    // Safe here for the same reason it is safe in `resume_user`: every user
+    // address space carries a copy of the kernel's mappings, so the code
+    // doing the switching stays mapped across it.
+    unsafe {
+        core::arch::asm!(
+            "msr ttbr0_el1, {}", "dsb ishst", "tlbi vmalle1", "dsb ish", "isb",
+            in(reg) f.ttbr0, options(nostack)
+        );
+    }
     // Both before ready.up(): the creator must not observe the thread until
     // its id is where the caller asked for it, and the thread must not reach
     // user code — where it could exit and clear these words — before then.
