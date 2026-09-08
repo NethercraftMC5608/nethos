@@ -139,6 +139,19 @@ these:**
 - **`sys_brk` as the MemoryError source** — it returns the old break on every
   failure path, never an errno; only `sys_mmap` returning -ENOMEM surfaces to
   CPython as MemoryError (five sites in `user.rs`, undetermined which).
+- **nk's fork/exit path for the weston stall** — `kernel/init/forkchurn.c`
+  (uncommitted): 6 generations × 25 overlapped fork/exit children with
+  staggered exits + timed poll, `FORKCHURN_DONE` 4/4 bare, 1/1 with disk,
+  0 faults. 150 interleaved fork/exit cycles through `new_host_task` and
+  the TLS-destructor `del_host_task` path leave the CPU handover intact.
+  Serial churn is not the trigger; concurrent churn at this scale is not
+  either. The stall needs weston itself or its harness sequence.
+- **disk size for the weston stall** — view.img (2G nominal) boots 5/5 with
+  WebKit mapped; comp.img (~550M used) stalls 2/5. Not size.
+- **WebKit for the weston stall** — the 5/5 view boots have the whole 172-lib
+  closure mapped. Not the engine.
+- **the binding stack for the weston stall** — view includes gi/GTK/WebKit/
+  layer-shell imports. Not the stack.
 
 Those last two are the shape of this bug: it hides behind other real bugs.
 Two correct fixes landed today and neither closed it.
@@ -218,12 +231,18 @@ window (demand paging and/or raised USER_MMAP_TOP needed); (ii) device
 MAP_SHARED for dumb buffers still refused (real compositor cannot scan out
 client buffers yet); (iii) done — the PROT_READ AP bug above.
 
-**The live lead:** the serve wedge + the `MemoryError`: which `sys_mmap`
--12 site fires under the real `nethosd.main()`, and whether the parked
-server `ppoll` is cause or consequence. Cheapest next step: clean
-real-`main()` repro with a net.cpio-identical nk-init (drop the `ip -o`
-pipeline), then the mmap-site logging above. `virtio intr 0x0` and the
-unmask handshake are retired as leads for the late face (see negatives).
+**The live lead (updated ~13:30):** the weston-specific stall, 3/5 on
+`comp`, 12/12 without it (see "Where this stands"). Shape is always a
+`forked` task blocked on sem 3 (LKL's CPU sem) with downs one ahead of ups
+— a missing hand-over, not a lost wakeup — landing *before weston starts*,
+in a busybox fork-reaping step of nk-init. forkchurn exonerates nk's
+fork/exit path at 150 interleaved children. Cheapest next step, in order:
+(1) weston-absent control initrd (same mounts/links, backgrounded sleeper
+instead of weston) — control 5/5 + weston 3/5 names the binary, control
+≤3/5 names the harness `&`+`sleep` shape; (2) only then instrument
+`nk_sem_down/up` with caller task + LKL thread ids and catch one stall.
+`virtio intr 0x0` and the unmask handshake are retired as leads (see
+negatives). Full lane plan in `docs/DESKTOP-PLAN.md` §10.
 
 ## Also open
 

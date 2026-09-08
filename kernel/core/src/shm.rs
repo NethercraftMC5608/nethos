@@ -444,7 +444,8 @@ pub fn release_anon(idx: usize) {
 // writeback and msync refuse with -ENOSYS. Anonymous-shared above still
 // works -- it is only frames and page tables.
 #[cfg(not(nk_lkl))]
-pub fn map_shared(_fd: i64, _offset: u64, _len: u64, _at: u64, _writable: bool, _executable: bool) -> Result<usize, i64> {
+pub fn map_shared(_fd: i64, _offset: u64, _len: u64, _at: u64, _writable: bool,
+                  _executable: bool, _prot_none: bool) -> Result<usize, i64> {
     Err(-38)
 }
 

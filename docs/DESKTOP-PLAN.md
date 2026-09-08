@@ -4,6 +4,10 @@ Written 2026-09-08 on `nk-initrd-builder` @ 66ad2ba, before any code changes.
 Per user instruction this run does NOT use `crew`; parallelism discipline below
 is manual (worktrees + file ownership, no board).
 
+Updated 2026-09-08 ~13:30 (§10): weston boots to `VIEW_REACHED 6/6` on nk;
+the remaining stall is weston-specific (3/5 with it, 12/12 without) and
+fork-churn isolation exonerates nk's fork/exit path (7/7 green).
+
 Assumptions: arm64 macOS host, `qemu-system-aarch64 -M virt,accel=hvf` works,
 `nethos-ldk` docker image present, `kernel/ldk/build/npkg.img` usable,
 single operator (no opus/spark split — lanes run sequentially or in
@@ -166,7 +170,122 @@ still a result with numbers: WebKit closure (~96MB + 145MB debs) vs the
 99.5%-full window, device MAP_SHARED still refused — demand paging
 and/or raised USER_MMAP_TOP is the next build before any engine fits.
 
-## 4. Riskiest unknown + cheapest experiment per lane
+## 10. Where this stands ~13:30, and what M3 still needs
+
+Proven since §9 (all on `nk-initrd-builder`, each committed with its
+measurement — read the commit messages, not this summary, for the numbers):
+
+- `2cf96cb` fixed the poll wedge itself: `wake` made a blocked task runnable
+  without checking what it was blocked on, so a child exiting woke a parent
+  sitting inside one of Linux's semaphores. `wake_on(id, what)` + token 0 as
+  nk's generic wait. Repro went 100%-failing to passing; base boots 12/12.
+- `a847924` WebKit 2.52.6 loads (172 libs, 263MB). `44a80a9` nethos-view's
+  binding stack loads (`VIEW_BINDINGS_OK`: gi, GTK 4.18, WebKit 6.0,
+  gtk4-layer-shell). `01b4522` signalfd/timerfd/inotify. `4473e4e` XKB data.
+  `300837b` weston 14.0.2 headless/pixman creates wayland-0 and GTK4 opens
+  that display: `VIEW_REACHED 6/6`.
+- `d3bd4d0` + `scripts/build-compositor-disk.sh` is the reproducible
+  compositor disk (comp.img 3G nominal / ~550M used, comp.cpio initrd);
+  `scripts/build-view-disk.sh` + `build-webkit-disk.sh` are the view/WebKit
+  disks underneath it.
+
+### Dependency graph, revised
+
+```
+M1 nethosd answers ............................ GREEN (3x, §7)
+M2 compositor holds a display ................. GREEN twice over:
+  (a) hand-rolled probe WL_REGISTRY_OK (§8)
+  (b) real weston 14.0.2 wayland-0 + GTK4 open (VIEW_REACHED 6/6)
+M3 shell renders .............................. PIXEL PATH green (§9),
+  ENGINE green (WebKit loads), COMPOSITOR green, SHELL NOT YET RUN:
+  nethos-view has never executed its do_activate on nk (see gap 2).
+```
+
+### The one open kernel bug: weston-specific stall, 3/5
+
+| workload | clean boots |
+| --- | --- |
+| no disk (exitpoll) | 6/6 |
+| disk + Python + poll (pypoll) | 6/6 |
+| big disk + Python + WebKit (view) | 5/5 |
+| the same plus weston (comp) | 3/5 |
+
+Shape when stalled (always identical, `/tmp/comp5.log` + `/tmp/s1.log`):
+a `forked` task blocked on **sem 3** (LKL's CPU sem) with `downs` one ahead
+of `ups` — a missing hand-over, not a lost wakeup — plus one task on its
+per-task scheduling sem. Timers advance; nothing faults. The stall lands
+*before weston even starts*: last progress is a busybox fork-reaping step
+in nk-init (`comp: disk mounted` then one `ln`/`mkdir`/`chmod` child), i.e.
+in `fork → attach_process → new_host_task` or `exit → tls_cleanup →
+del_host_task`, NOT in weston code.
+
+Eliminated this session (all measured, 7 boots, do not re-test):
+
+- nk's fork/exit path: `kernel/init/forkchurn.c` +
+  `scripts/build-forkchurn-test.sh` — 6 generations × 25 overlapped
+  fork/exit children (staggered exits, interleaved creates) + timed poll:
+  `FORKCHURN_DONE` 4/4 bare, 1/1 with npkg.img, 1/1 with disk, 0 faults.
+  Serial churn is not the trigger; concurrent-process churn is not either,
+  at this scale.
+- Disk size: comp.img (~550M used) vs view.img (2G nominal) — view 5/5 on
+  the bigger disk. Not size.
+- WebKit: view 5/5 with WebKit mapped. Not the engine.
+- Bindings: view includes gi/GTK/WebKit/layer-shell. Not the stack.
+
+What differs in comp and is NOT yet isolated: weston itself (process +
+threads + signalfd/timerfd/epoll event loop + libwayland socket-lock file)
+vs the nk-init *sequence around it* (weston `&` backgrounded, `sleep 6`,
+socket poll, then viewprobe). The stall predates weston's first log line,
+so the next split is weston-not-started vs weston-running: see lane table.
+
+### Lanes from here (files owned, proof command each)
+
+| lane | goal | owns | proves (single command) |
+| --- | --- | --- | --- |
+| kernel-stall | close the weston stall or place it with a measurement | `kernel/core/src/**`, `kernel/ldk/patch-lkl.py` | 5/5 `comp` boots reach `comp: starting weston headless` AND 5/5 reach `VIEW_REACHED`, or a narrower repro checked in that fails ≥3/5 |
+| comp-harness | split weston-binary vs harness-sequence (no kernel edits) | `scripts/build-compositor-disk.sh`, `kernel/init/viewprobe.py` (extend markers only) | a boot variant table: weston-absent-but-same-shape control (sleep/backgrounded-sleeper instead of weston) 5/5 vs weston-present 3/5, or the reverse — either way the trigger is named |
+| shell-run | first nethos-view `do_activate` on nk | `payload/bin/nethos-view`, probe SPEC files (new) | serial log shows a surface present + a `load-changed`/title log line from a `file://` shell page (no network, no nethosd yet) — weston kiosk-shell + one `role=window` SPEC |
+| render | screendump of the shell page, checked programmatically | `scripts/m3-check.py` (extend), shell SPEC | `M3_*_OK` line from `m3-check.py` against a monitor-socket screendump, same shape as §9 step C |
+
+Serialisation: shell-run is gated on a 5/5 comp boot (do not debug the
+shell on a wedging machine — every stall below it reads as a shell bug).
+comp-harness is NOT gated on kernel-stall: it runs unmodified kernels and
+narrows the repro, which is input to kernel-stall, not downstream of it.
+render is gated on shell-run.
+
+### Riskiest unknown per lane, and the cheapest experiment
+
+- kernel-stall: unknown = which side of the `lkl_cpu_get → sem_down /
+  lkl_cpu_put → sem_up` pairing loses the hand-over when a forked task is
+  involved. Cheapest = comp-harness's narrowed repro first (a 3-line nk-init
+  change beats a week in cpu.c); only then instrument `nk_sem_down/up` with
+  the caller's nk task id + LKL thread id and catch one stall.
+- comp-harness: unknown = weston-binary vs harness-sequence. Cheapest =
+  THREE boots of a weston-absent control initrd (identical mounts/links,
+  `sleep 6 &` + socket-ls + viewprobe-without-display instead of weston):
+  control 5/5 + weston 3/5 names the binary; control ≤3/5 names the harness
+  (probably the background-`&` + `sleep` shape, which no green workload
+  uses — every green probe is strictly serial fork-reap).
+- shell-run: unknown = what nethos-view's `do_activate` needs that
+  viewprobe does not (layer-shell protocol? `present()` + frame clock?
+  WebKit web-process spawn = fork+exec of `WebKitWebProcess`?). Cheapest =
+  one SPEC, `role=window` (no layer-shell), `file:///mnt/...` static page,
+  `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1` already set; read the first
+  missing-thing error rather than predicting it.
+- render: unknown = pixel path for a real client buffer (dumb-buffer mmap
+  still refused; wl_shm pool proven only in the hand-rolled probe).
+  Cheapest = reuse §9: weston headless screenshot? No — headless has no
+  scanout; use `weston-screenshooter` or read back the wl_shm pool the
+  client drew. Do NOT boot --gpu for this; the compositor is headless.
+
+### Explicit non-goals (do not re-derive)
+
+forkchurn (`kernel/init/forkchurn.c`, `scripts/build-forkchurn-test.sh`,
+uncommitted — commit with the next kernel-stall change or drop it) is a
+negative result, not a regression test: 150 overlapped fork/exit children
+leave poll working. Keep it iff it becomes the base of the narrowed repro.
+
+## 4. Riskiest unknown + cheapest experiment per lane (original 02:30 — closed; §10 is current)
 
 - kernel: unknown = WHERE the wedge lives (nk timers? LKL CPU-lock
   accounting? virtio-blk IRQ path?). Cheapest = shrink the repro, not grow
@@ -194,7 +313,7 @@ and/or raised USER_MMAP_TOP is the next build before any engine fits.
   (device MAP_SHARED, demand paging), that IS the M3 result: name it, prove
   with the probe errno/measurement, keep going on unblocked lanes.
 
-## 5. Baselines to (re-)take this session, untruncated, at HEAD
+## 5. Baselines (original 02:30 — closed; the suite is green post-`2cf96cb`)
 
 1. `bash scripts/nk-verify.sh soak writeback signals` — expect green (was
    green); red here = environment, not #16.
