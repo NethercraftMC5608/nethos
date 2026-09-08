@@ -317,6 +317,25 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // The same rule as `write`, and it has to be here too because this is
         // the call a libc `printf` actually makes.
         sys_writev(frame.x[0], frame.x[1], frame.x[2])
+    } else if matches!(frame.x[8], 434 | 95) && cfg!(nk_lkl) {
+        // pidfd_open and waitid, refused to *user space* only: nk still uses
+        // pidfd_open itself, from the kernel side, to copy a parent's
+        // descriptors into a child.
+        //
+        // The process tree here is nk's. `fork`, `wait4` and the exit status
+        // are answered by nk, and the Linux tasks behind them are siblings
+        // under LKL's init rather than parent and child -- so asking Linux
+        // about them gets the truthful answer that it has no such child:
+        //
+        //   waitid(pid:63, pidfd=21) failed: No child processes (10)
+        //
+        // GLib's child watch prefers a pidfd and falls back to `waitpid` and
+        // SIGCHLD when it cannot get one, and that fallback is the path nk
+        // actually implements. So the honest answer is that nk has no
+        // pidfds, not a pidfd that answers wrongly. Without this, WebKit
+        // watched a child that GLib believed had vanished and tore the web
+        // process down mid-load.
+        -38
     } else if frame.x[8] == 435 {
         // clone3 describes an EL0 context, not an LKL kernel-thread entry.
         // libc will fall back to clone; forwarding it can call a null fn.

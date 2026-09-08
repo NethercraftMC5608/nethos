@@ -110,12 +110,14 @@ pub fn report() {
             let (count, waiters) = (s.count.load(SeqCst), s.waiters.load(SeqCst));
             if waiters != 0 || count != 0 {
                 crate::println!(
-                    "          sem   {:<3} count {:<4} waiters {:#018b} ups {} downs {}",
+                    "          sem   {:<3} count {:<4} waiters {:#018b} ups {} downs {} last taken by {} given by {}",
                     s.id,
                     count,
                     waiters,
                     s.ups.load(SeqCst),
-                    s.downs.load(SeqCst)
+                    s.downs.load(SeqCst),
+                    s.taker.load(SeqCst) as i64,
+                    s.giver.load(SeqCst) as i64
                 );
             }
         }
@@ -167,6 +169,12 @@ pub struct Semaphore {
     /// Times `down` found no token and parked. Fast-path takes leave no
     /// trace; every one of these is a sleep that needed a matching wake.
     downs: AtomicU64,
+    /// The last task to take a token, and the last to hand one back. A
+    /// semaphore with a waiter and no tokens is being held by somebody, and
+    /// the whole question is who: the wait graph says which tasks are
+    /// stopped, not which one is standing on the thing they want.
+    taker: AtomicU64,
+    giver: AtomicU64,
 }
 
 impl Semaphore {
@@ -177,6 +185,8 @@ impl Semaphore {
             waiters: AtomicU64::new(0),
             ups: AtomicU64::new(0),
             downs: AtomicU64::new(0),
+            taker: AtomicU64::new(u64::MAX),
+            giver: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -186,6 +196,7 @@ impl Semaphore {
             let count = self.count.load(SeqCst);
             if count > 0 {
                 self.count.store(count - 1, SeqCst);
+                self.taker.store(sched::current_id() as u64, SeqCst);
                 unsafe { irq_restore(flags) };
                 return;
             }
@@ -202,6 +213,7 @@ impl Semaphore {
         let flags = irq_save();
         self.count.fetch_add(1, SeqCst);
         self.ups.fetch_add(1, SeqCst);
+        self.giver.store(sched::current_id() as u64, SeqCst);
         // Exactly one waiter, not all of them.
         //
         // Waking all of them and letting the losers re-check looks harmless
