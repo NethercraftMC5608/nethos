@@ -36,6 +36,36 @@ imports, starts, and answers its `status()` API on nk**.
 
 None of that is speculation; each has a test or a logged measurement.
 
+## Where this stands (updated)
+
+The wedge is **fixed**: `wake` made a blocked task runnable without checking
+what it was blocked on, so a child exiting woke a parent that was blocked in
+one of Linux's semaphores. `wake_on(id, what)` fixed it, the repro went from
+failing 100% of the time to passing, and the base system now boots clean
+12/12 with and without a disk.
+
+Reached since: WebKit 2.52.6 loads, nethos-view's whole binding stack loads
+(gi, GTK 4.18, WebKit 6.0, gtk4-layer-shell), weston 14.0.2 runs headless on
+nk and creates its socket, and GTK4 opens that display -- `VIEW_REACHED 6/6`.
+
+**The remaining stall is weston-specific and measured**, not general:
+
+| workload | clean boots |
+| --- | --- |
+| no disk (`exitpoll`) | 6/6 |
+| disk + Python + poll (`pypoll`) | 6/6 |
+| big disk + Python + WebKit (`view`) | 5/5 |
+| the same plus weston (`comp`) | 3/5 |
+
+So it is not disk size, not WebKit, not the binding stack. When it stalls the
+shape is always the same: a `forked` task blocked on **semaphore 3** -- ids
+1-3 are LKL's own first allocations, so that is its CPU semaphore -- with
+`downs` one ahead of `ups`. That is a missing *up*, not a lost wake: nobody
+hands the CPU over. Another task sits blocked on its per-task scheduling
+semaphore at the same time. The next thing to look at is what happens to the
+LKL CPU when a process exits or is created while weston is running, since
+weston is the only workload here with concurrent processes coming and going.
+
 ## The one bug that matters
 
 Task **#16** on the crew board. Everything else on the queue is downstream of
