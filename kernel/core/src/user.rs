@@ -1662,9 +1662,21 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
     if exec && writable {
         return -13; // -EACCES, and nk will not make an exception
     }
-    if prot == 0 { return if unsafe { paging::protect_user_none(current_ttbr0(), addr, size) } { 0 } else { -12 }; }
+    // Reservations first: pages that have not been touched have nothing to
+    // change, and the permissions they will be faulted in with are the only
+    // record of this call that will survive to matter.
+    let reserved = crate::reserve::protect(addr, size, writable, exec);
+    if prot == 0 {
+        if unsafe { paging::protect_user_none(current_ttbr0(), addr, size) } {
+            return 0;
+        }
+        return if reserved { 0 } else { -12 };
+    }
     if unsafe { !paging::protect_user(current_ttbr0(), addr, size, exec, writable) } {
-        return -12; // -ENOMEM: Linux's answer for a hole in the range
+        // A hole is -ENOMEM, which is Linux's answer -- unless the hole is a
+        // reservation, where there is nothing to change yet and the change
+        // has already been recorded for when there is.
+        return if reserved { 0 } else { -12 };
     }
     0
 }

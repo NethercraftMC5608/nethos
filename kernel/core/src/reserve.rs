@@ -22,7 +22,7 @@
 use crate::frames;
 use crate::paging;
 
-const MAX: usize = 64;
+const MAX: usize = 256;
 
 #[derive(Clone, Copy)]
 struct Reservation {
@@ -110,6 +110,59 @@ pub fn inherit(parent: u64, child: u64) {
             }
         }
     }
+}
+
+/// Change the permissions a reservation will fault pages in with.
+///
+/// `mprotect` on a range that has never been touched has no pages to change,
+/// and a reservation that does not hear about it goes on handing out pages
+/// with the permissions the mapping was made with. A loader that reserves
+/// read-write and then makes a slice of it executable got exactly that: the
+/// first instruction fetched from the new range faulted, on a page nk had
+/// just mapped non-executable on its behalf.
+///
+/// Returns whether any reservation covered part of the range -- which is how
+/// `mprotect` tells "nothing there" from "nothing there *yet*".
+pub fn protect(start: u64, len: u64, writable: bool, exec: bool) -> bool {
+    let here = space();
+    let end = start + len;
+    let mut touched = false;
+    unsafe {
+        let r = &mut *(&raw mut RESERVED);
+        for i in 0..MAX {
+            if !(r[i].live && r[i].space == here && r[i].start < end && start < r[i].end) {
+                continue;
+            }
+            touched = true;
+            let (lo, hi) = (r[i].start, r[i].end);
+            // The overlap takes the new permissions; whatever of the
+            // reservation lies outside it keeps the old ones, as its own
+            // record. Out of records, the whole reservation changes -- which
+            // is too permissive on the edges and still better than a range
+            // that faults.
+            let head = if lo < start { Some((lo, start)) } else { None };
+            let tail = if end < hi { Some((end, hi)) } else { None };
+            let old = r[i];
+            r[i].start = lo.max(start);
+            r[i].end = hi.min(end);
+            r[i].writable = writable;
+            r[i].exec = exec;
+            for piece in [head, tail].into_iter().flatten() {
+                match r.iter_mut().find(|s| !s.live) {
+                    Some(slot) => {
+                        *slot = old;
+                        slot.start = piece.0;
+                        slot.end = piece.1;
+                    }
+                    None => {
+                        r[i].start = lo;
+                        r[i].end = hi;
+                    }
+                }
+            }
+        }
+    }
+    touched
 }
 
 /// Drop every reservation belonging to an address space that is going away.

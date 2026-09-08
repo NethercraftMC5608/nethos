@@ -249,9 +249,55 @@ fn set_shadow(addr: usize) {
     unsafe { core::arch::asm!("msr sp_el0, {}", in(reg) addr, options(nomem, nostack)) };
 }
 
+/// Reclaim tasks that have finished and that nobody is going to wait for.
+///
+/// `task_exit` cannot free the stack it is standing on, so it leaves the slot
+/// Finished for somebody else to reclaim -- and until now the only somebody
+/// was `wait4`. A thread is never waited for (`pthread_join` waits on a
+/// futex, not on the task), and an orphan's parent is gone, so both piled up
+/// with a stack and a shadow page each. WebKit makes enough of both to
+/// exhaust the machine:
+///
+///   !! kernel panic  out of memory for a task stack
+///
+/// Only threads and orphans, and never the running task. A finished child
+/// with a live parent is that parent's to reap: its exit status is still the
+/// answer to a `wait4` that has not happened yet.
+fn reclaim_finished() {
+    let flags = crate::sync::irq_save();
+    unsafe {
+        for id in 0..MAX_TASKS {
+            if id == CURRENT {
+                continue;
+            }
+            let t = TASKS[id];
+            if t.state != State::Finished {
+                continue;
+            }
+            let orphan = TASKS[t.parent].state == State::Unused;
+            if !(t.shares_mm || orphan) {
+                continue;
+            }
+            // A thread's address space belongs to the threads it shared it
+            // with; an orphan process owns its own and takes it with it.
+            if !t.shares_mm {
+                crate::paging::destroy_user_address_space(t.ttbr0);
+                mm_drop(t.ttbr0);
+            }
+            for i in 0..STACK_PAGES {
+                frames::free((t.stack + i * PAGE) as *mut u8);
+            }
+            frames::free(t.shadow as *mut u8);
+            TASKS[id].state = State::Unused;
+        }
+    }
+    unsafe { crate::sync::irq_restore(flags) };
+}
+
 /// Create a task. `entry` is called with `arg`, and falling off the end of it
 /// is fine -- task_start catches the return.
 pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usize {
+    reclaim_finished();
     unsafe {
         let tasks = &mut *(&raw mut TASKS);
         let slot = tasks
@@ -648,11 +694,39 @@ pub fn set_parent(child: usize, parent: usize) {
     unsafe { TASKS[child].parent = parent }
 }
 
+/// Whether a child belongs to the waiter -- to it, or to a thread of it.
+///
+/// `wait` is a property of a process, and a process here is several tasks
+/// sharing one address space. glibc's `posix_spawn` is called from whichever
+/// thread wants a child and GLib's child watch reaps from the main loop's,
+/// so matching only the task that made the call answers ECHILD to a parent
+/// whose child is sitting right there:
+///
+///   waitpid(pid:61) failed: No child processes (10)
+///
+/// and WebKit tore down a web process it believed had vanished.
+fn child_of(child: usize, waiter: usize) -> bool {
+    unsafe {
+        let p = TASKS[child].parent;
+        if p == waiter {
+            return true;
+        }
+        // Same address space, and not the "no address space" of a task that
+        // never had one -- that would make every kernel task everyone's
+        // parent.
+        let space = TASKS[waiter].ttbr0;
+        space != 0
+            && space != crate::paging::kernel_address_space()
+            && TASKS[p].ttbr0 == space
+            && TASKS[p].state != State::Unused
+    }
+}
+
 /// A child of `parent` that has finished, if there is one.
 pub fn finished_child(parent: usize, want_pid: i64) -> Option<usize> {
     unsafe {
         (0..MAX_TASKS).find(|&i| {
-            TASKS[i].parent == parent
+            child_of(i, parent)
                 && TASKS[i].state == State::Finished
                 && (want_pid <= 0 || TASKS[i].linux_pid == want_pid)
         })
@@ -665,7 +739,7 @@ pub fn finished_child(parent: usize, want_pid: i64) -> Option<usize> {
 pub fn has_live_child(parent: usize, want_pid: i64) -> bool {
     unsafe {
         (0..MAX_TASKS).any(|i| {
-            TASKS[i].parent == parent
+            child_of(i, parent)
                 && TASKS[i].state != State::Unused
                 && (want_pid <= 0 || TASKS[i].linux_pid == want_pid)
         })
