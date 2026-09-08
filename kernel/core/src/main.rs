@@ -364,15 +364,32 @@ pub extern "C" fn rust_main(dtb: *const u8) -> ! {
 /// Used to be four rounds and then `stop()`: a four-second guillotine that
 /// killed every test longer than four seconds mid-syscall and presented as a
 /// kernel wedge. Now it waits for the init task and keeps a generous backstop
-/// (two minutes, past any `--timeout` a hung boot would hit first) so a real
-/// deadlock still ends with a wait graph rather than a killed QEMU.
+/// so a real deadlock still ends with a wait graph rather than a killed QEMU.
+///
+/// Two minutes was that backstop until the desktop: WebKit under TCG needs
+/// longer than that to reach a first paint, and the watchdog was stopping a
+/// boot that was making progress. The graph is also the bulk of the console
+/// -- and console output on this machine is a UART, so printing it every
+/// second is itself a large part of what the boot spends its time doing.
+/// So: a long backstop, and after the first half minute a graph only every
+/// thirtieth round. What the graph is for is a machine that has stopped, and
+/// a machine that has stopped looks the same thirty seconds later.
 #[cfg(nk_lkl)]
 extern "C" fn watchdog(_: usize) {
+    const BACKSTOP: u32 = 600;
     let mut round = 0u32;
     loop {
         let until = timer::ticks() + timer::HZ;
         while timer::ticks() < until {
             sched::yield_now();
+        }
+        if round >= 30 && round % 30 != 0 && round + 1 < BACKSTOP {
+            round += 1;
+            if sched::init_done() {
+                println!("  watchdog: init finished after {}s", round);
+                break;
+            }
+            continue;
         }
         println!();
         #[cfg(nk_lkl)]
@@ -400,7 +417,7 @@ extern "C" fn watchdog(_: usize) {
         }
         // LKL-side spot check on the last backstop round only (see below):
         // is the CPU still acquirable from a fresh entry?
-        if round == 120 {
+        if round + 1 == BACKSTOP {
             let pid = crate::lkl::syscall(172, [0; 6]);
             println!("          watchdog getpid -> {}", pid);
         }
@@ -409,7 +426,7 @@ extern "C" fn watchdog(_: usize) {
             println!("  watchdog: init finished after {}s", round);
             break;
         }
-        if round >= 121 {
+        if round >= BACKSTOP {
             println!("  watchdog: init still running after {}s -- stopping with the graph above", round);
             break;
         }

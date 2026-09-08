@@ -342,22 +342,12 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
             214 => sys_brk(frame.x[0]),
             222 => sys_mmap(frame.x[0], frame.x[1], frame.x[2], frame.x[3], frame.x[4] as i64, frame.x[5], frame.elr),
             215 => sys_munmap(frame.x[0], frame.x[1]),
-            226 => {
-                let r = sys_mprotect(frame.x[0], frame.x[1], frame.x[2]);
-                // One line per mprotect while the restorer fault is open:
-                // which caller (elr) asks for what range with what prot.
-                // A range covering the restorer page with prot R (no X)
-                // sets UXN on it -- that is the suspect for NOT-EXEC.
-                crate::println!(
-                    "  mprotect {:#x} len {:#x} prot {:#x} elr {:#x} -> {}",
-                    frame.x[0],
-                    frame.x[1],
-                    frame.x[2],
-                    frame.elr,
-                    r
-                );
-                r
-            }
+            // A line per mprotect was how the restorer fault was found, and
+            // it is a line per mprotect: the dynamic loader makes one per
+            // library, WebKit's allocator makes thousands, and each one goes
+            // out of a UART one character at a time. That fault is closed;
+            // this is now most of what a desktop boot spends its console on.
+            226 => sys_mprotect(frame.x[0], frame.x[1], frame.x[2]),
             96 => sys_set_tid_address(),
             261 => sys_prlimit64(frame.x[2], frame.x[3]),
             227 => sys_msync(frame.x[0], frame.x[1], frame.x[2]),

@@ -164,6 +164,8 @@ pub fn inherit_fds(parent_pid: i64) -> usize {
     const PIDFD_GETFD: i64 = 438;
     const DUP3: i64 = 24;
     const CLOSE: i64 = 57;
+    const FCNTL: i64 = 25;
+    const F_DUPFD: i64 = 0;
     // A linear scan, because there is no "list the open descriptors" syscall
     // -- only asking about one. 64 was far more than anything here opened
     // until WebKit, which holds a library per descriptor and hands its child
@@ -173,13 +175,30 @@ pub fn inherit_fds(parent_pid: i64) -> usize {
     // So the ceiling is high and the scan stops early instead: descriptors
     // are dense in practice, and a run of misses this long past the last hit
     // means there is nothing above it.
-    const MAX_FD: i64 = 1024;
+    const MAX_FD: i64 = 512;
     const GIVE_UP_AFTER: i64 = 96;
 
     let pidfd = syscall(PIDFD_OPEN, [parent_pid, 0, 0, 0, 0, 0]);
     if pidfd < 0 {
         return 0;
     }
+    // Move the pidfd out of the range about to be filled in, and this is not
+    // tidiness -- it is the whole correctness of the loop below.
+    //
+    // `pidfd_open` returns the lowest free descriptor, which in a child that
+    // has just attached is 3. The loop then places the parent's descriptors
+    // at their own numbers, and the parent's descriptor 3 landed on top of
+    // the pidfd: from there every `pidfd_getfd` was asking a socket for a
+    // descriptor and failing. The child got the parent's 0..4 and nothing
+    // else, and WebKit's spawn died on a `dup3` of a descriptor that was
+    // never copied -- EBADF, from a call that had nothing wrong with it.
+    let moved = syscall(FCNTL, [pidfd, F_DUPFD, MAX_FD + 64, 0, 0, 0]);
+    let pidfd = if moved >= 0 {
+        syscall(CLOSE, [pidfd, 0, 0, 0, 0, 0]);
+        moved
+    } else {
+        pidfd
+    };
     let mut n = 0;
     let mut misses = 0;
     for fd in 0..MAX_FD {
