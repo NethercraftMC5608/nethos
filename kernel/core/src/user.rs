@@ -238,9 +238,12 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
         // fault at all: it is the first touch of a page the program asked
         // for with MAP_NORESERVE. Put a frame under it and retry the
         // instruction -- the program never learns anything happened.
-        let data_abort = ec == 0b100100 || ec == 0b100101;
+        // Instruction aborts (0b1000xx) as well as data aborts: a program
+        // may map executable pages with MAP_NORESERVE and jump into them,
+        // and an unmapped instruction fetch is the same first touch.
+        let abort = matches!(ec, 0b100000 | 0b100001 | 0b100100 | 0b100101);
         let translation = matches!(esr & 0x3f, 0x04..=0x07);
-        if data_abort && translation && crate::reserve::fault_in(far) {
+        if abort && translation && crate::reserve::fault_in(far) {
             return;
         }
         println!();
@@ -999,6 +1002,10 @@ struct Forked {
     /// The failure path has to know: freeing it would take the address space
     /// out from under the threads still running in it.
     shares_mm: bool,
+    /// A vfork child shares the address space like a thread and is a process
+    /// like a fork: its own pid, its own descriptor table, its own signal
+    /// dispositions. The two flags are independent for that reason.
+    vfork: bool,
     /// Whether the forking process had a real `/dev/console` on 0, 1 and 2.
     /// A child that inherits those descriptors has one too, and must be told
     /// so: without it nk answers the child's writes to 1 and 2 itself, which
@@ -1065,21 +1072,54 @@ fn fork(frame: &Frame) -> i64 {
     if frame.x[0] & CLONE_THREAD != 0 {
         return thread(frame);
     }
-    if frame.x[0] & CLONE_VM != 0 {
-        // Sharing memory without being a thread is vfork, and vfork's promise
-        // -- the parent stops until the child execs or exits -- is a thing nk
-        // would have to implement rather than approximate.
-        println!("  clone: CLONE_VM without CLONE_THREAD is not implemented");
-        return -38; // -ENOSYS
+    // CLONE_VM without CLONE_THREAD is vfork's shape, and it is what glibc's
+    // `posix_spawn` uses: clone(CLONE_VM|CLONE_VFORK|SIGCHLD, stack). It is
+    // also the only way WebKit starts its network and web processes, so
+    // refusing it is refusing a browser.
+    //
+    // nk gives the child a *copy* of the address space rather than sharing
+    // it, and does not stop the parent. Both are departures from vfork, and
+    // both are safe in the direction that matters here: a child with its own
+    // pages cannot corrupt the parent's before `execve`, and a parent that
+    // keeps running cannot be deadlocked by a child that never execs.
+    //
+    // What is lost is the one word the sharing was for. `posix_spawn` has
+    // the child write `execve`'s errno into memory the parent reads, so a
+    // failed exec becomes a `posix_spawn` failure; with a copy the parent
+    // reads its own zero and gets a pid whose process exits immediately.
+    // The caller sees a child that died rather than a spawn that failed --
+    // less informative, and not wrong.
+    let vfork = frame.x[0] & CLONE_VM != 0;
+    if vfork && frame.x[1] == 0 {
+        // No stack. Parent and child would run on the same one in the same
+        // address space, which is the single thing vfork cannot survive.
+        return -22; // -EINVAL
     }
 
     let parent = current_ttbr0();
-    let Some(ttbr0) = (unsafe { paging::copy_user_address_space(parent) }) else {
-        return -12; // -ENOMEM
+    // vfork shares; fork copies. Sharing is not an optimisation here, it is
+    // the only thing that works: `posix_spawn` is called from processes with
+    // hundreds of megabytes mapped, and copying all of it to throw it away
+    // one syscall later at `execve` took longer than the run's whole budget.
+    let ttbr0 = if vfork {
+        parent
+    } else {
+        let Some(child) = (unsafe { paging::copy_user_address_space(parent) }) else {
+            return -12; // -ENOMEM
+        };
+        // The child's tables are a copy; so is its layout entry. From here
+        // the two address spaces allocate independently.
+        crate::sched::set_user_memory_full(child, false);
+        // Reservations are promises, not pages, so copying pages does not
+        // carry them. Without this the child faults on the first byte of an
+        // arena its parent could use.
+        crate::reserve::inherit(paging::table_of(parent), paging::table_of(child));
+        child
     };
-    // The child's tables are a copy; so is its layout entry. From here the
-    // two address spaces allocate independently.
-    crate::sched::set_user_memory_full(ttbr0, false);
+    // What the parent blocks on. Leaked for the same reason as `ready`: the
+    // child signals it from its own thread, after this frame is gone.
+    let done: &'static crate::sync::Semaphore =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(crate::sync::Semaphore::new(0)));
 
     let tpidr: u64;
     unsafe { core::arch::asm!("mrs {}, tpidr_el0", out(reg) tpidr, options(nomem, nostack)) };
@@ -1095,6 +1135,13 @@ fn fork(frame: &Frame) -> i64 {
 
     let mut child_frame = Frame { x: frame.x, elr: frame.elr, spsr: frame.spsr, sp: frame.sp };
     child_frame.x[0] = 0; // what fork returns in the child
+    // vfork's caller supplies the stack the child runs on, because the two
+    // were meant to share one address space and could not share one stack.
+    // The copy makes it the child's own; the pointer is still where the
+    // caller expects its frame to be.
+    if vfork && frame.x[1] != 0 {
+        child_frame.sp = frame.x[1];
+    }
 
     let me0 = crate::sched::current_id();
     let arg = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(Forked {
@@ -1102,7 +1149,8 @@ fn fork(frame: &Frame) -> i64 {
         ttbr0,
         tpidr,
         parent_pid: crate::sched::linux_pid(me0),
-        shares_mm: false,
+        shares_mm: vfork,
+        vfork,
         has_console: crate::sched::has_console(),
         set_tid: (0, 0),
         ready,
@@ -1127,13 +1175,23 @@ fn fork(frame: &Frame) -> i64 {
     let flags = crate::sync::irq_save();
     let id = crate::sched::spawn("forked", forked_entry, arg);
     crate::sched::set_parent(id, me);
+    if vfork {
+        crate::sched::set_vfork_child(id, done as *const _ as usize);
+    }
     unsafe { crate::sync::irq_restore(flags) };
 
     // Wait for the child to have a pid. fork returns it, and only the child
     // can get one -- attaching binds the Linux task to the host thread that
     // does the attaching.
     ready.down();
-    pid.load(Ordering::Acquire)
+    let p = pid.load(Ordering::Acquire);
+    // vfork's promise. Only after this may the parent touch the address
+    // space again -- the child has been running in it, on the stack the
+    // caller passed, and has now either replaced it or left it.
+    if vfork && p > 0 {
+        done.down();
+    }
+    p
 }
 
 #[cfg(nk_lkl)]
@@ -1151,19 +1209,28 @@ extern "C" fn forked_entry(arg: usize) {
     // Both need a Linux task of their own -- two nk tasks cannot answer
     // syscalls as one Linux task -- but only one of them wants a private
     // table. See `attach_thread`.
-    let attach = if f.shares_mm {
-        crate::lkl::attach_thread(f.parent_pid)
-    } else {
+    // A vfork child shares memory and nothing else: it needs a Linux task
+    // with its own pid and its own descriptor table, exactly as a fork does.
+    let as_process = !f.shares_mm || f.vfork;
+    let attach = if as_process {
         crate::lkl::attach_process()
+    } else {
+        crate::lkl::attach_thread(f.parent_pid)
     };
     let pid = match attach {
         Ok(pid) => pid,
         Err(e) => {
             f.pid.store(e, Ordering::Release);
             f.ready.up();
-            if !f.shares_mm {
+            if as_process && !f.vfork {
                 unsafe { paging::destroy_user_address_space(f.ttbr0) };
                 crate::sched::drop_user_memory(f.ttbr0);
+            }
+            if f.vfork {
+                let d = crate::sched::take_vfork_done();
+                if d != 0 {
+                    unsafe { (*(d as *const crate::sync::Semaphore)).up() };
+                }
             }
             return;
         }
@@ -1182,7 +1249,7 @@ extern "C" fn forked_entry(arg: usize) {
     // a descriptor between forking and the child copying it.
     // Copying descriptors is the process path only: a thread already has
     // its creator's table, and copying into it would duplicate every entry.
-    let inherited = if f.shares_mm { 3 } else { crate::lkl::inherit_fds(f.parent_pid) };
+    let inherited = if as_process { crate::lkl::inherit_fds(f.parent_pid) } else { 3 };
     // A child with the parent's 0, 1 and 2 has a console in exactly the way
     // the parent did, and saying otherwise is not a missing feature but a
     // wrong answer: nk's fallback writes descriptor 1 to the UART, so a
@@ -1194,12 +1261,12 @@ extern "C" fn forked_entry(arg: usize) {
     }
     f.pid.store(pid, Ordering::Release);
     f.ready.up();
-    if inherited > 0 && !f.shares_mm {
+    if inherited > 0 && as_process {
         println!("  fork: child {} inherited {} descriptors", pid, inherited);
     }
 
     crate::sched::set_shared_maps(&f.shared);
-    if !f.shares_mm {
+    if as_process {
         // A forked child inherits dispositions, mask and altstack -- and
         // nothing pending. A thread inherits nothing: it shares the
         // creator's table by sharing its address space.
@@ -1273,6 +1340,7 @@ fn thread(frame: &Frame) -> i64 {
         tpidr: if flags_arg & CLONE_SETTLS != 0 { tls } else { mine },
         parent_pid: crate::sched::linux_pid(crate::sched::current_id()),
         shares_mm: true,
+        vfork: false,
         has_console: crate::sched::has_console(),
         set_tid: (
             if flags_arg & CLONE_PARENT_SETTID != 0 { parent_tid } else { 0 },
@@ -1488,16 +1556,22 @@ fn sys_execve(path: u64, argv: u64, envp: u64) -> i64 {
     };
 
     let old = current_ttbr0();
+    // A vfork child is running in its parent's address space. Replacing its
+    // image means leaving that address space, not destroying it -- and not
+    // releasing its shared mappings either, which are the parent's.
+    let borrowed = crate::sched::shares_mm_current();
     // The old address space's shared mappings end with it: write back and
     // drop the pool references before the tables are destroyed. The pages
     // themselves stay in the pool for other holders; destroying the tables
     // must not free them, so this goes through `unmap_user_nofree`.
-    for m in crate::sched::take_shared_maps() {
-        unsafe { crate::paging::unmap_user_nofree(old, m.start, m.len) };
-        if m.anonymous {
-            crate::shm::release_anon(m.region);
-        } else {
-            crate::shm::release(m.region, m.fd);
+    if !borrowed {
+        for m in crate::sched::take_shared_maps() {
+            unsafe { crate::paging::unmap_user_nofree(old, m.start, m.len) };
+            if m.anonymous {
+                crate::shm::release_anon(m.region);
+            } else {
+                crate::shm::release(m.region, m.fd);
+            }
         }
     }
     unsafe {
@@ -1507,14 +1581,25 @@ fn sys_execve(path: u64, argv: u64, envp: u64) -> i64 {
             "msr ttbr0_el1, {}", "dsb ishst", "tlbi vmalle1", "dsb ish", "isb",
             in(reg) p.ttbr0, options(nostack)
         );
-        paging::destroy_user_address_space(old);
-        crate::sched::drop_user_memory(old);
+        if !borrowed {
+            paging::destroy_user_address_space(old);
+            crate::sched::drop_user_memory(old);
+        }
         // The thread pointer belonged to the program that is gone. A libc
         // sets its own before it needs one; leaving the old value would give
         // the new program a pointer into memory that has just been freed.
         core::arch::asm!("msr tpidr_el0, xzr", options(nomem, nostack));
     }
     crate::sched::set_user_memory_for(p.ttbr0, p.brk, USER_HIGH_TOP);
+    // This address space is the task's own from here, whoever's it was
+    // before, so its exit must tear this one down.
+    crate::sched::own_mm_current();
+    // And the vfork parent may run again: the borrowed address space is
+    // no longer being used by anybody but its owner.
+    let done = crate::sched::take_vfork_done();
+    if done != 0 {
+        unsafe { (*(done as *const crate::sync::Semaphore)).up() };
+    }
     println!("  execve: replaced this process with {} bytes at {:#x}", bytes.len(), p.entry);
     unsafe { enter_user_fresh(p.entry, p.stack, p.ttbr0, crate::sched::kernel_stack_top() as u64) }
 }
@@ -1647,8 +1732,18 @@ pub fn sys_exit(status: i32) -> ! {
     }
     // A thread exiting is not the process exiting, and saying so would be a
     // lie in the middle of a program that is still running.
+    // A vfork child that never exec'd is leaving an address space it does
+    // not own, which is a thread's exit rather than a process's -- and its
+    // parent has been waiting all along to have that address space back.
     #[cfg(nk_lkl)]
-    let thread = crate::sched::clear_child_tid() != 0;
+    {
+        let done = crate::sched::take_vfork_done();
+        if done != 0 {
+            unsafe { (*(done as *const crate::sync::Semaphore)).up() };
+        }
+    }
+    #[cfg(nk_lkl)]
+    let thread = crate::sched::clear_child_tid() != 0 || crate::sched::shares_mm_current();
     #[cfg(not(nk_lkl))]
     let thread = false;
     // A process's shared mappings end with it: write back and drop the pool

@@ -627,6 +627,52 @@ pub unsafe fn copy_user_address_space(parent: u64) -> Option<u64> {
             if e3 & (1 << 6) == 0 { protect_user_none(child, va, 4096); }
         }
     }
+
+    // The high arena, where every mapping a program makes for itself lives.
+    // Copying only the low half left a child with its image, heap and stack
+    // and none of its libraries: the first instruction fetched through the
+    // dynamic loader was a level-0 translation fault at an address the
+    // parent could execute perfectly well.
+    let hi = ((crate::user::USER_HIGH_BASE >> L0_SHIFT) & 511) as usize;
+    let e0h = *pl0.add(hi);
+    if is_table(e0h) {
+        let pl1 = (e0h & ADDR) as *const u64;
+        for a in 0..512 {
+            let e1 = *pl1.add(a);
+            if !is_table(e1) {
+                continue;
+            }
+            let pl2 = (e1 & ADDR) as *const u64;
+            for b in 0..512 {
+                let e2 = *pl2.add(b);
+                if !is_table(e2) {
+                    continue;
+                }
+                let pl3 = (e2 & ADDR) as *const u64;
+                for c in 0..512 {
+                    let e3 = *pl3.add(c);
+                    if e3 & pte::VALID == 0 {
+                        continue;
+                    }
+                    let va = ((hi as u64) << L0_SHIFT)
+                        | ((a as u64) << L1_SHIFT)
+                        | ((b as u64) << L2_SHIFT)
+                        | ((c as u64) << L3_SHIFT);
+                    let Some(page) = crate::frames::alloc() else {
+                        destroy_user_address_space(child);
+                        return None;
+                    };
+                    core::ptr::copy_nonoverlapping((e3 & ADDR) as *const u8, page, 4096);
+                    let exec = e3 & pte::UXN == 0;
+                    let writable = e3 & (1 << 7) == 0;
+                    map_user_permissions(child, va, page as u64, 4096, exec, writable);
+                    if e3 & (1 << 6) == 0 {
+                        protect_user_none(child, va, 4096);
+                    }
+                }
+            }
+        }
+    }
     Some(child)
 }
 

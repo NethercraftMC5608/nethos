@@ -164,20 +164,35 @@ pub fn inherit_fds(parent_pid: i64) -> usize {
     const PIDFD_GETFD: i64 = 438;
     const DUP3: i64 = 24;
     const CLOSE: i64 = 57;
-    // Far more than anything here opens, and bounded because this is a linear
-    // scan: there is no "list the open descriptors" syscall, only asking.
-    const MAX_FD: i64 = 64;
+    // A linear scan, because there is no "list the open descriptors" syscall
+    // -- only asking about one. 64 was far more than anything here opened
+    // until WebKit, which holds a library per descriptor and hands its child
+    // a socket well above that: the descriptor the child was told to use
+    // simply was not there, and `posix_spawn` reported EBADF.
+    //
+    // So the ceiling is high and the scan stops early instead: descriptors
+    // are dense in practice, and a run of misses this long past the last hit
+    // means there is nothing above it.
+    const MAX_FD: i64 = 1024;
+    const GIVE_UP_AFTER: i64 = 96;
 
     let pidfd = syscall(PIDFD_OPEN, [parent_pid, 0, 0, 0, 0, 0]);
     if pidfd < 0 {
         return 0;
     }
     let mut n = 0;
+    let mut misses = 0;
     for fd in 0..MAX_FD {
         let got = syscall(PIDFD_GETFD, [pidfd, fd, 0, 0, 0, 0]);
         if got < 0 {
-            continue; // the parent has nothing there
+            // the parent has nothing there
+            misses += 1;
+            if misses >= GIVE_UP_AFTER {
+                break;
+            }
+            continue;
         }
+        misses = 0;
         // pidfd_getfd allocates the lowest free descriptor, which is not
         // necessarily the number the parent used -- and the number is what a
         // program depends on. Descriptors already placed are occupied, so the

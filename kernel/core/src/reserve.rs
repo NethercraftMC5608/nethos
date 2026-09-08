@@ -87,6 +87,31 @@ pub fn forget(start: u64, len: u64) {
     }
 }
 
+/// Give a new address space the reservations of the one it was copied from.
+///
+/// `fork` copies pages, and a reservation has none: it is a promise that a
+/// range will get one on first touch. Without carrying the promise across,
+/// the child faults on the first byte of an arena its parent could use.
+pub fn inherit(parent: u64, child: u64) {
+    unsafe {
+        let r = &mut *(&raw mut RESERVED);
+        for i in 0..MAX {
+            if !(r[i].live && r[i].space == parent) {
+                continue;
+            }
+            let mut copy = r[i];
+            copy.space = child;
+            match r.iter_mut().find(|s| !s.live) {
+                Some(slot) => *slot = copy,
+                // Out of slots: the child simply has one fewer reservation
+                // than its parent, and faults there as it would have before
+                // MAP_NORESERVE was honoured at all.
+                None => return,
+            }
+        }
+    }
+}
+
 /// Drop every reservation belonging to an address space that is going away.
 pub fn forget_space(table: u64) {
     unsafe {

@@ -107,6 +107,12 @@ pub struct Task {
     /// thread that no longer exists. See `uid`.
     pub generation: u64,
     pub shares_mm: bool,
+    /// A leaked `Semaphore` the vfork parent is blocked on, or 0.
+    ///
+    /// vfork's promise is that the parent does not run again until the child
+    /// has stopped using the address space they share -- by `execve` or by
+    /// exiting. This is how the child says so.
+    pub vfork_done: usize,
     /// Where to write a zero and wake a futex when this task exits, if
     /// `CLONE_CHILD_CLEARTID` asked for it. That write is what `pthread_join`
     /// is waiting for.
@@ -182,6 +188,7 @@ static mut TASKS: [Task; MAX_TASKS] = [Task {
     parent: 0,
     generation: 0,
     shares_mm: false,
+    vfork_done: 0,
     clear_child_tid: 0,
     has_console: false,
     user_syscall: false,
@@ -293,6 +300,7 @@ pub fn spawn(name: &'static str, entry: extern "C" fn(usize), arg: usize) -> usi
             parent: 0,
             generation,
             shares_mm: false,
+            vfork_done: 0,
             clear_child_tid: 0,
             has_console: false,
             user_syscall: false,
@@ -598,6 +606,37 @@ pub fn set_thread(id: usize, clear_child_tid: u64) {
     unsafe {
         TASKS[id].shares_mm = true;
         TASKS[id].clear_child_tid = clear_child_tid;
+    }
+}
+
+/// Mark a task as sharing an address space it does not own, with a parent
+/// waiting for it to stop doing so. The vfork half of `set_thread`.
+pub fn set_vfork_child(id: usize, done: usize) {
+    unsafe {
+        TASKS[id].shares_mm = true;
+        TASKS[id].vfork_done = done;
+    }
+}
+
+/// Whether the running task is in an address space belonging to somebody
+/// else -- a thread of it, or a vfork child that has not exec'd yet.
+pub fn shares_mm_current() -> bool {
+    unsafe { TASKS[CURRENT].shares_mm }
+}
+
+/// The running task now owns its address space: `execve` gave it one of its
+/// own, so its exit must tear that one down.
+pub fn own_mm_current() {
+    unsafe { TASKS[CURRENT].shares_mm = false }
+}
+
+/// Take the semaphore a vfork parent is waiting on, leaving none behind: the
+/// promise is kept once, whether by `execve` or by exit.
+pub fn take_vfork_done() -> usize {
+    unsafe {
+        let v = TASKS[CURRENT].vfork_done;
+        TASKS[CURRENT].vfork_done = 0;
+        v
     }
 }
 
