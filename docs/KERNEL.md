@@ -1925,3 +1925,35 @@ so the cheap instruments are worth building early — `--gdb`, the exception
 dump, and `tests/test_kernel_boot.py`, which boots the real thing on the real
 emulator and reads the serial console, because at this stage there is no other
 kind of test.
+
+## The black screen: device mmap goes to nk's page pool
+
+weston runs on nk's virtio-gpu through real KMS. Its own DRM log says so:
+
+    [atomic] created new mode blob 44 for 1280x800
+    [atomic] drmModeAtomicCommit
+    [CRTC:36] setting pending flip
+    [atomic][CRTC:36] flip processing completed
+    [repaint] view 0x43b950 using renderer composition
+
+A mode is set, a client's view is composited, atomic commits are made and
+page flips complete. And the scanout QEMU hands back is 1280x800 of
+uniform black -- the mode weston set, with nothing in it.
+
+The gap is the last hop. weston draws into a dumb buffer it obtains with
+DRM_IOCTL_MODE_CREATE_DUMB and maps with `mmap` on /dev/dri/card0 at the
+offset MAP_DUMB returns. nk answers that `mmap` with `shm::map_shared`,
+which is written for *files*: it fstats the descriptor, allocates its own
+zeroed frames, and fills them with `preadv`. On a character device the
+fstat says zero bytes and the read returns nothing, so weston gets a
+private zeroed buffer -- correct-looking memory that the GPU has never
+heard of. Everything it draws lands there and nothing else ever reads it.
+
+The fix is that a mapping of a device must be the device's pages. That
+means going through the file's own `f_op->mmap` inside LKL rather than
+through nk's pool, and mapping whatever physical pages that installs into
+the process's tables -- the same shape as `ioremap`, but chosen by the
+driver rather than by an address nk already knows.
+
+Until then every graphical client on nk is drawing into a void, and the
+symptom is indistinguishable from a compositor that does not work.
