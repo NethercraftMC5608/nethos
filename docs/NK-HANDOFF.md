@@ -257,18 +257,16 @@ window (demand paging and/or raised USER_MMAP_TOP needed); (ii) device
 MAP_SHARED for dumb buffers still refused (real compositor cannot scan out
 client buffers yet); (iii) done — the PROT_READ AP bug above.
 
-**The live lead (updated ~13:30):** the weston-specific stall, 3/5 on
-`comp`, 12/12 without it (see "Where this stands"). Shape is always a
-`forked` task blocked on sem 3 (LKL's CPU sem) with downs one ahead of ups
-— a missing hand-over, not a lost wakeup — landing *before weston starts*,
-in a busybox fork-reaping step of nk-init. forkchurn exonerates nk's
-fork/exit path at 150 interleaved children. Cheapest next step, in order:
-(1) weston-absent control initrd (same mounts/links, backgrounded sleeper
-instead of weston) — control 5/5 + weston 3/5 names the binary, control
-≤3/5 names the harness `&`+`sleep` shape; (2) only then instrument
-`nk_sem_down/up` with caller task + LKL thread ids and catch one stall.
-`virtio intr 0x0` and the unmask handshake are retired as leads (see
-negatives). Full lane plan in `docs/DESKTOP-PLAN.md` §10.
+**The live lead (updated tonight, docs-only pass, nothing booted):**
+device mmap delegation plus the stranding fix sit in the integration chain
+(`03519d3` delegates device `mmap` to Linux; `fd56a3b` fixes CPU stranding
+on host task exit, claiming 5/5 clean compositor boots — claimed by the
+lane, unverified by this author, who read the messages but ran no boot and
+opened no lane log). Neither commit is in MAIN (`48d3e6b` is the tip);
+landing them is the next kernel act. M3 screendump is still the mission.
+Two new lanes opened per user request: npkg run and ssh path on nk, each
+with its own probe files under `kernel/init/`. Full lane table, per-lane
+unknowns, and collected-not-measured state in `docs/DESKTOP-PLAN.md` §11.
 
 ## Also open
 

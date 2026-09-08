@@ -326,3 +326,101 @@ Every negative goes into `docs/NK-HANDOFF.md`. Fixes that don't move the
 symptom land as "correct-but-unrelated" with the measurement stated, or not
 at all. No truncated logs for conclusions (`grep -a`, never `head -8`).
 No milestone claimed without its own proof command printing its marker.
+
+## 11. Tonight's extended mission (docs pass, no boot)
+
+Mission widens per user request: working shell screenshot + ssh + npkg run,
+alongside the standing M3 screendump. This section is a docs-only pass on
+`nk-initrd-builder` in the MAIN checkout — no boot, no kernel edit, nothing
+measured by this author. State below is collected, not verified.
+
+State collected without booting:
+
+- `git log --oneline -15` tops at `48d3e6b` (docs: black screen is device
+  mmap answered from nk's page pool), over `f6872a5`, `3940296`, `6310387`,
+  `028addc`, `58014a5`, `25547a7`, `ada357f`, `0f243b1`, `469bd52`.
+- `git status --short`: `M kernel/core/src/user.rs`,
+  `M scripts/build-compositor-disk.sh`, plus untracked `.agents/`,
+  `nk-scanout-1280x800.png`, `skills-lock.json`. Docs commit below stages
+  only the two docs files.
+- `git worktree list`: MAIN `nethos` at `48d3e6b [nk-initrd-builder]`;
+  `nk-lane-integration-kernel` at `fd56a3b`; `nk-lane-integration` at
+  `6fa0ef9`; `nk-lane-device` tip `036a9ce`; `nk-lane-ssh` tracks MAIN tip;
+  plus detached lane checkouts (comp, kernel, m3, mmap, semuid) and agent
+  worktrees.
+- `/tmp/*.log`: `kverify-1.log`, `test-boot18{,-2..-5}.log`,
+  `crew-inbox.log` most recent. No fresh boot log from this pass.
+- `kernel/ldk/build/*.img|*.cpio` in MAIN checkout are 1-byte link stubs,
+  not usable images (`comp.img`, `npkg.img`, `net.cpio` etc. all 1B). Real
+  images live in lane worktrees and `/tmp/*.img` (`kverify-1.img`,
+  `m3verify.img`, 3G each). Do not boot from MAIN build dir until rebuilt.
+
+Measurement claims read (not re-run):
+
+- `48d3e6b`: black screen is device mmap, not compositor failure. Weston's
+  dumb buffer `mmap` on `/dev/dri/card0` is answered by `shm::map_shared`
+  with zeroed frames from nk's page pool (fstat on the character device
+  reports size zero), so weston composites into private pixels the GPU
+  never scans out. Symptom reads as "compositor does not work"; it is not.
+- Integration chain exists, none of it in MAIN (`NOT-IN-MAIN` all four):
+  `03519d3` delegates device mmap to Linux (LKL mmap + host-only PTE walk,
+  alias device physical pages into EL0, retain Linux mappings till release;
+  LKL and nk release builds pass; scanout runtime not yet verified);
+  `e8d8cde` semaphore UID tracking diagnostics; `01222fd` guards device
+  shared mappings against foreign unmap and fixed overwrite; `fd56a3b`
+  fixes CPU stranding on host task exit, claiming 5/5 clean compositor
+  boots with zero stranding (before: stall ~50%, sem 3 ups 540 downs 541).
+  The 5/5 is the lane's claim, unverified by this author — no log from it
+  was read in this pass. Diff `48d3e6b..fd56a3b` touches five files only:
+  `kernel/core/src/lkl.rs`, `shm.rs`, `sync.rs`, `user.rs`,
+  `kernel/ldk/patch-lkl.py` (+362/−7).
+
+### Lane table (file ownership, this mission)
+
+| lane | goal | owns | proves (single command) |
+| --- | --- | --- | --- |
+| kernel-device+strand | land device mmap delegation + stranding fix in MAIN | `kernel/core/src/shm.rs`, `kernel/core/src/lkl.rs`, `kernel/ldk/patch-lkl.py` | 5/5 comp boots reach `VIEW_REACHED` with no sem-3 `downs>ups` stall, plus screendump no longer uniform black |
+| render | shell screenshot checked programmatically | `scripts/m3-check.py` (extend) | `M3_*_OK` line from `m3-check.py` against a monitor-socket screendump of the real shell page |
+| shell | first real nethos-view shell page on nk | `kernel/init/deskprobe.py`, `kernel/init/viewprobe.py`, `payload/bin/nethos-view` | serial log shows surface present + `load-changed`/title line from a `file://` shell page |
+| npkg | npkg run on nk (new per user request) | npkg probe files under `kernel/init/` (new, `npkg*`) | probe log shows resolve/install/verify green on nk |
+| ssh | ssh path on nk (new per user request) | ssh probe files under `kernel/init/` (new, `ssh*`) | probe log shows handshake/session marker on nk |
+| docs | keep plan + handoff current so a run recovers after compaction | `docs/DESKTOP-PLAN.md`, `docs/NK-HANDOFF.md` | this commit: §11 present, live lead current |
+
+Serialisation: kernel-device+strand first (every stall below it reads as a
+bug in another lane); shell-run gated on 5/5 comp boots; render gated on
+shell-run; npkg and ssh lanes are NOT gated on the stall unless they boot
+the compositor disk — state which disk each probe boots in its commit
+message. Docs lane never blocks and never touches code.
+
+### Riskiest unknown per lane, and the cheapest experiment
+
+- kernel-device+strand: unknown = whether the delegated device mapping
+  survives munmap/mprotect/fork without leaking Linux mappings or aliasing
+  the wrong pages (the `01222fd` guard exists because this edge is sharp).
+  Cheapest = one boot of the existing comp disk at the `fd56a3b` tip with
+  full log: count sem-3 balance + screendump colour count. Either the
+  stall is gone and black turns non-uniform, or one log names which half
+  failed. Do not re-argue the mechanism; boot it.
+- render: unknown = what "non-uniform" means for the real shell (gradient
+  ramp has 17 colours; the shell page has text, icons, panel — the §9
+  threshold does not transfer). Cheapest = capture one screendump of the
+  shell page and run the current `m3-check.py` against it unmodified; read
+  the actual colour/row numbers, then set the threshold.
+- shell: unknown = what `do_activate` needs that viewprobe does not
+  (layer-shell protocol? frame clock? web-process fork+exec?). Cheapest =
+  one SPEC, `role=window`, static `file://` page, sandbox disabled; read
+  the first missing-thing error rather than predicting it.
+- npkg: unknown = which syscall or address-space demand npkg's
+  resolve/install path hits first on nk (closure size vs the 99.5%-full
+  window is the standing suspect). Cheapest = smallest npkg op that touches
+  disk + network (or disk alone if offline), with `mmapfail`-style logging
+  kept; one log places it.
+- ssh: unknown = whether the ssh lane needs loopback TCP (green since §1)
+  only, or timers/poll stability under key-exchange churn (the old #16
+  shape). Cheapest = loopback handshake probe before any real session; a
+  stall during kex names poll/timers, a clean handshake names the session
+  layer.
+- docs: unknown = staleness after compaction (a run that cannot tell
+  measured from claimed re-derives everything). Cheapest = this section:
+  every claim above names its commit; anything without a commit hash is
+  this author's collection, not a measurement.
