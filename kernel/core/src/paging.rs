@@ -984,6 +984,39 @@ pub unsafe fn destroy_user_address_space(root: u64) {
         }
         crate::frames::free(l1 as *mut u8);
     }
+
+    // The high arena, under its own top-level slot. Nothing of the kernel's
+    // is copied there -- `new_address_space` leaves every slot but 0 as the
+    // zero it found -- so every table and every page below it belongs to
+    // this process alone and the walk can be unconditional, unlike the low
+    // half where a block entry is the kernel's gigabyte of RAM.
+    let hi = l0.add(((crate::user::USER_HIGH_BASE >> L0_SHIFT) & 511) as usize);
+    if is_table(*hi) {
+        let l1 = (*hi & ADDR) as *mut u64;
+        for i in 0..512 {
+            let e1 = *l1.add(i);
+            if !is_table(e1) {
+                continue;
+            }
+            let l2 = (e1 & ADDR) as *mut u64;
+            for j in 0..512 {
+                let e2 = *l2.add(j);
+                if !is_table(e2) {
+                    continue;
+                }
+                let l3 = (e2 & ADDR) as *mut u64;
+                for k in 0..512 {
+                    let e3 = *l3.add(k);
+                    if e3 & 1 != 0 {
+                        crate::frames::free((e3 & ADDR) as *mut u8);
+                    }
+                }
+                crate::frames::free(l3 as *mut u8);
+            }
+            crate::frames::free(l2 as *mut u8);
+        }
+        crate::frames::free(l1 as *mut u8);
+    }
     crate::frames::free(l0 as *mut u8);
 }
 

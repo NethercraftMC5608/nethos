@@ -69,6 +69,46 @@ pub const USER_STACK_TOP: u64 = 0x3F00_0000;
 /// is possible but moves the stack too; see USER_STACK_TOP.
 pub const USER_MMAP_TOP: u64 = USER_STACK_TOP - 16 * 1024 * 1024;
 
+/// The high arena: where anonymous and file mappings actually come from.
+///
+/// The low half is a dead end for address space. A process shares it with
+/// nk's own identity map -- the devices at 0x0800_0000..0x0a20_0000 and RAM
+/// from 0x4000_0000 up -- which leaves under a gigabyte, with a hole through
+/// the middle of it. WebKit asks for a 128MB anonymous arena on a window
+/// that is already down to 18MB of contiguous room, and there is no
+/// arrangement of that gigabyte in which it fits.
+///
+/// TTBR0 covers 256TB. `new_address_space` copies L0 and then replaces slot
+/// 0 with the process's own, so every other top-level slot is a private
+/// zero: nothing of nk's is there and nothing another process can see. Slot
+/// 1 is 512GiB..1TiB, and a 64GiB arena inside it is more address space than
+/// anything nk runs will ask for.
+///
+/// The image, heap and main stack stay where they are: `USER_BASE` is where
+/// a non-PIE aarch64 binary is linked, and moving it would mean relocating
+/// every executable nk loads. Only `mmap` moves.
+pub const USER_HIGH_BASE: u64 = 0x0000_0080_0000_0000;
+/// The top of the high arena, 64GiB above its base. Mappings grow down from
+/// here.
+pub const USER_HIGH_TOP: u64 = USER_HIGH_BASE + 64 * 1024 * 1024 * 1024;
+
+/// Whether a page-aligned range is somewhere a mapping may live.
+///
+/// Two disjoint answers, because there are two regions. In the high arena
+/// the only question is whether the range is inside it. In the low half the
+/// range must clear the heap below and the stack guard above, and must not
+/// cross the device window -- those are nk's own mappings, shared by every
+/// address space, and replacing one takes the machine with it.
+fn range_ok(at: u64, end: u64, brk: u64) -> bool {
+    if at & 4095 != 0 || end <= at {
+        return false;
+    }
+    if at >= USER_HIGH_BASE {
+        return end <= USER_HIGH_TOP;
+    }
+    at >= brk && end <= USER_MMAP_TOP && !(at < 0x0a20_0000 && end > 0x0800_0000)
+}
+
 /// How much stack a process starts with. One page was enough for a program
 /// written in assembly and is nowhere near enough for a libc, which sets up
 /// TLS, locale and stdio buffers before it reaches `main`. Mapped up front
@@ -159,7 +199,7 @@ pub fn run(p: &Process) -> ! {
     println!();
     // The memory layout belongs to the running task, because `brk` and `mmap`
     // are answered from whichever thread makes the call, and this is it.
-    crate::sched::set_user_memory_for(p.ttbr0, p.brk, USER_MMAP_TOP);
+    crate::sched::set_user_memory_for(p.ttbr0, p.brk, USER_HIGH_TOP);
     unsafe { enter_user(p.entry, p.stack, p.ttbr0) }
 }
 
@@ -192,9 +232,18 @@ pub extern "C" fn rust_el0_sync(frame: &mut Frame) {
     // stopping the *process* is the whole difference between the two
     // privilege levels being worth having.
     if ec != 0b010101 {
-        println!();
         let far: u64;
         unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack)) };
+        // A translation fault (DFSC 0b0001xx) inside a reservation is not a
+        // fault at all: it is the first touch of a page the program asked
+        // for with MAP_NORESERVE. Put a frame under it and retry the
+        // instruction -- the program never learns anything happened.
+        let data_abort = ec == 0b100100 || ec == 0b100101;
+        let translation = matches!(esr & 0x3f, 0x04..=0x07);
+        if data_abort && translation && crate::reserve::fault_in(far) {
+            return;
+        }
+        println!();
         // ESR decoded: EC (top 6 bits), IL (bit 25: 32 or 16-bit insn),
         // ISS low 6 bits for aborts (DFSC: 0b100001 alignment, 0b100100
         // translation L0, 0b100101 L1, 0b100110 L2, 0b100111 L3, 0b101001
@@ -674,6 +723,7 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64,
     // and an unrecognised flag here is invisible in a log that only reports
     // -ENOMEM.
     const MAP_NORESERVE: u64 = 0x4000;
+    let _ = MAP_NORESERVE;
     if flags & !(0x1 | 0x2 | 0x10 | 0x20 | 0x800 | 0x1000 | MAP_NORESERVE | 0x20000) != 0 {
         return -95; // -EOPNOTSUPP: an unknown flag, not a guess
     }
@@ -682,6 +732,7 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64,
     // holder that maps them, no file behind them. With MAP_ANONYMOUS the fd
     // is ignored, by the same rule Linux applies.
     let anonymous = flags & 0x20 != 0;
+
     let len = length.div_ceil(4096)*4096;
     let fixed = flags & 0x10 != 0;
     // Non-fixed mappings draw from the address space's shared pool, reserved
@@ -715,7 +766,7 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64,
     };
     // The current low-half layout still contains QEMU's devices. Never
     // replace those inherited mappings, even for a caller using MAP_FIXED.
-    if at & 4095 != 0 || at < brk || end > USER_MMAP_TOP || (at < 0x0a20_0000 && end > 0x0800_0000) {
+    if !range_ok(at, end, brk) {
         let (_, _, next0) = crate::sched::user_memory();
         crate::println!(
             "  mmapfail range len {:#x} at {:#x} end {:#x} brk {:#x} mmap_next {:#x} flags {:#x} fd {} elr {:#x}",
@@ -792,6 +843,22 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64,
     #[repr(C)]
     struct IoVec { base: u64, len: u64 }
 
+    // MAP_NORESERVE on an anonymous mapping means the caller is claiming
+    // address space it may never touch, and populating it eagerly is exactly
+    // what the flag asks us not to do. Record it and map nothing; the first
+    // touch of each page faults and `reserve::fault_in` puts a frame there.
+    //
+    // Not for file mappings: those have contents to fetch, and nothing has
+    // asked for them lazily.
+    if anonymous && flags & MAP_NORESERVE != 0 && !fixed && prot & 7 != 0 {
+        if crate::reserve::add(at, len, prot & 2 != 0, prot & 4 != 0) {
+            crate::sched::set_user_mmap_next(at);
+            return at as i64;
+        }
+        // The table is full. Fall through and populate it the old way rather
+        // than refuse: slower and correct beats fast and wrong.
+    }
+
     let mut pages: Vec<*mut u8> = Vec::new();
     let mut iov: Vec<IoVec> = Vec::new();
     let mut off = 0u64;
@@ -851,13 +918,18 @@ fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64,
 /// them, so unmapping drops a pool reference (writing back first) and only
 /// removes the caller's page-table entries, without freeing.
 fn sys_munmap(addr: u64, len: u64) -> i64 {
+    crate::reserve::forget(addr & !4095, len.div_ceil(4096) * 4096);
     let (_, brk_min, _) = crate::sched::user_memory();
     if brk_min == 0 || len == 0 {
         return -22; // -EINVAL
     }
     let start = addr & !(PAGE as u64 - 1);
     let end = (addr + len).div_ceil(PAGE as u64) * PAGE as u64;
-    if start < brk_min || end <= start || end > USER_STACK_TOP {
+    let high = start >= USER_HIGH_BASE;
+    if end <= start
+        || (high && end > USER_HIGH_TOP)
+        || (!high && (start < brk_min || end > USER_STACK_TOP))
+    {
         return -22;
     }
     // Release pool references first, over the page-rounded range. A shared
@@ -1442,7 +1514,7 @@ fn sys_execve(path: u64, argv: u64, envp: u64) -> i64 {
         // the new program a pointer into memory that has just been freed.
         core::arch::asm!("msr tpidr_el0, xzr", options(nomem, nostack));
     }
-    crate::sched::set_user_memory_for(p.ttbr0, p.brk, USER_MMAP_TOP);
+    crate::sched::set_user_memory_for(p.ttbr0, p.brk, USER_HIGH_TOP);
     println!("  execve: replaced this process with {} bytes at {:#x}", bytes.len(), p.entry);
     unsafe { enter_user_fresh(p.entry, p.stack, p.ttbr0, crate::sched::kernel_stack_top() as u64) }
 }
@@ -1460,7 +1532,8 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
         return -22; // -EINVAL
     }
     let size = len.div_ceil(PAGE as u64) * PAGE as u64;
-    if addr >= USER_STACK_TOP || size > USER_STACK_TOP - addr {
+    let top = if addr >= USER_HIGH_BASE { USER_HIGH_TOP } else { USER_STACK_TOP };
+    if addr >= top || size > top - addr {
         return -22;
     }
     let exec = prot & PROT_EXEC != 0;

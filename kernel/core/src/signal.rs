@@ -562,7 +562,12 @@ pub fn sigreturn(frame: &mut crate::user::Frame) -> i64 {
     // guess costs one word probe, not a garbage restore.
     let mut uc_at = 0u64;
     for base in [frame.sp.checked_add(128).unwrap_or(0), frame.x[2]] {
-        if base == 0 || base & 15 != 0 || base >= crate::user::USER_STACK_TOP {
+        let ceiling = if base >= crate::user::USER_HIGH_BASE {
+            crate::user::USER_HIGH_TOP
+        } else {
+            crate::user::USER_STACK_TOP
+        };
+        if base == 0 || base & 15 != 0 || base >= ceiling {
             continue;
         }
         let mut flag_b = [0u8; 8];

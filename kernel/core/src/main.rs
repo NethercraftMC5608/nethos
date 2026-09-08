@@ -37,6 +37,7 @@ pub mod linux;
 pub mod mmio;
 pub mod paging;
 pub mod psci;
+pub mod reserve;
 pub mod sched;
 pub mod selftest;
 pub mod shm;
