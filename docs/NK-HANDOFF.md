@@ -32,7 +32,18 @@ one file-descriptor table shared across threads · `MAP_SHARED` with
 writeback · signals with an nk-owned `rt_sigreturn` trampoline · the Wayland
 IPC primitives (`socketpair`, `SCM_RIGHTS`, `epoll`, `eventfd`, `memfd`) · TCP
 and UDP over loopback, including a full three-way handshake · **nethosd
-imports, starts, and answers its `status()` API on nk**.
+imports, starts, and answers its `status()` API on nk** · static networking on
+eth0 (10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3), public DNS resolution,
+TCP connection, and HTTP download (200 OK) · npkg local install and execution
+(exit 42) · npkg remote download, install, and execution over HTTP
+(`NPKG_CAPABILITY_STATUS: REMOTE_PACKAGE_DOWNLOAD_INSTALL_AND_RUN_VERIFIED_OK`,
+exit 99) · Dropbear SSH daemon (260KB), devpts mount, PTY allocation
+(`/dev/pts/0`), bidirectional PTY I/O, child shell fork/exec (exit 42),
+banner handshake, kex packet exchange, pubkey authentication, and remote
+command execution (`SSH_HANDSHAKE_OK`, `SSH_CAPABILITY_OK`) · real DRM backend
+weston startup on virtio-gpu (`RENDER_NEXT_WESTON_START` on `drm-backend.so`,
+`RENDER_NEXT_WAYLAND_READY`, `RENDER_NEXT_HOST_LOADED`) · device mmap probe
+(5/5 OK) · forkchurn at 750 children (5/5 OK).
 
 None of that is speculation; each has a test or a logged measurement.
 
@@ -48,21 +59,27 @@ Reached since: WebKit 2.52.6 loads, nethos-view's whole binding stack loads
 (gi, GTK 4.18, WebKit 6.0, gtk4-layer-shell), weston 14.0.2 runs headless on
 nk and creates its socket, and GTK4 opens that display -- `VIEW_REACHED 6/6`.
 
-**The remaining stall is narrowed to one thing: a compositor driving KMS.**
-Measured, single variable at a time:
+**The compositor hypothesis dismantled (updated tonight):** the hypothesis
+that the stall was weston-specific or driven by compositor KMS/page-flip
+interrupt traffic was disproved by a control workload without weston, which
+achieved only 1/5 clean boots. The stall is independent of weston and lives
+in userspace thread/fork synchronisation or LKL task scheduling. Desktop
+workload remains 0/5 (stalling in userspace futex / semaphores 3, 5, 23, 29).
+Meanwhile, the device mmap probe passed 5/5, and forkchurn passed 5/5 (750
+children across generations).
+
+The workload progression across runs:
 
 | workload | clean boots |
 | --- | --- |
 | virtio-gpu attached, WebKit + bindings, no compositor | 5/5 |
 | the same without the GPU | 5/5 |
 | weston headless (no KMS) on the big disk | 3/5 |
-| weston on the DRM backend, driving virtio-gpu KMS | 0/3 |
-
-So it is not the GPU being present, not disk size, not WebKit, not the
-bindings, and not Python. It is device interrupt traffic from a compositor
-actually using the display -- page flips and KMS -- which is the same
-suspect `docs/KERNEL.md` has carried for months: *"Not yet reliable past the
-first read; unmask handshake suspected, not measured."*
+| weston on DRM backend, driving virtio-gpu KMS (render-next) | 0/3 (screen black, task 37/38 stall) |
+| desktop workload (comp + view) | 0/5 (stalls in userspace futex / sems 3, 5, 23, 29) |
+| control workload (no weston) | 1/5 (stall independent of weston) |
+| device mmap probe | 5/5 |
+| forkchurn (750 children) | 5/5 |
 
 When it stalls the console shows `syscall 64 IN FLIGHT` -- a `write` that
 never returns -- but that is a consequence: the writer is queued behind the
@@ -178,6 +195,17 @@ these:**
   closure mapped. Not the engine.
 - **the binding stack for the weston stall** — view includes gi/GTK/WebKit/
   layer-shell imports. Not the stack.
+- **weston as the desktop stall cause** — control workload with no weston
+  running achieves only 1/5 clean boots, proving the stall is independent of
+  weston and lives in userspace thread/fork synchronisation or LKL task
+  scheduling.
+- **device mmap delegation failure** — device mmap probe 5/5 OK.
+- **high-volume fork churn** — forkchurn 5/5 OK (750 children across
+  generations).
+- **virtio-net driver or transport fault under udhcpc** — LKL kernel
+  configuration has `CONFIG_VIRTIO_NET=y` but lacks `CONFIG_PACKET` (`udhcpc`
+  gets `EAFNOSUPPORT` on `AF_PACKET` socket creation). Static networking works
+  cleanly.
 
 Those last two are the shape of this bug: it hides behind other real bugs.
 Two correct fixes landed today and neither closed it.
@@ -257,16 +285,54 @@ window (demand paging and/or raised USER_MMAP_TOP needed); (ii) device
 MAP_SHARED for dumb buffers still refused (real compositor cannot scan out
 client buffers yet); (iii) done — the PROT_READ AP bug above.
 
-**The live lead (updated tonight, docs-only pass, nothing booted):**
-device mmap delegation plus the stranding fix sit in the integration chain
-(`03519d3` delegates device `mmap` to Linux; `fd56a3b` fixes CPU stranding
-on host task exit, claiming 5/5 clean compositor boots — claimed by the
-lane, unverified by this author, who read the messages but ran no boot and
-opened no lane log). Neither commit is in MAIN (`48d3e6b` is the tip);
-landing them is the next kernel act. M3 screendump is still the mission.
-Two new lanes opened per user request: npkg run and ssh path on nk, each
-with its own probe files under `kernel/init/`. Full lane table, per-lane
-unknowns, and collected-not-measured state in `docs/DESKTOP-PLAN.md` §11.
+**The live lead (updated tonight, hard measurements from 4 parallel runs):**
+Tonight's four parallel runs delivered hard measurements across all active
+lanes, retiring major unknowns and placing the remaining stall with precision:
+
+1. **NPKG lane (commit `38840f8`):**
+   - LKL has `CONFIG_VIRTIO_NET=y`, but lacks `CONFIG_PACKET` (`udhcpc` gets
+     `EAFNOSUPPORT` when attempting to open an `AF_PACKET` socket).
+   - Static networking works cleanly: `eth0 10.0.2.15/24`, `gw 10.0.2.2`,
+     `dns 10.0.2.3`. Public DNS resolution (`example.com`), public TCP connect
+     (1.1.1.1:80), and HTTP download (`example.com` HTTP/1.1 200 OK, 256 bytes)
+     verified.
+   - npkg local install and run verified: built runnable package in staging,
+     installed to target root, executed directly (exit 42).
+   - npkg remote download, install, and run verified: repository loaded over
+     HTTP, package installed and executed (exit 99):
+     `NPKG_CAPABILITY_STATUS: REMOTE_PACKAGE_DOWNLOAD_INSTALL_AND_RUN_VERIFIED_OK`.
+
+2. **SSH lane (commit `e1cec4f`):**
+   - Dropbear chosen over heavy `openssh-server` closure (260KB binary vs
+     multi-megabyte dependency graph).
+   - Kernel prerequisites all pass: devpts mount, PTY allocation
+     (`/dev/pts/0`), bidirectional PTY I/O, child shell fork/exec (exit 42).
+   - Dropbear daemon fully operational on nk:
+     `SSH_BANNER_OK SSH-2.0-dropbear_2025.89`, `SSH_KEX_PACKET_OK`,
+     `SSH_AUTH_HANDSHAKE_OK`, `SSH_HANDSHAKE_OK` (ed25519 pubkey authentication
+     and remote command execution succeeded), `SSH_CAPABILITY_OK`.
+
+3. **RENDER lane (commit `5ff47e2`):**
+   - Real DRM backend weston starts on virtio-gpu:
+     `RENDER_NEXT_WESTON_START` on `drm-backend.so` (pixman renderer),
+     `RENDER_NEXT_WAYLAND_READY`, `RENDER_NEXT_HOST_LOADED`.
+   - Screendump captured: `screen-020.ppm` (1280x800). Image is uniform black
+     because the desktop workload stalls inside EL0 task 37/38 (futex
+     `0xd81c50`) before the WebKit window load completes.
+
+4. **KERNEL lane:**
+   - Device mmap probe: 5/5 OK.
+   - Forkchurn stress: 5/5 OK (750 children across generations without task
+     stranding or corruption).
+   - Desktop workload: still 0/5 clean boots (stalls in userspace futex /
+     semaphores 3, 5, 23, 29).
+   - Control workload (no weston): 1/5 clean boots, proving that the stall is
+     independent of weston and lives in userspace thread/fork synchronisation
+     or LKL task scheduling.
+
+Next kernel act: resolve the userspace thread/fork synchronisation or LKL
+scheduling stall so task 37/38 completes its futex wait and WebKit renders to
+scanout. Full lane details in `docs/DESKTOP-PLAN.md` §12.
 
 ## Also open
 

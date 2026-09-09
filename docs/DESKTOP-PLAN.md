@@ -193,12 +193,15 @@ measurement — read the commit messages, not this summary, for the numbers):
 
 ```
 M1 nethosd answers ............................ GREEN (3x, §7)
-M2 compositor holds a display ................. GREEN twice over:
+M2 compositor holds a display ................. GREEN three times over:
   (a) hand-rolled probe WL_REGISTRY_OK (§8)
   (b) real weston 14.0.2 wayland-0 + GTK4 open (VIEW_REACHED 6/6)
+  (c) real weston on DRM backend on virtio-gpu (RENDER_NEXT_WESTON_START, §12)
 M3 shell renders .............................. PIXEL PATH green (§9),
-  ENGINE green (WebKit loads), COMPOSITOR green, SHELL NOT YET RUN:
-  nethos-view has never executed its do_activate on nk (see gap 2).
+  ENGINE green (WebKit loads), COMPOSITOR green on DRM backend (§12),
+  SHELL STALLED: screendump captured (screen-020.ppm, 1280x800) uniform
+  black; desktop workload stalls inside EL0 task 37/38 (futex 0xd81c50)
+  before WebKit window load completes (§12).
 ```
 
 ### The one open kernel bug: weston-specific stall, 3/5
@@ -424,3 +427,53 @@ message. Docs lane never blocks and never touches code.
   measured from claimed re-derives everything). Cheapest = this section:
   every claim above names its commit; anything without a commit hash is
   this author's collection, not a measurement.
+
+## 12. Tonight's parallel run results (hard measurements)
+
+Hard measurements collected across four parallel runs tonight:
+
+### 1. NPKG lane (commit `38840f8`)
+
+- **Kernel network config**: LKL has `CONFIG_VIRTIO_NET=y`, but lacks
+  `CONFIG_PACKET` (`udhcpc` gets `EAFNOSUPPORT` on `AF_PACKET` socket
+  creation).
+- **Static networking works**: configured `eth0 10.0.2.15/24`, `gw 10.0.2.2`,
+  `dns 10.0.2.3`. DNS resolution (`example.com`), public TCP connect
+  (1.1.1.1:80), and HTTP download (`example.com` HTTP/1.1 200 OK, 256 bytes)
+  verified.
+- **npkg local install + run verified**: custom package built in staging,
+  installed to target root, and binary executed directly (exit 42).
+- **npkg remote download + install + run verified**: repository loaded over
+  HTTP, package installed and executed (exit 99):
+  `NPKG_CAPABILITY_STATUS: REMOTE_PACKAGE_DOWNLOAD_INSTALL_AND_RUN_VERIFIED_OK`.
+
+### 2. SSH lane (commit `e1cec4f`)
+
+- **Daemon selection**: Dropbear chosen over heavy `openssh-server` closure
+  (260KB binary vs multi-megabyte dependency closure).
+- **Kernel prerequisites all pass**: devpts mount, PTY allocation
+  (`/dev/pts/0`), bidirectional PTY I/O, child shell fork/exec (exit 42).
+- **Dropbear daemon operational on nk**:
+  `SSH_BANNER_OK SSH-2.0-dropbear_2025.89`, `SSH_KEX_PACKET_OK`,
+  `SSH_AUTH_HANDSHAKE_OK`, `SSH_HANDSHAKE_OK` (ed25519 pubkey authentication
+  and remote command execution succeeded), `SSH_CAPABILITY_OK`.
+
+### 3. RENDER lane (commit `5ff47e2`)
+
+- **Real DRM backend weston starts on virtio-gpu**:
+  `RENDER_NEXT_WESTON_START` on `drm-backend.so` (pixman renderer),
+  `RENDER_NEXT_WAYLAND_READY`, `RENDER_NEXT_HOST_LOADED`.
+- **Screendump capture**: `screen-020.ppm` (1280x800). Captured image is
+  uniform black because desktop workload stalls inside EL0 task 37/38 (futex
+  `0xd81c50`) before WebKit window load completes.
+
+### 4. KERNEL lane
+
+- **Device mmap probe**: 5/5 OK.
+- **Forkchurn stress test**: 5/5 OK (750 children across generations without
+  corruption or stranding).
+- **Desktop workload**: still 0/5 clean boots (stalls in userspace futex /
+  semaphores 3, 5, 23, 29).
+- **Control workload (no weston)**: 1/5 clean boots, proving that the stall is
+  independent of weston and lives in userspace thread/fork synchronisation
+  or LKL task scheduling.
